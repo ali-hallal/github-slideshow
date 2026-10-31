@@ -72,12 +72,17 @@ jobs:
           working-directory: ProCam
           script: |
             adb logcat -c
-            ./gradlew connectedDebugAndroidTest --no-daemon || (adb logcat -d -v time ProCam:V ProCamTest:V AndroidRuntime:E CameraService:W '*:S' | tail -300; exit 1)
-            adb logcat -d -v time ProCam:V ProCamTest:V AndroidRuntime:E '*:S' | tail -100
+            ./gradlew connectedDebugAndroidTest --no-daemon || touch tests-failed
+            adb logcat -d -v time ProCam:V ProCamTest:V AndroidRuntime:E CameraService:W '*:S' | tail -300
+            adb pull /sdcard/Download/procam-screens screens || true
+            for f in screens/*.jpg; do echo "=== SCREEN $(basename $f)"; base64 -w 2000 "$f"; echo "=== END"; done
+            test ! -f tests-failed
 
       - name: Upload test report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ProCam-emulator-test-report
-          path: ProCam/app/build/reports/androidTests/
+          path: |
+            ProCam/app/build/reports/androidTests/
+            ProCam/screens/
