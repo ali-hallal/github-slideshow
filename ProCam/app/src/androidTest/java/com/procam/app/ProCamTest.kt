@@ -32,6 +32,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.rule.GrantPermissionRule
 import org.junit.Assert.assertEquals
+import kotlin.math.abs
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Assume.assumeTrue
@@ -268,6 +269,37 @@ class ProCamTest {
         waitFor("group finished", 15_000) { !shutterBusy() }
         SystemClock.sleep(2000)
         assertEquals("exactly one photo kept from the burst", before + 1, count("image/jpeg"))
+    }
+
+    @Test
+    fun shakeMeterMath() {
+        // Typical main camera: 6.8 mm lens on a 9.8 mm wide sensor, normal hand shake 0.02 rad/s.
+        val safe = ShakeMeter.safeShutterNs(0.02f, 6.8f, 9.8f, zoom = 1f, ois = false)
+        Log.i(TAG, "safe shutter: ${Stops.shutterLabel(safe)}")
+        assertTrue("about 1/30 s: ${Stops.shutterLabel(safe)}", safe in 20_000_000L..60_000_000L)
+        // Zooming in 3x needs a 3x faster shutter; OIS allows 4x slower; shakier hands need faster.
+        val zoomed = ShakeMeter.safeShutterNs(0.02f, 6.8f, 9.8f, zoom = 3f, ois = false)
+        assertTrue(abs(zoomed * 3 - safe) < safe / 50)
+        assertTrue(ShakeMeter.safeShutterNs(0.02f, 6.8f, 9.8f, 1f, ois = true) > safe * 3)
+        assertTrue(ShakeMeter.safeShutterNs(0.08f, 6.8f, 9.8f, 1f, ois = false) < safe / 3)
+        // Still phone: any shutter is fine.
+        assertEquals(ShakeMeter.MAX_SAFE_NS, ShakeMeter.safeShutterNs(0f, 6.8f, 9.8f, 1f, false))
+    }
+
+    @Test
+    fun shakeMeterShows() {
+        waitForCamera()
+        val manager = context.getSystemService(android.hardware.SensorManager::class.java)
+        assumeTrue("no gyroscope", manager.getDefaultSensor(android.hardware.Sensor.TYPE_GYROSCOPE) != null)
+        waitFor("shake meter visible") {
+            var shown = false
+            activityRule.scenario.onActivity { shown = it.findViewById<View>(R.id.shakeView).visibility == View.VISIBLE }
+            shown
+        }
+        var label = ""
+        activityRule.scenario.onActivity { label = it.findViewById<View>(R.id.shakeView).contentDescription.toString() }
+        Log.i(TAG, "shake meter: $label")
+        assertTrue("phone lying still reads steady: $label", label.contains("steady", ignoreCase = true))
     }
 
     @Test

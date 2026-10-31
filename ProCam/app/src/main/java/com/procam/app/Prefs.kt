@@ -41,6 +41,11 @@ class Prefs(context: Context) {
     var location: Boolean
         get() = sp.getBoolean("location", false)
         set(v) = sp.edit().putBoolean("location", v).apply()
+    /** Wait (briefly) for steady hands before taking the photo. */
+    var steadyShot: Boolean
+        get() = sp.getBoolean("steadyShot", true)
+        set(v) = sp.edit().putBoolean("steadyShot", v).apply()
+
     var shutterSound: Boolean
         get() = sp.getBoolean("shutterSound", true)
         set(v) = sp.edit().putBoolean("shutterSound", v).apply()

@@ -88,6 +88,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private lateinit var modeRow: View
     private lateinit var uiSimple: TextView
     private lateinit var uiPro: TextView
+    private lateinit var shakeView: ShakeView
 
     private lateinit var prefs: Prefs
     private lateinit var camera: CameraController
@@ -141,6 +142,11 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private var noFaceSince = 0L
     private var readyStreak = 0
 
+    // Shake meter / steady shot
+    private lateinit var shake: ShakeMeter
+    private var steadyWaitStart = 0L
+    private var pressRatio = Float.MAX_VALUE
+
     private val simple get() = !prefs.uiPro
     private val groupMode get() = simple && prefs.intent == "GROUP"
 
@@ -158,6 +164,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         camera = CameraController(this, this)
         cameraIds = camera.primaryCameras()
         sensorManager = getSystemService(SensorManager::class.java)
+        shake = ShakeMeter(this)
         locationTracker = LocationTracker(this) { camera.setLocation(it) }
         sound.load(MediaActionSound.SHUTTER_CLICK)
         orientationListener = object : OrientationEventListener(this) {
@@ -182,6 +189,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
         }
         if (prefs.location) locationTracker.start() else locationTracker.stop()
+        shake.start()
         mainHandler.post(analysisTick)
         if (hasCameraPermission()) {
             startCamera()
@@ -205,6 +213,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         orientationListener.disable()
         sensorManager.unregisterListener(this)
         locationTracker.stop()
+        shake.stop()
+        mainHandler.removeCallbacks(steadyTick)
         mainHandler.removeCallbacks(analysisTick)
         prefs.saveShot(settings)
         // The camera is closed now: ignore the shutter and clear live data until it reopens.
@@ -328,6 +338,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         modeRow = findViewById(R.id.modeRow)
         uiSimple = findViewById(R.id.uiSimple)
         uiPro = findViewById(R.id.uiPro)
+        shakeView = findViewById(R.id.shakeView)
 
         // Preview starts right below the top bar (not hidden behind it)...
         topBar.addOnLayoutChangeListener { v, _, _, _, bottom, _, _, _, _ ->
@@ -638,7 +649,65 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private fun capture() {
         capturing = true
         shutter.busy = true
+        if (prefs.steadyShot && shakeRatio() < 1f) {
+            // Hands are shaking: wait a moment for a steadier instant instead of firing blurry.
+            steadyWaitStart = SystemClock.uptimeMillis()
+            showGroupStatus("Hold still…")
+            mainHandler.post(steadyTick)
+        } else {
+            fire()
+        }
+    }
+
+    private fun fire() {
+        pressRatio = shakeRatio()
+        if (!groupProcessing) groupStatus.visibility = View.GONE
         camera.takePicture(deviceOrientation)
+    }
+
+    private val steadyTick = object : Runnable {
+        override fun run() {
+            if (!capturing) return
+            if (shakeRatio() >= 1f || SystemClock.uptimeMillis() - steadyWaitStart > STEADY_WAIT_MS) fire()
+            else mainHandler.postDelayed(this, 40)
+        }
+    }
+
+    /** Exposure the camera is using / will use right now. */
+    private fun currentExposureNs(): Long? =
+        if (settings.manualExposure && !settings.shutterAuto) settings.exposureNs else liveExposure ?: settings.exposureNs.takeIf { settings.manualExposure }
+
+    /** Slowest sharp shutter for the current hand shake, or null if unknown. */
+    private fun safeShutterNs(): Long? {
+        val c = caps ?: return null
+        if (!shake.available) return null
+        return ShakeMeter.safeShutterNs(shake.omega, c.focalLength ?: return null, c.sensorWidthMm, settings.zoom, c.ois)
+    }
+
+    /** > 1 means the current shutter is fast enough for how much the hands are moving. */
+    private fun shakeRatio(): Float {
+        val safe = safeShutterNs() ?: return Float.MAX_VALUE
+        val exp = currentExposureNs() ?: return Float.MAX_VALUE
+        return safe.toFloat() / exp.coerceAtLeast(1L)
+    }
+
+    private fun updateShakeMeter() {
+        val safe = safeShutterNs()
+        if (safe == null) {
+            shakeView.visibility = View.GONE
+            return
+        }
+        shakeView.visibility = View.VISIBLE
+        val r = shakeRatio()
+        val sharpTo = if (safe >= 1_000_000_000L) "sharp to 1s+" else "sharp to ${Stops.shutterLabel(safe)}"
+        when {
+            shake.omega < ShakeMeter.TRIPOD_OMEGA -> shakeView.show(5, ShakeView.GREEN, "Rock steady", "any shutter speed")
+            r >= 2f -> shakeView.show(5, ShakeView.GREEN, "Steady", sharpTo)
+            r >= 1f -> shakeView.show(4, ShakeView.GREEN, "Steady", sharpTo)
+            r >= 0.5f -> shakeView.show(3, ShakeView.YELLOW, "A bit shaky", sharpTo)
+            r >= 0.25f -> shakeView.show(2, ShakeView.ORANGE, "Shaky", "brace your elbows")
+            else -> shakeView.show(1, ShakeView.RED, "Too shaky", "lean on something")
+        }
     }
 
     private val countdownTick = object : Runnable {
@@ -726,6 +795,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             groupProcessing = false
             groupStatus.visibility = View.GONE
         }
+        if (success && pressRatio < BLURRY_RATIO) {
+            toast("This one may be blurry: your hands moved. Brace your elbows and try again.")
+        }
+        pressRatio = Float.MAX_VALUE
         capturing = false
         shutter.busy = false
         if (!success) toast("Capture failed")
@@ -906,6 +979,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             histogram.setData(analyzer)
             overlay.setAnalysis(if (marks) analyzer.overlay else null)
             updateMeter(c)
+            updateShakeMeter()
             if (groupMode) analyzeGroup()
         }
     }
@@ -1182,6 +1256,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         private const val READY_FRAMES = 2
         private const val GROUP_TIMEOUT_MS = 6000L
         private const val NO_FACE_GIVE_UP_MS = 1500L
+        private const val STEADY_WAIT_MS = 800L
+        private const val BLURRY_RATIO = 0.5f
         private const val FOCUS_STEPS = 100
         private const val ANALYSIS_INTERVAL_MS = 150L
         private const val ANALYSIS_WIDTH = 270

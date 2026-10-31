@@ -109,6 +109,8 @@ class SettingsActivity : Activity() {
         section("Controls")
         row(Option("Volume buttons", "What the volume keys do in ProCam",
             listOf("Take photo", "Zoom", "Volume"), { prefs.volumeKeys }, { prefs.volumeKeys = it }))
+        row(Option("Steady shot", "If your hands are shaking, wait a moment for them to settle before taking the photo",
+            listOf("Off", "On"), { if (prefs.steadyShot) 1 else 0 }, { prefs.steadyShot = it == 1 }))
         row(Option("Shutter sound", "May be forced on in some countries",
             listOf("Off", "On"), { if (prefs.shutterSound) 1 else 0 }, { prefs.shutterSound = it == 1 }))
         row(Option("Haptics", "Vibrate on shutter and dial steps",

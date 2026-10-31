@@ -482,6 +482,9 @@ class CameraController(context: Context, private val listener: Listener) {
             else -> b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
         }
 
+        // ---- optical image stabilisation
+        if (c.ois) b.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)
+
         // ---- white balance
         val awb = if (c.awbModes.contains(s.wb.awbMode)) s.wb.awbMode else CameraMetadata.CONTROL_AWB_MODE_AUTO
         b.set(CaptureRequest.CONTROL_AWB_MODE, awb)

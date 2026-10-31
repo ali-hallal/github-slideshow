@@ -92,6 +92,10 @@ data class CameraCaps(
     val faceDetectMode: Int,
     /** Camera can prioritise faces for focus/exposure/white balance by itself. */
     val facePriorityScene: Boolean,
+    /** Sensor width in mm (for the shake meter's blur maths). */
+    val sensorWidthMm: Float,
+    /** Optical image stabilisation available. */
+    val ois: Boolean,
 ) {
     val isFront get() = facing == CameraCharacteristics.LENS_FACING_FRONT
     val canManualFocus get() = manualSensor && minFocusDistance > 0f
@@ -130,6 +134,9 @@ data class CameraCaps(
                     .maxOrNull() ?: CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF,
                 facePriorityScene = (c.get(CameraCharacteristics.CONTROL_AVAILABLE_SCENE_MODES) ?: IntArray(0))
                     .contains(CameraMetadata.CONTROL_SCENE_MODE_FACE_PRIORITY),
+                sensorWidthMm = c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)?.width ?: 0f,
+                ois = (c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION) ?: IntArray(0))
+                    .contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON),
             )
         }
 
