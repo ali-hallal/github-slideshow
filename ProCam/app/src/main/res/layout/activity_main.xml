@@ -25,6 +25,18 @@
             android:layout_height="0dp"
             android:layout_gravity="top|center_horizontal" />
 
+        <!-- Lens / zoom buttons float on the bottom edge of the picture (positioned in code). -->
+        <LinearLayout
+            android:id="@+id/lensRow"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|center_horizontal"
+            android:background="@drawable/lens_row_bg"
+            android:gravity="center"
+            android:orientation="horizontal"
+            android:padding="3dp"
+            android:visibility="gone" />
+
         <View
             android:id="@+id/shutterFlash"
             android:layout_width="0dp"
@@ -67,6 +79,11 @@
             <TextView android:id="@+id/btnTimer" style="@style/TopButton" />
             <TextView android:id="@+id/btnRaw" style="@style/TopButton" android:text="RAW" />
             <TextView android:id="@+id/btnZebra" style="@style/TopButton" android:text="ZEBRA" />
+            <TextView
+                android:id="@+id/btnMode"
+                style="@style/TopButton"
+                android:contentDescription="Switch between Simple and Pro"
+                android:text="PRO" />
             <TextView
                 android:id="@+id/btnSettings"
                 style="@style/TopButton"
@@ -171,15 +188,6 @@
         android:paddingTop="8dp"
         android:paddingBottom="12dp">
 
-        <LinearLayout
-            android:id="@+id/lensRow"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginBottom="6dp"
-            android:gravity="center"
-            android:orientation="horizontal"
-            android:visibility="gone" />
-
         <!-- SIMPLE mode: say what you want ("intents") instead of dialing numbers. -->
         <HorizontalScrollView
             android:id="@+id/intentScroll"
@@ -227,7 +235,7 @@
             android:layout_marginTop="8dp"
             android:layout_marginEnd="24dp"
             android:gravity="center"
-            android:minLines="2"
+            android:maxLines="2"
             android:textColor="@color/dim"
             android:textSize="13sp" />
 
@@ -287,7 +295,7 @@
 
         <FrameLayout
             android:layout_width="match_parent"
-            android:layout_height="96dp">
+            android:layout_height="84dp">
 
             <ImageView
                 android:id="@+id/thumbnail"
@@ -320,18 +328,5 @@
                 android:textColor="@color/white"
                 android:textSize="26sp" />
         </FrameLayout>
-
-        <!-- Simple | Pro switch -->
-        <LinearLayout
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center_horizontal"
-            android:background="@drawable/segment_bg"
-            android:orientation="horizontal"
-            android:padding="3dp">
-
-            <TextView android:id="@+id/uiSimple" style="@style/SegmentButton" android:text="Simple" />
-            <TextView android:id="@+id/uiPro" style="@style/SegmentButton" android:text="Pro" />
-        </LinearLayout>
     </LinearLayout>
 </FrameLayout>

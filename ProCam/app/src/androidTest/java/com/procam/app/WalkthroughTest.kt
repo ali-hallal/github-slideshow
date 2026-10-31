@@ -78,7 +78,7 @@ class WalkthroughTest {
         onView(withId(R.id.intentAuto)).perform(click())
 
         // On to the Pro controls.
-        onView(withId(R.id.uiPro)).perform(click())
+        onView(withId(R.id.btnMode)).perform(click())
         SystemClock.sleep(1000)
         screenshot("launch_auto_mode")
 

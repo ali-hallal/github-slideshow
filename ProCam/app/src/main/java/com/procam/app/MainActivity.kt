@@ -86,8 +86,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private lateinit var intentHint: TextView
     private lateinit var chipScroll: View
     private lateinit var modeRow: View
-    private lateinit var uiSimple: TextView
-    private lateinit var uiPro: TextView
+    private lateinit var btnMode: TextView
     private lateinit var shakeView: ShakeView
     private lateinit var intentPortrait: TextView
     private lateinit var portraitRow: View
@@ -347,8 +346,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         intentHint = findViewById(R.id.intentHint)
         chipScroll = findViewById(R.id.chipScroll)
         modeRow = findViewById(R.id.modeRow)
-        uiSimple = findViewById(R.id.uiSimple)
-        uiPro = findViewById(R.id.uiPro)
+        btnMode = findViewById(R.id.btnMode)
         shakeView = findViewById(R.id.shakeView)
         intentPortrait = findViewById(R.id.intentPortrait)
         portraitRow = findViewById(R.id.portraitRow)
@@ -366,6 +364,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         textureView.addOnLayoutChangeListener { _, left, top, right, bottom, _, _, _, _ ->
             val w = right - left
             val h = bottom - top
+            positionLensRow()
             for (v in listOf<View>(overlay, shutterFlash)) {
                 val lp = v.layoutParams as FrameLayout.LayoutParams
                 if (lp.width != w || lp.height != h) {
@@ -375,6 +374,9 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 }
             }
         }
+
+        // The controls panel changes height between Simple and Pro: keep the lens buttons above it.
+        bottomPanel.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> positionLensRow() }
 
         val topBase = topArea.paddingTop
         val bottomBase = bottomPanel.paddingBottom
@@ -461,8 +463,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         }
         btnSettings.setOnClickListener { startActivity(Intent(this, SettingsActivity::class.java)) }
 
-        uiSimple.setOnClickListener { setUiPro(false) }
-        uiPro.setOnClickListener { setUiPro(true) }
+        btnMode.setOnClickListener { setUiPro(!prefs.uiPro) }
         intentAuto.setOnClickListener { setIntent("AUTO") }
         intentGroup.setOnClickListener { setIntent("GROUP") }
         intentPortrait.setOnClickListener { setIntent("PORTRAIT") }
@@ -525,7 +526,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             settings = settings.copy(manualExposure = false, manualFocus = false)
             selected = Param.EV
         }
-        haptic(if (pro) uiPro else uiSimple, HapticFeedbackConstants.VIRTUAL_KEY)
+        haptic(btnMode, HapticFeedbackConstants.VIRTUAL_KEY)
         pushSettings()
     }
 
@@ -536,6 +537,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         overlay.setFaces(emptyList())
         groupStatus.visibility = View.GONE
         haptic(intentRowView(intent), HapticFeedbackConstants.VIRTUAL_KEY)
+        if (intent == "PORTRAIT") toast("Blurs the background · step back and use 2× for natural-looking faces")
         refreshUi()
     }
 
@@ -560,26 +562,26 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         show(infoRow, pro)
         show(btnRaw, pro)
         show(btnZebra, pro)
-        uiSimple.setBackgroundResource(if (pro) 0 else R.drawable.segment_selected_bg)
-        uiPro.setBackgroundResource(if (pro) R.drawable.segment_selected_bg else 0)
-        uiSimple.setTextColor(getColor(if (pro) R.color.dim else R.color.white))
-        uiPro.setTextColor(getColor(if (pro) R.color.white else R.color.dim))
+        // Top-bar toggle: shows where it takes you.
+        btnMode.text = if (pro) "SIMPLE" else "PRO"
 
         val intent = prefs.intent
         for ((v, on) in listOf(intentAuto to (intent == "AUTO"), intentPortrait to (intent == "PORTRAIT"), intentGroup to (intent == "GROUP"))) {
             v.setBackgroundResource(if (on) R.drawable.pill_selected_bg else R.drawable.pill_bg)
             v.setTextColor(getColor(if (on) R.color.black else R.color.white))
         }
+        // Portrait shows its blur selector in place of the hint line, keeping the panel short.
         show(portraitRow, !pro && intent == "PORTRAIT")
+        show(intentHint, !pro && intent != "PORTRAIT")
         blurButtons.forEachIndexed { i, v ->
             val on = i == prefs.portraitStrength
             v.setBackgroundResource(if (on) R.drawable.segment_selected_bg else 0)
             v.setTextColor(getColor(if (on) R.color.white else R.color.dim))
         }
         intentHint.text = when (intent) {
-            "GROUP" -> "Press once · ProCam waits until everyone's eyes are open, takes $GROUP_BURST shots and keeps the best"
-            "PORTRAIT" -> "Blurs the background behind people · tip: step back and use 2× for natural-looking faces"
-            else -> "ProCam sets everything for you · it finds faces and focuses on them"
+            "GROUP" -> "Waits until everyone's eyes are open, then keeps the best of $GROUP_BURST"
+            "PORTRAIT" -> ""
+            else -> "Finds faces and sets everything for you"
         }
     }
 
@@ -1151,11 +1153,27 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
 
     // ------------------------------------------------------------------ lens buttons
 
+    /** Floats the lens buttons just inside the bottom edge of the picture (but above the controls). */
+    private fun positionLensRow() {
+        lensRow.post {
+            val gap = (10 * resources.displayMetrics.density).toInt()
+            val pictureBottom = textureView.bottom
+            val panelTop = bottomPanel.top - previewContainer.top
+            val bottomEdge = if (panelTop in 1 until pictureBottom) panelTop else pictureBottom
+            val lp = lensRow.layoutParams as FrameLayout.LayoutParams
+            val top = (bottomEdge - lensRow.height - gap).coerceAtLeast(0)
+            if (lp.topMargin != top) {
+                lp.topMargin = top
+                lensRow.layoutParams = lp
+            }
+        }
+    }
+
     private fun buildLensRow() {
         lensRow.removeAllViews()
         val c = caps ?: return
-        val size = (40 * resources.displayMetrics.density).toInt()
-        val margin = (6 * resources.displayMetrics.density).toInt()
+        val size = (38 * resources.displayMetrics.density).toInt()
+        val margin = (3 * resources.displayMetrics.density).toInt()
         for (stop in c.lensStops) {
             val tv = TextView(this).apply {
                 gravity = Gravity.CENTER
@@ -1173,6 +1191,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         }
         lensRow.visibility = if (c.lensStops.size > 1 || c.zoomRange.upper > 1.01f) View.VISIBLE else View.GONE
         updateLensRow()
+        positionLensRow()
     }
 
     private fun updateLensRow() {

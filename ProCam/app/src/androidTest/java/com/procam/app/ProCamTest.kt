@@ -246,20 +246,20 @@ class ProCamTest {
     @Test
     fun simpleModeHidesProControls() {
         waitForCamera()
-        onView(withId(R.id.uiSimple)).perform(click())
+        setSimple(true)
         onView(withId(R.id.intentAuto)).check(matches(isDisplayed()))
         onView(withId(R.id.chipIso)).check(matches(androidx.test.espresso.matcher.ViewMatchers.withEffectiveVisibility(androidx.test.espresso.matcher.ViewMatchers.Visibility.GONE)))
         onView(withId(R.id.btnRaw)).check(matches(androidx.test.espresso.matcher.ViewMatchers.withEffectiveVisibility(androidx.test.espresso.matcher.ViewMatchers.Visibility.GONE)))
         assertTrue("Simple saved", !Prefs(context).uiPro)
         shootAndExpect("image/jpeg") { onView(withId(R.id.shutter)).perform(click()) }
-        onView(withId(R.id.uiPro)).perform(click())
+        setSimple(false)
         onView(withId(R.id.chipIso)).check(matches(isDisplayed()))
     }
 
     @Test
     fun groupShutterKeepsOnePhotoFromBurst() {
         waitForCamera()
-        onView(withId(R.id.uiSimple)).perform(click())
+        setSimple(true)
         onView(withId(R.id.intentGroup)).perform(click())
         val before = count("image/jpeg")
         onView(withId(R.id.shutter)).perform(click())
@@ -336,7 +336,7 @@ class ProCamTest {
     @Test
     fun portraitWithoutPersonSavesNormalPhoto() {
         waitForCamera()
-        onView(withId(R.id.uiSimple)).perform(click())
+        setSimple(true)
         onView(withId(R.id.intentPortrait)).perform(click())
         onView(withId(R.id.blurStrong)).perform(click())
         assertEquals(2, Prefs(context).portraitStrength)
@@ -346,6 +346,24 @@ class ProCamTest {
         waitFor("finished", 15_000) { !shutterBusy() }
         SystemClock.sleep(1500)
         assertEquals("exactly one photo", before + 1, count("image/jpeg"))
+    }
+
+    @Test
+    fun controlsDoNotCoverThePicture() {
+        waitForCamera()
+        for (simple in listOf(true, false)) {
+            setSimple(simple)
+            if (simple) onView(withId(R.id.intentPortrait)).perform(click()) // the tallest Simple layout
+            SystemClock.sleep(800)
+            val picture = screenRect(R.id.textureView)
+            val panel = screenRect(R.id.bottomPanel)
+            val lens = screenRect(R.id.lensRow)
+            Log.i(TAG, "simple=$simple picture=$picture panel=$panel lens=$lens")
+            assertTrue("controls overlap the picture (simple=$simple): picture=$picture panel=$panel", panel.top >= picture.bottom - 2)
+            if (lens.height() > 0) {
+                assertTrue("lens buttons sit on the picture: $lens in $picture", lens.bottom <= picture.bottom && lens.top >= picture.top)
+            }
+        }
     }
 
     @Test
@@ -366,6 +384,19 @@ class ProCamTest {
     }
 
     // ------------------------------------------------------------------ helpers
+
+    /** Switches between Simple and Pro with the top-bar button. */
+    private fun setSimple(simple: Boolean) {
+        if (Prefs(context).uiPro == simple) onView(withId(R.id.btnMode)).perform(click())
+        assertEquals(!simple, Prefs(context).uiPro)
+    }
+
+    /** Screen rectangle of a view. */
+    private fun screenRect(id: Int): android.graphics.Rect {
+        val r = android.graphics.Rect()
+        activityRule.scenario.onActivity { it.findViewById<View>(id).getGlobalVisibleRect(r) }
+        return r
+    }
 
     private fun waitForCamera() {
         waitFor("camera to open", 20_000) { readout().contains("BACK") || readout().contains("FRONT") }
