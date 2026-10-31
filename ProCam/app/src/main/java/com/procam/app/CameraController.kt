@@ -18,10 +18,12 @@ import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.MeteringRectangle
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
+import android.location.Location
 import android.media.ExifInterface
 import android.media.Image
 import android.media.ImageReader
 import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
@@ -77,6 +79,10 @@ class CameraController(context: Context, private val listener: Listener) {
     private var rawInSession = false
     private var opening = false
     private var settings = ShotSettings()
+    private var output = OutputPrefs()
+    private var photoFormat = ImageFormat.JPEG
+    private var aeLocked = false
+    @Volatile private var location: Location? = null
     private var meteringRect: MeteringRectangle? = null
     private var state = State.PREVIEW
     private var precaptureFrames = 0
@@ -105,7 +111,21 @@ class CameraController(context: Context, private val listener: Listener) {
         emptyList()
     }
 
-    fun open(cameraId: String, texture: SurfaceTexture, initial: ShotSettings) {
+    /** One back and one front camera (lenses are reached via zoom); falls back to all cameras. */
+    fun primaryCameras(): List<String> {
+        val all = listCameras()
+        fun facing(id: String) = try {
+            manager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING)
+        } catch (e: Exception) {
+            null
+        }
+        val back = all.firstOrNull { facing(it) == CameraCharacteristics.LENS_FACING_BACK }
+        val front = all.firstOrNull { facing(it) == CameraCharacteristics.LENS_FACING_FRONT }
+        val primary = listOfNotNull(back, front)
+        return primary.ifEmpty { all }
+    }
+
+    fun open(cameraId: String, texture: SurfaceTexture, initial: ShotSettings, outputPrefs: OutputPrefs) {
         close()
         val t = HandlerThread("CameraThread").apply { start() }
         thread = t
@@ -113,6 +133,7 @@ class CameraController(context: Context, private val listener: Listener) {
         handler = h
         h.post {
             settings = initial
+            output = outputPrefs
             openInternal(cameraId, texture)
         }
     }
@@ -148,10 +169,28 @@ class CameraController(context: Context, private val listener: Listener) {
         handler?.post { focusAtInternal(nx, ny) }
     }
 
+    /** Focus + meter on a point, then lock exposure and focus there (AE/AF lock). */
+    fun lockAt(nx: Float, ny: Float) {
+        val h = handler ?: return
+        h.post { focusAtInternal(nx, ny) }
+        h.postDelayed({
+            if (meteringRect != null) {
+                aeLocked = true
+                if (state == State.PREVIEW) updateRepeating()
+            }
+        }, AE_LOCK_DELAY_MS)
+    }
+
+    /** GPS position written into photos, or null to not tag them. */
+    fun setLocation(loc: Location?) {
+        location = loc
+    }
+
     /** Back to continuous AF / center-weighted metering. */
     fun resetFocus() {
         handler?.post {
             meteringRect = null
+            aeLocked = false
             sendAfTrigger(CaptureRequest.CONTROL_AF_TRIGGER_CANCEL)
             updateRepeating()
         }
@@ -174,18 +213,21 @@ class CameraController(context: Context, private val listener: Listener) {
         try {
             val c = manager.getCameraCharacteristics(cameraId)
             characteristics = c
-            val cp = CameraCaps.from(cameraId, c)
+            val cp = CameraCaps.from(cameraId, c, manager)
             caps = cp
             val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
                 ?: throw IllegalStateException("No stream configuration map")
 
-            val jpegSize = pickPhotoSize(map.getOutputSizes(ImageFormat.JPEG))
+            val heicSizes = if (output.heif) map.getOutputSizes(ImageFormat.HEIC) else null
+            photoFormat = if (!heicSizes.isNullOrEmpty()) ImageFormat.HEIC else ImageFormat.JPEG
+            if (output.heif && photoFormat != ImageFormat.HEIC) postError("HEIF isn't supported on this camera, using JPEG")
+            val jpegSize = pickPhotoSize(map.getOutputSizes(photoFormat))
             val previewSize = pickPreviewSize(map.getOutputSizes(SurfaceTexture::class.java), jpegSize)
 
             texture.setDefaultBufferSize(previewSize.width, previewSize.height)
             previewSurface = Surface(texture)
 
-            jpegReader = ImageReader.newInstance(jpegSize.width, jpegSize.height, ImageFormat.JPEG, 2).apply {
+            jpegReader = ImageReader.newInstance(jpegSize.width, jpegSize.height, photoFormat, 2).apply {
                 setOnImageAvailableListener({ onJpegAvailable(it) }, handler)
             }
             if (cp.raw) {
@@ -236,6 +278,7 @@ class CameraController(context: Context, private val listener: Listener) {
         previewSurface = null
         state = State.PREVIEW
         meteringRect = null
+        aeLocked = false
     }
 
     private fun releaseOpenLock() {
@@ -333,7 +376,7 @@ class CameraController(context: Context, private val listener: Listener) {
         b.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
 
         // ---- exposure + flash
-        if (s.manualExposure && c.manualSensor) {
+        if (!s.cameraAe && c.manualSensor) {
             var exposure = s.exposureNs
             var iso = s.iso
             if (!still && exposure > MAX_PREVIEW_EXPOSURE_NS) {
@@ -369,6 +412,15 @@ class CameraController(context: Context, private val listener: Listener) {
             b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, s.evIndex.coerceIn(c.evRange.lower, c.evRange.upper))
             val m = meteringRect
             if (m != null && c.maxAeRegions > 0) b.set(CaptureRequest.CONTROL_AE_REGIONS, arrayOf(m))
+            b.set(CaptureRequest.CONTROL_AE_LOCK, aeLocked)
+        }
+
+        // ---- zoom
+        val zoom = s.zoom.coerceIn(c.zoomRange.lower, c.zoomRange.upper)
+        if (c.zoomRatioApi && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            b.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoom)
+        } else if (zoom > 1.001f) {
+            b.set(CaptureRequest.SCALER_CROP_REGION, cropRegion(c, zoom))
         }
 
         // ---- focus
@@ -394,8 +446,9 @@ class CameraController(context: Context, private val listener: Listener) {
         b.set(CaptureRequest.CONTROL_AWB_MODE, awb)
 
         if (still) {
-            b.set(CaptureRequest.JPEG_QUALITY, JPEG_QUALITY)
+            b.set(CaptureRequest.JPEG_QUALITY, output.jpegQuality.coerceIn(1, 100).toByte())
             b.set(CaptureRequest.JPEG_ORIENTATION, captureOrientation)
+            location?.let { b.set(CaptureRequest.JPEG_GPS_LOCATION, it) }
         }
     }
 
@@ -452,15 +505,20 @@ class CameraController(context: Context, private val listener: Listener) {
             y = 1f - t
         }
         val area = c.activeArray
-        val half = (min(area.width(), area.height()) * 0.08f).toInt()
-        val cx = (x * area.width()).toInt()
-        val cy = (y * area.height()).toInt()
+        // With CONTROL_ZOOM_RATIO, regions are relative to the zoomed view; with crop zoom they
+        // are in full-sensor coordinates, so map into the crop.
+        val frame = if (!c.zoomRatioApi && settings.zoom > 1.001f) cropRegion(c, settings.zoom)
+        else Rect(0, 0, area.width(), area.height())
+        val half = (min(frame.width(), frame.height()) * 0.08f).toInt()
+        val cx = frame.left + (x * frame.width()).toInt()
+        val cy = frame.top + (y * frame.height()).toInt()
         val rect = Rect(
-            max(cx - half, 0),
-            max(cy - half, 0),
-            min(cx + half, area.width() - 1),
-            min(cy + half, area.height() - 1),
+            max(cx - half, frame.left),
+            max(cy - half, frame.top),
+            min(cx + half, frame.right - 1),
+            min(cy + half, frame.bottom - 1),
         )
+        aeLocked = false
         meteringRect = MeteringRectangle(rect, MeteringRectangle.METERING_WEIGHT_MAX - 1)
         updateRepeating()
         if (!(settings.manualFocus && c.canManualFocus)) {
@@ -490,7 +548,7 @@ class CameraController(context: Context, private val listener: Listener) {
             return
         }
         captureOrientation = jpegOrientation(c, deviceOrientation)
-        val needsPrecapture = !settings.manualExposure && c.hasFlash &&
+        val needsPrecapture = settings.cameraAe && c.hasFlash &&
             (settings.flash == FlashMode.AUTO || settings.flash == FlashMode.ON)
         usedPrecapture = needsPrecapture
         if (!needsPrecapture) {
@@ -587,9 +645,18 @@ class CameraController(context: Context, private val listener: Listener) {
             image.close()
         }
         val name = nameFor(ts)
+        val heic = reader.imageFormat == ImageFormat.HEIC
+        val mime = if (heic) "image/heic" else "image/jpeg"
+        val mirror = output.mirrorFront && caps?.isFront == true && !heic
         saveExecutor.execute {
-            val uri = MediaSaver.save(appContext, "$name.jpg", "image/jpeg") { it.write(bytes) }
-            if (uri != null) main.post { listener.onPhotoSaved(uri, "image/jpeg") } else postError("Could not save photo")
+            val uri = MediaSaver.save(
+                appContext,
+                if (heic) "$name.heic" else "$name.jpg",
+                mime,
+                writer = { it.write(bytes) },
+                afterWrite = if (mirror) { u -> MediaSaver.mirrorJpeg(appContext, u) } else null,
+            )
+            if (uri != null) main.post { listener.onPhotoSaved(uri, mime) } else postError("Could not save photo")
         }
     }
 
@@ -617,9 +684,10 @@ class CameraController(context: Context, private val listener: Listener) {
         try {
             DngCreator(chars, result).use { dng ->
                 dng.setOrientation(exifOrientation(captureOrientation))
-                val uri = MediaSaver.save(appContext, "$name.dng", "image/x-adobe-dng") { out ->
+                location?.let { dng.setLocation(it) }
+                val uri = MediaSaver.save(appContext, "$name.dng", "image/x-adobe-dng", writer = { out ->
                     dng.writeImage(out, image)
-                }
+                })
                 if (uri != null) main.post { listener.onPhotoSaved(uri, "image/x-adobe-dng") } else postError("Could not save RAW")
             }
         } catch (e: Exception) {
@@ -662,9 +730,22 @@ class CameraController(context: Context, private val listener: Listener) {
     }
 
     private fun pickPhotoSize(sizes: Array<Size>): Size {
-        val fourThree = sizes.filter { abs(it.width.toFloat() / it.height - 4f / 3f) < 0.02f }
-        return (fourThree.ifEmpty { sizes.toList() }).maxByOrNull { it.width.toLong() * it.height }
-            ?: Size(1920, 1080)
+        val ratio = if (output.aspect169) 16f / 9f else 4f / 3f
+        val matching = sizes.filter { abs(it.width.toFloat() / it.height - ratio) < 0.02f }.ifEmpty { sizes.toList() }
+        val byArea = matching.sortedBy { it.width.toLong() * it.height }
+        if (byArea.isEmpty()) return Size(1920, 1080)
+        if (output.maxResolution) return byArea.last()
+        // "Standard" resolution: about 12 MP, the sweet spot for file size vs. detail.
+        return byArea.lastOrNull { it.width.toLong() * it.height <= STANDARD_PIXELS } ?: byArea.first()
+    }
+
+    private fun cropRegion(c: CameraCaps, zoom: Float): Rect {
+        val a = c.activeArray
+        val w = (a.width() / zoom).toInt()
+        val h = (a.height() / zoom).toInt()
+        val left = (a.width() - w) / 2
+        val top = (a.height() - h) / 2
+        return Rect(left, top, left + w, top + h)
     }
 
     private fun pickPreviewSize(choices: Array<Size>, photo: Size): Size {
@@ -679,7 +760,8 @@ class CameraController(context: Context, private val listener: Listener) {
     companion object {
         private const val TAG = "ProCam"
         private const val RAW_TAG = "raw"
-        private const val JPEG_QUALITY: Byte = 95
+        private const val STANDARD_PIXELS = 12_600_000L
+        private const val AE_LOCK_DELAY_MS = 700L
         private const val MAX_PREVIEW_EXPOSURE_NS = 66_666_667L // 1/15 s
         private const val PRECAPTURE_TIMEOUT_FRAMES = 30
         private const val STATS_INTERVAL_MS = 200L

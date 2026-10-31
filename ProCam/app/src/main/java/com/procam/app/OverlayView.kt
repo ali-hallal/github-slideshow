@@ -1,9 +1,11 @@
 package com.procam.app
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Rect
 import android.hardware.camera2.CaptureResult
 import android.os.SystemClock
 import android.util.AttributeSet
@@ -40,12 +42,23 @@ class OverlayView @JvmOverloads constructor(
         strokeWidth = 2 * density
     }
 
+    private var analysis: Bitmap? = null
+    private val analysisPaint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val analysisDst = Rect()
+
     private var roll = 0f
     private var flat = true
     private var focusX = -1f
     private var focusY = -1f
     private var focusStart = 0L
     private var focusColor = Color.WHITE
+
+    /** Zebra / focus-peaking marks (low-res, stretched over the preview), or null. */
+    fun setAnalysis(bmp: Bitmap?) {
+        if (bmp == null && analysis == null) return
+        analysis = bmp
+        invalidate()
+    }
 
     /** [degrees] is how far the device is rotated clockwise from upright. */
     fun setRoll(degrees: Float, isFlat: Boolean) {
@@ -77,6 +90,11 @@ class OverlayView @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         val w = width.toFloat()
         val h = height.toFloat()
+
+        analysis?.let {
+            analysisDst.set(0, 0, width, height)
+            canvas.drawBitmap(it, null, analysisDst, analysisPaint)
+        }
 
         if (gridEnabled) {
             for (i in 1..2) {

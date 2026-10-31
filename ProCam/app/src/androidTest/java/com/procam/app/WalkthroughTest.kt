@@ -40,6 +40,7 @@ class WalkthroughTest {
     @get:Rule
     val rules: RuleChain = RuleChain
         .outerRule(GrantPermissionRule.grant(Manifest.permission.CAMERA))
+        .around(ClearPrefsRule())
         .around(activityRule)
 
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -102,12 +103,41 @@ class WalkthroughTest {
         SystemClock.sleep(1500)
         savePhoto("photo_pro")
 
-        onView(withId(R.id.btnGrid)).perform(click())
+        // Shutter priority: fixed shutter, ISO on auto, meter visible.
+        onView(withId(R.id.chipFocus)).perform(click())
+        onView(withId(R.id.slider)).perform(tapAt(0.0f, 0.5f)) // back to AF
+        onView(withId(R.id.chipShutter)).perform(click())
+        onView(withId(R.id.slider)).perform(tapAt(0.55f, 0.5f))
+        onView(withId(R.id.chipIso)).perform(click())
+        onView(withId(R.id.slider)).perform(tapAt(0.0f, 0.5f))
+        SystemClock.sleep(2500)
+        screenshot("pro_shutter_priority_meter")
+
+        onView(withId(R.id.btnZebra)).perform(click())
+        onView(withId(R.id.btnZebra)).perform(click())
+        SystemClock.sleep(1200)
+        screenshot("zebra_100")
+
+        onView(withId(R.id.modeAuto)).perform(click())
+        tryClick("Zoom 2×")
+        SystemClock.sleep(1200)
+        screenshot("zoom_2x")
+        tryClick("Zoom 1×")
+
+        onView(withId(R.id.textureView)).perform(androidx.test.espresso.action.ViewActions.longClick())
+        SystemClock.sleep(1200)
+        screenshot("ae_af_lock")
+
         onView(withId(R.id.btnFlash)).perform(click())
         onView(withId(R.id.btnRaw)).perform(click())
-        onView(withId(R.id.modeAuto)).perform(click())
         SystemClock.sleep(800)
-        screenshot("toggles_grid_off_flash_raw")
+        screenshot("toggles_flash_raw")
+
+        onView(withId(R.id.btnSettings)).perform(click())
+        SystemClock.sleep(1000)
+        screenshot("settings_screen")
+        androidx.test.espresso.Espresso.pressBack()
+        waitUntil(15_000) { readout().contains("ISO") }
 
         onView(withId(R.id.btnTimer)).perform(click())
         onView(withId(R.id.shutter)).perform(click())
@@ -129,6 +159,13 @@ class WalkthroughTest {
     }
 
     // ------------------------------------------------------------------ helpers
+
+    private fun tryClick(description: String) {
+        try {
+            onView(androidx.test.espresso.matcher.ViewMatchers.withContentDescription(description)).perform(click())
+        } catch (_: Throwable) {
+        }
+    }
 
     private fun screenshot(name: String) {
         val bmp = instrumentation.uiAutomation.takeScreenshot() ?: return

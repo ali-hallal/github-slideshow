@@ -1,6 +1,9 @@
 package com.procam.app
 
 import android.graphics.Rect
+import android.hardware.camera2.CameraManager
+import android.os.Build
+import android.util.SizeF
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraMetadata
 import android.util.Range
@@ -29,7 +32,10 @@ enum class WhiteBalance(val label: String, val awbMode: Int) {
 
 /** Everything the user can dial in. Immutable: the UI makes copies and hands them to the camera thread. */
 data class ShotSettings(
+    /** PRO mode. Within PRO, ISO and/or shutter can still be left on auto (shutter / ISO priority). */
     val manualExposure: Boolean = false,
+    val isoAuto: Boolean = false,
+    val shutterAuto: Boolean = false,
     val iso: Int = 100,
     val exposureNs: Long = 16_666_667L,
     val evIndex: Int = 0,
@@ -38,6 +44,22 @@ data class ShotSettings(
     val wb: WhiteBalance = WhiteBalance.AUTO,
     val flash: FlashMode = FlashMode.OFF,
     val raw: Boolean = false,
+    val zoom: Float = 1f,
+) {
+    /** True when the camera's own auto exposure should run (AUTO mode, or PRO with both ISO and shutter on auto). */
+    val cameraAe get() = !manualExposure || (isoAuto && shutterAuto)
+
+    /** Shutter priority or ISO priority: one value fixed, the other driven by ProCam's own meter. */
+    val priorityMode get() = manualExposure && (isoAuto != shutterAuto)
+}
+
+/** Output options that need the camera session to be rebuilt when they change. */
+data class OutputPrefs(
+    val aspect169: Boolean = false,
+    val maxResolution: Boolean = true,
+    val heif: Boolean = false,
+    val jpegQuality: Int = 95,
+    val mirrorFront: Boolean = false,
 )
 
 /** What a given camera can do. */
@@ -60,13 +82,24 @@ data class CameraCaps(
     val maxAeRegions: Int,
     val aperture: Float?,
     val focalLength: Float?,
+    /** Zoom ratio range. Below 1 means an ultra-wide lens is reachable through zoom. */
+    val zoomRange: Range<Float>,
+    /** True if zoom uses CONTROL_ZOOM_RATIO (Android 11+, switches physical lenses); false = crop zoom. */
+    val zoomRatioApi: Boolean,
+    /** Zoom ratios of the phone's real lenses (e.g. 0.5, 1, 3, 5), shown as lens buttons. */
+    val lensStops: List<Float>,
 ) {
     val isFront get() = facing == CameraCharacteristics.LENS_FACING_FRONT
     val canManualFocus get() = manualSensor && minFocusDistance > 0f
 
     companion object {
-        fun from(id: String, c: CameraCharacteristics): CameraCaps {
+        fun from(id: String, c: CameraCharacteristics, manager: CameraManager): CameraCaps {
             val capabilities = c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: IntArray(0)
+            val ratioRange = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                c.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+            } else null
+            val zoomRange = ratioRange
+                ?: Range(1f, (c.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1f).coerceAtLeast(1f))
             return CameraCaps(
                 id = id,
                 facing = c.get(CameraCharacteristics.LENS_FACING) ?: CameraCharacteristics.LENS_FACING_BACK,
@@ -86,7 +119,44 @@ data class CameraCaps(
                 maxAeRegions = c.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0,
                 aperture = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES)?.firstOrNull(),
                 focalLength = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull(),
+                zoomRange = zoomRange,
+                zoomRatioApi = ratioRange != null,
+                lensStops = lensStops(c, manager, zoomRange),
             )
+        }
+
+        /** Finds the zoom ratio of each physical lens behind a logical multi-camera. */
+        private fun lensStops(c: CameraCharacteristics, manager: CameraManager, range: Range<Float>): List<Float> {
+            val stops = sortedSetOf(1f)
+            val main = fieldOfViewScale(c)
+            if (main != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                for (pid in c.physicalCameraIds) {
+                    val physical = try {
+                        manager.getCameraCharacteristics(pid)
+                    } catch (e: Exception) {
+                        continue
+                    }
+                    val scale = fieldOfViewScale(physical) ?: continue
+                    val ratio = roundStop(scale / main)
+                    if (ratio >= range.lower - 0.01f && ratio <= range.upper + 0.01f) stops += ratio
+                }
+            }
+            if (stops.size == 1 && range.upper >= 2f) stops += 2f
+            return stops.toList()
+        }
+
+        /** Focal length relative to sensor diagonal: proportional to how "zoomed in" a lens is. */
+        private fun fieldOfViewScale(c: CameraCharacteristics): Float? {
+            val focal = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: return null
+            val size: SizeF = c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE) ?: return null
+            val diagonal = kotlin.math.sqrt(size.width * size.width + size.height * size.height)
+            return if (diagonal > 0f) focal / diagonal else null
+        }
+
+        private fun roundStop(r: Float): Float = when {
+            r < 0.95f -> (r * 10).roundToInt() / 10f
+            r < 1.15f -> 1f
+            else -> (r * 2).roundToInt() / 2f
         }
     }
 }
@@ -136,6 +206,11 @@ object Stops {
     fun evLabel(index: Int, step: Rational): String {
         val v = index * step.toFloat()
         return if (abs(v) < 0.05f) "±0" else String.format(Locale.US, "%+.1f", v)
+    }
+
+    fun zoomLabel(z: Float): String = when {
+        abs(z - z.roundToInt()) < 0.05f -> "${z.roundToInt()}×"
+        else -> String.format(Locale.US, "%.1f×", z)
     }
 
     fun focusLabel(diopters: Float): String = when {

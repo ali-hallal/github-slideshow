@@ -9,23 +9,27 @@
     <FrameLayout
         android:id="@+id/previewContainer"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_gravity="center">
+        android:layout_height="match_parent">
 
+        <!-- Sized to the camera's aspect ratio and placed just below the top bar; the overlay and
+             flash views are resized in code to cover exactly the preview. -->
         <com.procam.app.AutoFitTextureView
             android:id="@+id/textureView"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content" />
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|center_horizontal" />
 
         <com.procam.app.OverlayView
             android:id="@+id/overlay"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent" />
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:layout_gravity="top|center_horizontal" />
 
         <View
             android:id="@+id/shutterFlash"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:layout_gravity="top|center_horizontal"
             android:alpha="0"
             android:background="@color/black" />
     </FrameLayout>
@@ -51,6 +55,7 @@
         android:orientation="vertical">
 
         <LinearLayout
+            android:id="@+id/topBar"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:background="@color/scrim"
@@ -60,9 +65,15 @@
 
             <TextView android:id="@+id/btnFlash" style="@style/TopButton" />
             <TextView android:id="@+id/btnTimer" style="@style/TopButton" />
-            <TextView android:id="@+id/btnGrid" style="@style/TopButton" android:text="GRID" />
-            <TextView android:id="@+id/btnLevel" style="@style/TopButton" android:text="LEVEL" />
             <TextView android:id="@+id/btnRaw" style="@style/TopButton" android:text="RAW" />
+            <TextView android:id="@+id/btnZebra" style="@style/TopButton" android:text="ZEBRA" />
+            <TextView
+                android:id="@+id/btnSettings"
+                style="@style/TopButton"
+                android:layout_weight="0.6"
+                android:contentDescription="Settings"
+                android:text="⚙"
+                android:textSize="18sp" />
         </LinearLayout>
 
         <LinearLayout
@@ -77,18 +88,51 @@
                 android:layout_width="112dp"
                 android:layout_height="60dp" />
 
-            <TextView
-                android:id="@+id/readout"
+            <LinearLayout
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="12dp"
+                android:layout_marginStart="10dp"
                 android:layout_weight="1"
-                android:fontFamily="monospace"
-                android:shadowColor="#CC000000"
-                android:shadowRadius="4"
-                android:textColor="@color/white"
-                android:textSize="12sp" />
+                android:background="@drawable/info_bg"
+                android:orientation="vertical"
+                android:paddingStart="8dp"
+                android:paddingTop="4dp"
+                android:paddingEnd="8dp"
+                android:paddingBottom="4dp">
+
+                <TextView
+                    android:id="@+id/readout"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="monospace"
+                    android:shadowColor="#CC000000"
+                    android:shadowRadius="4"
+                    android:textColor="@color/white"
+                    android:textSize="12sp" />
+
+                <com.procam.app.MeterView
+                    android:id="@+id/meter"
+                    android:layout_width="match_parent"
+                    android:layout_height="30dp"
+                    android:layout_marginTop="2dp"
+                    android:visibility="gone" />
+            </LinearLayout>
         </LinearLayout>
+
+        <TextView
+            android:id="@+id/lockBadge"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:background="@drawable/badge_bg"
+            android:fontFamily="sans-serif-medium"
+            android:paddingStart="12dp"
+            android:paddingTop="4dp"
+            android:paddingEnd="12dp"
+            android:paddingBottom="4dp"
+            android:textColor="@color/black"
+            android:textSize="12sp"
+            android:visibility="gone" />
     </LinearLayout>
 
     <!-- Bottom: parameter slider, parameter chips, mode switch, shutter row -->
@@ -101,6 +145,15 @@
         android:orientation="vertical"
         android:paddingTop="8dp"
         android:paddingBottom="12dp">
+
+        <LinearLayout
+            android:id="@+id/lensRow"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="6dp"
+            android:gravity="center"
+            android:orientation="horizontal"
+            android:visibility="gone" />
 
         <TextView
             android:id="@+id/sliderLabel"

@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
+import androidx.exifinterface.media.ExifInterface
 import java.io.IOException
 import java.io.OutputStream
 import java.text.SimpleDateFormat
@@ -17,10 +18,29 @@ object MediaSaver {
     private const val TAG = "MediaSaver"
     private const val FOLDER = "ProCam"
 
+    /** Marks a JPEG as horizontally mirrored via EXIF (lossless), for selfies that match the preview. */
+    fun mirrorJpeg(context: Context, uri: Uri) {
+        try {
+            context.contentResolver.openFileDescriptor(uri, "rw")?.use { pfd ->
+                val exif = ExifInterface(pfd.fileDescriptor)
+                exif.flipHorizontally()
+                exif.saveAttributes()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "mirror failed", e)
+        }
+    }
+
     fun newBaseName(): String =
         "PROCAM_" + SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
 
-    fun save(context: Context, displayName: String, mimeType: String, writer: (OutputStream) -> Unit): Uri? {
+    fun save(
+        context: Context,
+        displayName: String,
+        mimeType: String,
+        writer: (OutputStream) -> Unit,
+        afterWrite: ((Uri) -> Unit)? = null,
+    ): Uri? {
         val resolver = context.contentResolver
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, displayName)
@@ -39,6 +59,7 @@ object MediaSaver {
         return try {
             val stream = resolver.openOutputStream(uri) ?: throw IOException("No output stream for $uri")
             stream.use(writer)
+            afterWrite?.invoke(uri)
             values.clear()
             values.put(MediaStore.Images.Media.IS_PENDING, 0)
             resolver.update(uri, values, null, null)

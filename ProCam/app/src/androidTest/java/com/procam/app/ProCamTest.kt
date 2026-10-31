@@ -14,7 +14,12 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.widget.TextView
+import androidx.test.espresso.Espresso
 import androidx.test.espresso.Espresso.onView
+import androidx.test.espresso.assertion.ViewAssertions.matches
+import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
+import androidx.test.espresso.matcher.ViewMatchers.withContentDescription
+import androidx.test.espresso.matcher.ViewMatchers.withText
 import androidx.test.espresso.action.CoordinatesProvider
 import androidx.test.espresso.action.GeneralClickAction
 import androidx.test.espresso.action.Press
@@ -47,6 +52,7 @@ class ProCamTest {
     @get:Rule
     val rules: RuleChain = RuleChain
         .outerRule(GrantPermissionRule.grant(Manifest.permission.CAMERA))
+        .around(ClearPrefsRule())
         .around(activityRule)
 
     private val context = InstrumentationRegistry.getInstrumentation().targetContext
@@ -153,15 +159,62 @@ class ProCamTest {
     }
 
     @Test
-    fun flashTimerGridLevelToggles() {
+    fun flashTimerZebraToggles() {
         waitForCamera()
         repeat(4) { onView(withId(R.id.btnFlash)).perform(click()) }
-        onView(withId(R.id.btnGrid)).perform(click())
-        onView(withId(R.id.btnLevel)).perform(click())
+        onView(withId(R.id.btnZebra)).perform(click())
+        assertEquals("ZEBRA 95", text(R.id.btnZebra))
         onView(withId(R.id.btnTimer)).perform(click())
         assertEquals("TIMER 3s", text(R.id.btnTimer))
         // 3 second self-timer.
         shootAndExpect("image/jpeg", timeoutMs = 20_000) { onView(withId(R.id.shutter)).perform(click()) }
+    }
+
+    @Test
+    fun zoomWithLensButton() {
+        val manager = context.getSystemService(CameraManager::class.java)
+        val id = manager.cameraIdList.first {
+            manager.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK
+        }
+        val range = manager.getCameraCharacteristics(id).get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+        assumeTrue("no zoom", range != null && range.upper >= 2f)
+        waitForCamera()
+        assertTrue("1× shown", readout().contains("1×"))
+        onView(withContentDescription("Zoom 2×")).perform(click())
+        waitFor("2× zoom") { readout().contains("2×") }
+        shootAndExpect("image/jpeg") { onView(withId(R.id.shutter)).perform(click()) }
+        onView(withContentDescription("Zoom 1×")).perform(click())
+        waitFor("back to 1×") { readout().contains("1×") }
+    }
+
+    @Test
+    fun shutterPriorityModeWithMeter() {
+        assumeTrue("camera has no MANUAL_SENSOR", backCameraHas(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR))
+        waitForCamera()
+        onView(withId(R.id.modePro)).perform(click())
+        onView(withId(R.id.meter)).check(matches(isDisplayed()))
+        // ISO dial fully left = auto ISO, i.e. shutter priority.
+        onView(withId(R.id.chipIso)).perform(click())
+        onView(withId(R.id.slider)).perform(tapAt(0.0f, 0.5f))
+        val label = text(R.id.sliderLabel)
+        Log.i(TAG, "priority: $label")
+        assertTrue("ISO auto: $label", label.startsWith("ISO auto"))
+        waitFor("S mode in readout") { readout().contains("\nS ".toRegex()) || readout().lines().getOrNull(1)?.startsWith("S") == true }
+        SystemClock.sleep(2000)
+        Log.i(TAG, "after metering: ${text(R.id.chipIso).replace('\n', ' ')} / ${readout().replace('\n', ' | ')}")
+        shootAndExpect("image/jpeg") { onView(withId(R.id.shutter)).perform(click()) }
+    }
+
+    @Test
+    fun settingsScreenOpensAndChangesSetting() {
+        waitForCamera()
+        onView(withId(R.id.btnSettings)).perform(click())
+        onView(withText("Settings")).check(matches(isDisplayed()))
+        onView(withText("Grid")).perform(click())
+        assertTrue("grid saved as off", !Prefs(context).grid)
+        Espresso.pressBack()
+        waitForCamera()
+        shootAndExpect("image/jpeg") { onView(withId(R.id.shutter)).perform(click()) }
     }
 
     @Test
