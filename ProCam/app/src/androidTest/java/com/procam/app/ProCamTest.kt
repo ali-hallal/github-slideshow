@@ -199,9 +199,9 @@ class ProCamTest {
         val label = text(R.id.sliderLabel)
         Log.i(TAG, "priority: $label")
         assertTrue("ISO auto: $label", label.startsWith("ISO auto"))
-        waitFor("S mode in readout") { readout().contains("\nS ".toRegex()) || readout().lines().getOrNull(1)?.startsWith("S") == true }
+        waitFor("S mode in readout") { readout().lines().getOrNull(1)?.startsWith("S ") == true }
         SystemClock.sleep(2000)
-        Log.i(TAG, "after metering: ${text(R.id.chipIso).replace('\n', ' ')} / ${readout().replace('\n', ' | ')}")
+        Log.i(TAG, "after metering: ${text(R.id.chipIso).replace('\n', ' ')} / ${readout().replace("\n", " | ")}")
         shootAndExpect("image/jpeg") { onView(withId(R.id.shutter)).perform(click()) }
     }
 
