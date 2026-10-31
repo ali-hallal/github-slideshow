@@ -303,6 +303,52 @@ class ProCamTest {
     }
 
     @Test
+    fun portraitBlurKeepsPersonSharpWithoutHalo() {
+        // Synthetic photo: fine black/white stripes (background) with a solid red "person" in the middle.
+        val w = 800
+        val h = 600
+        val bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+        for (y in 0 until h) for (x in 0 until w) {
+            val person = x in 300 until 500 && y in 150 until 450
+            bmp.setPixel(x, y, if (person) android.graphics.Color.RED else if ((x / 4) % 2 == 0) android.graphics.Color.WHITE else android.graphics.Color.BLACK)
+        }
+        val mw = 80
+        val mh = 60
+        val mask = FloatArray(mw * mh) { i -> val x = i % mw * 10; val y = i / mw * 10; if (x in 300 until 500 && y in 150 until 450) 1f else 0f }
+        PortraitProcessor.renderPortrait(bmp, PortraitProcessor.Mask(mask, mw, mh), strength = 1)
+
+        assertEquals("person untouched", android.graphics.Color.RED, bmp.getPixel(400, 300))
+        // Background stripes are blurred to grey.
+        var minL = 255
+        var maxL = 0
+        for (x in 20 until 120) {
+            val l = android.graphics.Color.green(bmp.getPixel(x, 300))
+            minL = minOf(minL, l); maxL = maxOf(maxL, l)
+        }
+        Log.i(TAG, "background range after blur: $minL..$maxL")
+        assertTrue("stripes blurred ($minL..$maxL)", maxL - minL < 60)
+        // No red halo bleeding into the background next to the person.
+        val near = bmp.getPixel(540, 300)
+        Log.i(TAG, "next to person: r=${android.graphics.Color.red(near)} g=${android.graphics.Color.green(near)}")
+        assertTrue("no halo", android.graphics.Color.red(near) - android.graphics.Color.green(near) < 30)
+    }
+
+    @Test
+    fun portraitWithoutPersonSavesNormalPhoto() {
+        waitForCamera()
+        onView(withId(R.id.uiSimple)).perform(click())
+        onView(withId(R.id.intentPortrait)).perform(click())
+        onView(withId(R.id.blurStrong)).perform(click())
+        assertEquals(2, Prefs(context).portraitStrength)
+        val before = count("image/jpeg")
+        onView(withId(R.id.shutter)).perform(click())
+        waitFor("photo saved", 30_000) { count("image/jpeg") > before }
+        waitFor("finished", 15_000) { !shutterBusy() }
+        SystemClock.sleep(1500)
+        assertEquals("exactly one photo", before + 1, count("image/jpeg"))
+    }
+
+    @Test
     fun stopTables() {
         val iso = Stops.isoSteps(Range(100, 3200))
         assertEquals(100, iso.first())

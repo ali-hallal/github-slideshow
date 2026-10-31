@@ -65,6 +65,18 @@ class WalkthroughTest {
         screenshot("group_done")
         savePhoto("photo_group")
 
+        // Portrait (the emulator scene has no person, so this shows the UI and the fallback).
+        onView(withId(R.id.intentPortrait)).perform(click())
+        SystemClock.sleep(2000)
+        screenshot("simple_portrait")
+        onView(withId(R.id.shutter)).perform(click())
+        SystemClock.sleep(700)
+        screenshot("portrait_processing")
+        waitForIdleShutter(30_000)
+        SystemClock.sleep(800)
+        screenshot("portrait_done")
+        onView(withId(R.id.intentAuto)).perform(click())
+
         // On to the Pro controls.
         onView(withId(R.id.uiPro)).perform(click())
         SystemClock.sleep(1000)

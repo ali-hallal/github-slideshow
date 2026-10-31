@@ -198,9 +198,26 @@
                 android:paddingEnd="12dp">
 
                 <TextView android:id="@+id/intentAuto" style="@style/IntentPill" android:text="Auto" />
+                <TextView android:id="@+id/intentPortrait" style="@style/IntentPill" android:text="Portrait" />
                 <TextView android:id="@+id/intentGroup" style="@style/IntentPill" android:text="Group" />
             </LinearLayout>
         </HorizontalScrollView>
+
+        <LinearLayout
+            android:id="@+id/portraitRow"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/segment_bg"
+            android:orientation="horizontal"
+            android:padding="3dp"
+            android:visibility="gone">
+
+            <TextView android:id="@+id/blurSoft" style="@style/SegmentButton" android:text="Soft blur" />
+            <TextView android:id="@+id/blurMedium" style="@style/SegmentButton" android:text="Medium" />
+            <TextView android:id="@+id/blurStrong" style="@style/SegmentButton" android:text="Strong" />
+        </LinearLayout>
 
         <TextView
             android:id="@+id/intentHint"

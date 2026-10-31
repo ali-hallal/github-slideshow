@@ -31,6 +31,36 @@ object MediaSaver {
         }
     }
 
+    /**
+     * Copies the useful photo details (date, camera, exposure, GPS) from the original JPEG into a
+     * processed copy, which is saved upright.
+     */
+    fun copyExif(context: Context, uri: Uri, original: ByteArray) {
+        try {
+            val src = ExifInterface(java.io.ByteArrayInputStream(original))
+            context.contentResolver.openFileDescriptor(uri, "rw")?.use { pfd ->
+                val dst = ExifInterface(pfd.fileDescriptor)
+                for (tag in COPIED_TAGS) src.getAttribute(tag)?.let { dst.setAttribute(tag, it) }
+                dst.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
+                dst.saveAttributes()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "exif copy failed", e)
+        }
+    }
+
+    private val COPIED_TAGS = arrayOf(
+        ExifInterface.TAG_DATETIME, ExifInterface.TAG_DATETIME_ORIGINAL, ExifInterface.TAG_DATETIME_DIGITIZED,
+        ExifInterface.TAG_OFFSET_TIME, ExifInterface.TAG_OFFSET_TIME_ORIGINAL,
+        ExifInterface.TAG_MAKE, ExifInterface.TAG_MODEL,
+        ExifInterface.TAG_F_NUMBER, ExifInterface.TAG_EXPOSURE_TIME, ExifInterface.TAG_PHOTOGRAPHIC_SENSITIVITY,
+        ExifInterface.TAG_FOCAL_LENGTH, ExifInterface.TAG_WHITE_BALANCE, ExifInterface.TAG_FLASH,
+        ExifInterface.TAG_GPS_LATITUDE, ExifInterface.TAG_GPS_LATITUDE_REF,
+        ExifInterface.TAG_GPS_LONGITUDE, ExifInterface.TAG_GPS_LONGITUDE_REF,
+        ExifInterface.TAG_GPS_ALTITUDE, ExifInterface.TAG_GPS_ALTITUDE_REF,
+        ExifInterface.TAG_GPS_TIMESTAMP, ExifInterface.TAG_GPS_DATESTAMP,
+    )
+
     fun newBaseName(): String =
         "PROCAM_" + SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
 

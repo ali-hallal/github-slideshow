@@ -17,6 +17,11 @@ class Prefs(context: Context) {
         get() = sp.getString("intent", "AUTO") ?: "AUTO"
         set(v) = sp.edit().putString("intent", v).apply()
 
+    /** Portrait background blur: 0 soft, 1 medium, 2 strong. */
+    var portraitStrength: Int
+        get() = sp.getInt("portraitStrength", 1)
+        set(v) = sp.edit().putInt("portraitStrength", v).apply()
+
     // ---- quick settings
     var grid: Boolean
         get() = sp.getBoolean("grid", true)

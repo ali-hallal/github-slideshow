@@ -89,6 +89,9 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private lateinit var uiSimple: TextView
     private lateinit var uiPro: TextView
     private lateinit var shakeView: ShakeView
+    private lateinit var intentPortrait: TextView
+    private lateinit var portraitRow: View
+    private lateinit var blurButtons: List<TextView>
 
     private lateinit var prefs: Prefs
     private lateinit var camera: CameraController
@@ -147,8 +150,14 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private var steadyWaitStart = 0L
     private var pressRatio = Float.MAX_VALUE
 
+    // Portrait
+    private val portrait = PortraitProcessor()
+    private var portraitProcessing = false
+    private var lastFaceSeen = 0L
+
     private val simple get() = !prefs.uiPro
     private val groupMode get() = simple && prefs.intent == "GROUP"
+    private val portraitMode get() = simple && prefs.intent == "PORTRAIT"
 
     // ------------------------------------------------------------------ lifecycle
 
@@ -205,6 +214,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         cancelCountdown()
         cancelGroup()
         groupProcessing = false
+        portraitProcessing = false
         overlay.setFaces(emptyList())
         zoomAnimator?.cancel()
         camera.close()
@@ -230,6 +240,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     override fun onDestroy() {
         sound.release()
         groupShutter.close()
+        portrait.close()
         super.onDestroy()
     }
 
@@ -339,6 +350,9 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         uiSimple = findViewById(R.id.uiSimple)
         uiPro = findViewById(R.id.uiPro)
         shakeView = findViewById(R.id.shakeView)
+        intentPortrait = findViewById(R.id.intentPortrait)
+        portraitRow = findViewById(R.id.portraitRow)
+        blurButtons = listOf(findViewById(R.id.blurSoft), findViewById(R.id.blurMedium), findViewById(R.id.blurStrong))
 
         // Preview starts right below the top bar (not hidden behind it)...
         topBar.addOnLayoutChangeListener { v, _, _, _, bottom, _, _, _, _ ->
@@ -451,6 +465,14 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         uiPro.setOnClickListener { setUiPro(true) }
         intentAuto.setOnClickListener { setIntent("AUTO") }
         intentGroup.setOnClickListener { setIntent("GROUP") }
+        intentPortrait.setOnClickListener { setIntent("PORTRAIT") }
+        blurButtons.forEachIndexed { i, v ->
+            v.setOnClickListener {
+                prefs.portraitStrength = i
+                haptic(v, HapticFeedbackConstants.VIRTUAL_KEY)
+                refreshUi()
+            }
+        }
 
         modeAuto.setOnClickListener { setProMode(false) }
         modePro.setOnClickListener { setProMode(true) }
@@ -512,11 +534,16 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         prefs.intent = intent
         cancelGroup()
         overlay.setFaces(emptyList())
+        groupStatus.visibility = View.GONE
         haptic(intentRowView(intent), HapticFeedbackConstants.VIRTUAL_KEY)
         refreshUi()
     }
 
-    private fun intentRowView(intent: String) = if (intent == "GROUP") intentGroup else intentAuto
+    private fun intentRowView(intent: String) = when (intent) {
+        "GROUP" -> intentGroup
+        "PORTRAIT" -> intentPortrait
+        else -> intentAuto
+    }
 
     private fun updateUiMode() {
         val pro = prefs.uiPro
@@ -538,15 +565,21 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         uiSimple.setTextColor(getColor(if (pro) R.color.dim else R.color.white))
         uiPro.setTextColor(getColor(if (pro) R.color.white else R.color.dim))
 
-        val group = prefs.intent == "GROUP"
-        for ((v, on) in listOf(intentAuto to !group, intentGroup to group)) {
+        val intent = prefs.intent
+        for ((v, on) in listOf(intentAuto to (intent == "AUTO"), intentPortrait to (intent == "PORTRAIT"), intentGroup to (intent == "GROUP"))) {
             v.setBackgroundResource(if (on) R.drawable.pill_selected_bg else R.drawable.pill_bg)
             v.setTextColor(getColor(if (on) R.color.black else R.color.white))
         }
-        intentHint.text = if (group) {
-            "Press once · ProCam waits until everyone's eyes are open, takes $GROUP_BURST shots and keeps the best"
-        } else {
-            "ProCam sets everything for you · it finds faces and focuses on them"
+        show(portraitRow, !pro && intent == "PORTRAIT")
+        blurButtons.forEachIndexed { i, v ->
+            val on = i == prefs.portraitStrength
+            v.setBackgroundResource(if (on) R.drawable.segment_selected_bg else 0)
+            v.setTextColor(getColor(if (on) R.color.white else R.color.dim))
+        }
+        intentHint.text = when (intent) {
+            "GROUP" -> "Press once · ProCam waits until everyone's eyes are open, takes $GROUP_BURST shots and keeps the best"
+            "PORTRAIT" -> "Blurs the background behind people · tip: step back and use 2× for natural-looking faces"
+            else -> "ProCam sets everything for you · it finds faces and focuses on them"
         }
     }
 
@@ -636,7 +669,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         if (groupWaiting) {
             cancelGroup(); return
         }
-        if (capturing || groupProcessing || caps == null) return
+        if (capturing || groupProcessing || portraitProcessing || caps == null) return
         haptic(shutter, HapticFeedbackConstants.VIRTUAL_KEY)
         if (prefs.timerSeconds > 0) startCountdown() else afterCountdown()
     }
@@ -662,7 +695,13 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private fun fire() {
         pressRatio = shakeRatio()
         if (!groupProcessing) groupStatus.visibility = View.GONE
-        camera.takePicture(deviceOrientation)
+        if (portraitMode) {
+            // Keep the photo in memory: it gets its background blurred before saving.
+            portraitProcessing = true
+            camera.takeBurst(deviceOrientation, 1, toMemory = true)
+        } else {
+            camera.takePicture(deviceOrientation)
+        }
     }
 
     private val steadyTick = object : Runnable {
@@ -790,9 +829,15 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     override fun onCaptureFinished(success: Boolean) {
-        if (groupProcessing && success) return // wait for the burst to be scored and saved
+        if ((groupProcessing || portraitProcessing) && success) {
+            // Wait for the photo(s) to be processed and saved.
+            if (pressRatio < BLURRY_RATIO) toast("This one may be blurry: your hands moved. Brace your elbows and try again.")
+            pressRatio = Float.MAX_VALUE
+            return
+        }
         if (!success) {
             groupProcessing = false
+            portraitProcessing = false
             groupStatus.visibility = View.GONE
         }
         if (success && pressRatio < BLURRY_RATIO) {
@@ -844,9 +889,14 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     override fun onFaces(faces: List<RectF>) {
         // In Group mode the smarter ML Kit boxes (green = ready) are drawn instead.
         if (!groupMode) overlay.setFaces(faces)
+        if (faces.isNotEmpty()) lastFaceSeen = SystemClock.uptimeMillis()
     }
 
     override fun onBurstCaptured(frames: List<ByteArray>, mimeType: String) {
+        if (portraitProcessing) {
+            processPortrait(frames.first(), mimeType)
+            return
+        }
         if (!groupProcessing) return
         groupStatus.text = "Picking the best shot…"
         Thread {
@@ -869,6 +919,47 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 )
             }
         }.start()
+    }
+
+    // ------------------------------------------------------------------ portrait
+
+    private fun processPortrait(jpeg: ByteArray, mimeType: String) {
+        showGroupStatus("Creating portrait…")
+        val strength = prefs.portraitStrength
+        val quality = prefs.jpegQuality
+        Thread {
+            val result = try {
+                // HEIF captures can't be decoded+re-encoded the same way; treat them like JPEG input.
+                portrait.process(jpeg, strength, quality)
+            } catch (e: Throwable) {
+                Log.e(TAG, "portrait failed", e)
+                PortraitProcessor.Result(null, false)
+            }
+            val bytes = result.jpeg ?: jpeg
+            val mime = if (result.jpeg != null) "image/jpeg" else mimeType
+            val ext = if (mime == "image/heic") "heic" else "jpg"
+            val processed = result.jpeg != null
+            val uri = MediaSaver.save(
+                this, "${MediaSaver.newBaseName()}${if (processed) "_PORTRAIT" else ""}.$ext", mime,
+                writer = { it.write(bytes) },
+                afterWrite = if (processed) { u -> MediaSaver.copyExif(this, u, jpeg) } else null,
+            )
+            runOnUiThread {
+                portraitProcessing = false
+                capturing = false
+                shutter.busy = false
+                groupStatus.visibility = View.GONE
+                if (uri != null) onPhotoSaved(uri, mime) else toast(getString(R.string.save_failed))
+                toast(if (processed) "Portrait saved" else "No person found · saved a normal photo")
+            }
+        }.start()
+    }
+
+    /** In Portrait, nudge the user toward a person when none is in view. */
+    private fun updatePortraitHint() {
+        if (!portraitMode || capturing || portraitProcessing) return
+        if (SystemClock.uptimeMillis() - lastFaceSeen > 1200) showGroupStatus("Point at a person · stand 1–2 m away")
+        else groupStatus.visibility = View.GONE
     }
 
     // ------------------------------------------------------------------ group smart shutter
@@ -981,6 +1072,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             updateMeter(c)
             updateShakeMeter()
             if (groupMode) analyzeGroup()
+            updatePortraitHint()
         }
     }
 

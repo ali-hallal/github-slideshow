@@ -94,6 +94,7 @@ class CameraController(context: Context, private val listener: Listener) {
     private var faceRectAt = 0L
     private var hadFaces = false
     private var stillCount = 1
+    private var stillToMemory = false
     private var pendingStills = 0
     private var burstExpected = 0
     private val burstFrames = mutableListOf<ByteArray>()
@@ -217,7 +218,7 @@ class CameraController(context: Context, private val listener: Listener) {
      * Takes [count] photos back to back. With count > 1 they are NOT saved: they are handed to
      * [Listener.onBurstCaptured] so the caller can keep the best one.
      */
-    fun takeBurst(deviceOrientation: Int, count: Int) {
+    fun takeBurst(deviceOrientation: Int, count: Int, toMemory: Boolean = count > 1) {
         val h = handler
         if (h == null) {
             main.post { listener.onCaptureFinished(false) }
@@ -225,6 +226,7 @@ class CameraController(context: Context, private val listener: Listener) {
         }
         h.post {
             stillCount = count.coerceIn(1, MAX_BURST)
+            stillToMemory = toMemory || stillCount > 1
             takePictureInternal(deviceOrientation)
         }
     }
@@ -680,7 +682,7 @@ class CameraController(context: Context, private val listener: Listener) {
             val b = d.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
             b.addTarget(jpeg.surface)
             val raw = rawReader
-            val burst = stillCount > 1
+            val burst = stillToMemory
             if (!burst && settings.raw && rawInSession && raw != null) {
                 b.addTarget(raw.surface)
                 b.setTag(RAW_TAG)
@@ -690,7 +692,8 @@ class CameraController(context: Context, private val listener: Listener) {
             if (burst) {
                 burstFrames.clear()
                 burstExpected = stillCount
-                s.captureBurst(List(stillCount) { b.build() }, stillCallback, handler)
+                if (stillCount == 1) s.capture(b.build(), stillCallback, handler)
+                else s.captureBurst(List(stillCount) { b.build() }, stillCallback, handler)
             } else {
                 burstExpected = 0
                 s.capture(b.build(), stillCallback, handler)
