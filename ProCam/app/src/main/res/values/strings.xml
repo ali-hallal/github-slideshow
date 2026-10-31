@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ProCam</string>
+    <string name="permission_needed">ProCam needs camera access to take photos.</string>
+    <string name="no_manual">This camera does not support manual exposure.</string>
+    <string name="no_flash">This camera has no flash.</string>
+    <string name="no_raw">This camera does not support RAW (DNG) capture.</string>
+    <string name="raw_unavailable">RAW capture could not be enabled on this camera.</string>
+    <string name="save_failed">Could not save photo.</string>
+    <string name="no_viewer">No app found to open the photo.</string>
+    <string name="switch_camera">Switch camera</string>
+    <string name="last_photo">Last photo</string>
+    <string name="shutter">Take photo</string>
+</resources>

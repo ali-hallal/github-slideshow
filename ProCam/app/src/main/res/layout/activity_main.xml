@@ -1,0 +1,192 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/black">
+
+    <!-- Live preview + overlays (grid, level, focus ring). Sized to the sensor aspect ratio. -->
+    <FrameLayout
+        android:id="@+id/previewContainer"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center">
+
+        <com.procam.app.AutoFitTextureView
+            android:id="@+id/textureView"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
+        <com.procam.app.OverlayView
+            android:id="@+id/overlay"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <View
+            android:id="@+id/shutterFlash"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:alpha="0"
+            android:background="@color/black" />
+    </FrameLayout>
+
+    <TextView
+        android:id="@+id/countdown"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:shadowColor="#CC000000"
+        android:shadowRadius="12"
+        android:textColor="@color/white"
+        android:textSize="96sp"
+        android:textStyle="bold"
+        android:visibility="gone" />
+
+    <!-- Top: quick toggles + histogram + live exposure readout -->
+    <LinearLayout
+        android:id="@+id/topArea"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:orientation="vertical">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="@color/scrim"
+            android:orientation="horizontal"
+            android:paddingStart="4dp"
+            android:paddingEnd="4dp">
+
+            <TextView android:id="@+id/btnFlash" style="@style/TopButton" />
+            <TextView android:id="@+id/btnTimer" style="@style/TopButton" />
+            <TextView android:id="@+id/btnGrid" style="@style/TopButton" android:text="GRID" />
+            <TextView android:id="@+id/btnLevel" style="@style/TopButton" android:text="LEVEL" />
+            <TextView android:id="@+id/btnRaw" style="@style/TopButton" android:text="RAW" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:padding="10dp">
+
+            <com.procam.app.HistogramView
+                android:id="@+id/histogram"
+                android:layout_width="112dp"
+                android:layout_height="60dp" />
+
+            <TextView
+                android:id="@+id/readout"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:layout_weight="1"
+                android:fontFamily="monospace"
+                android:shadowColor="#CC000000"
+                android:shadowRadius="4"
+                android:textColor="@color/white"
+                android:textSize="12sp" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- Bottom: parameter slider, parameter chips, mode switch, shutter row -->
+    <LinearLayout
+        android:id="@+id/bottomPanel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:background="@color/scrim"
+        android:orientation="vertical"
+        android:paddingTop="8dp"
+        android:paddingBottom="12dp">
+
+        <TextView
+            android:id="@+id/sliderLabel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:textColor="@color/accent"
+            android:textSize="14sp"
+            android:fontFamily="sans-serif-medium" />
+
+        <SeekBar
+            android:id="@+id/slider"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="16dp"
+            android:layout_marginEnd="16dp"
+            android:paddingTop="10dp"
+            android:paddingBottom="10dp"
+            android:progressTint="@color/accent"
+            android:thumbTint="@color/accent" />
+
+        <HorizontalScrollView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fillViewport="true"
+            android:scrollbars="none">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_horizontal"
+                android:orientation="horizontal">
+
+                <TextView android:id="@+id/chipIso" style="@style/Chip" />
+                <TextView android:id="@+id/chipShutter" style="@style/Chip" />
+                <TextView android:id="@+id/chipFocus" style="@style/Chip" />
+                <TextView android:id="@+id/chipWb" style="@style/Chip" />
+                <TextView android:id="@+id/chipEv" style="@style/Chip" />
+            </LinearLayout>
+        </HorizontalScrollView>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:gravity="center"
+            android:orientation="horizontal">
+
+            <TextView android:id="@+id/modeAuto" style="@style/ModeButton" android:text="AUTO" />
+            <TextView android:id="@+id/modePro" style="@style/ModeButton" android:text="PRO" />
+        </LinearLayout>
+
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="96dp">
+
+            <ImageView
+                android:id="@+id/thumbnail"
+                android:layout_width="52dp"
+                android:layout_height="52dp"
+                android:layout_gravity="start|center_vertical"
+                android:layout_marginStart="36dp"
+                android:background="@drawable/thumb_bg"
+                android:clipToOutline="true"
+                android:contentDescription="@string/last_photo"
+                android:scaleType="centerCrop" />
+
+            <com.procam.app.ShutterButton
+                android:id="@+id/shutter"
+                android:layout_width="78dp"
+                android:layout_height="78dp"
+                android:layout_gravity="center"
+                android:contentDescription="@string/shutter" />
+
+            <TextView
+                android:id="@+id/btnSwitch"
+                android:layout_width="52dp"
+                android:layout_height="52dp"
+                android:layout_gravity="end|center_vertical"
+                android:layout_marginEnd="36dp"
+                android:background="@drawable/circle_bg"
+                android:contentDescription="@string/switch_camera"
+                android:gravity="center"
+                android:text="⟲"
+                android:textColor="@color/white"
+                android:textSize="26sp" />
+        </FrameLayout>
+    </LinearLayout>
+</FrameLayout>
