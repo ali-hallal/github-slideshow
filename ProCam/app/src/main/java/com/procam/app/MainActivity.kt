@@ -472,7 +472,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             settings = settings.copy(manualFocus = false, raw = false, zoom = 1f)
             rawBlocked = false
             lockBadge.visibility = View.GONE
-            btnSwitch.animate().rotationBy(180f).setDuration(250).start()
+            // Spin half a turn and end where it started (a button left upside down mis-hits taps).
+            val rest = btnSwitch.rotation
+            btnSwitch.rotation = rest - 180f
+            btnSwitch.animate().rotation(rest).setDuration(250).start()
             startCamera()
         }
     }
