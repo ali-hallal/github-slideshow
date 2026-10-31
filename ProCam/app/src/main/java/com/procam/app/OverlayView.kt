@@ -6,6 +6,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
+import android.graphics.RectF
 import android.hardware.camera2.CaptureResult
 import android.os.SystemClock
 import android.util.AttributeSet
@@ -46,12 +47,33 @@ class OverlayView @JvmOverloads constructor(
     private val analysisPaint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val analysisDst = Rect()
 
+    private var faces: List<RectF> = emptyList()
+    private var faceColors: IntArray? = null
+    private var facesAt = 0L
+    private val facePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 2.5f * resources.displayMetrics.density
+        strokeCap = Paint.Cap.ROUND
+    }
+
     private var roll = 0f
     private var flat = true
     private var focusX = -1f
     private var focusY = -1f
     private var focusStart = 0L
     private var focusColor = Color.WHITE
+
+    /**
+     * Face boxes in 0..1 preview coordinates. [colors] per face, or null for the default yellow.
+     * Boxes fade out if not refreshed.
+     */
+    fun setFaces(list: List<RectF>, colors: IntArray? = null) {
+        if (list.isEmpty() && faces.isEmpty()) return
+        faces = list
+        faceColors = colors
+        facesAt = SystemClock.uptimeMillis()
+        invalidate()
+    }
 
     /** Zebra / focus-peaking marks (low-res, stretched over the preview), or null. */
     fun setAnalysis(bmp: Bitmap?) {
@@ -105,6 +127,15 @@ class OverlayView @JvmOverloads constructor(
 
         if (levelEnabled && !flat) drawLevel(canvas, w / 2, h / 2, min(w, h))
 
+        if (faces.isNotEmpty()) {
+            if (SystemClock.uptimeMillis() - facesAt > FACE_TIMEOUT_MS) {
+                faces = emptyList()
+            } else {
+                faces.forEachIndexed { i, f -> drawFace(canvas, f, faceColors?.getOrNull(i) ?: FACE_YELLOW) }
+                postInvalidateDelayed(FACE_TIMEOUT_MS)
+            }
+        }
+
         if (focusX >= 0) {
             val elapsed = SystemClock.uptimeMillis() - focusStart
             if (elapsed > 2500) {
@@ -118,6 +149,20 @@ class OverlayView @JvmOverloads constructor(
                 postInvalidateOnAnimation()
             }
         }
+    }
+
+    /** Camera-style corner brackets around a face. */
+    private fun drawFace(canvas: Canvas, f: RectF, color: Int) {
+        val l = f.left * width
+        val t = f.top * height
+        val r = f.right * width
+        val b = f.bottom * height
+        val c = min(r - l, b - t) * 0.25f
+        facePaint.color = color
+        canvas.drawLine(l, t, l + c, t, facePaint); canvas.drawLine(l, t, l, t + c, facePaint)
+        canvas.drawLine(r, t, r - c, t, facePaint); canvas.drawLine(r, t, r, t + c, facePaint)
+        canvas.drawLine(l, b, l + c, b, facePaint); canvas.drawLine(l, b, l, b - c, facePaint)
+        canvas.drawLine(r, b, r - c, b, facePaint); canvas.drawLine(r, b, r, b - c, facePaint)
     }
 
     private fun drawLevel(canvas: Canvas, cx: Float, cy: Float, size: Float) {
@@ -142,5 +187,12 @@ class OverlayView @JvmOverloads constructor(
         canvas.drawLine(cx - half, cy, cx - gap, cy, levelPaint)
         canvas.drawLine(cx + gap, cy, cx + half, cy, levelPaint)
         canvas.restore()
+    }
+
+    companion object {
+        const val FACE_YELLOW = 0xFFFFC107.toInt()
+        const val FACE_READY = 0xFF4CD964.toInt()
+        const val FACE_WAITING = 0xFFFFFFFF.toInt()
+        private const val FACE_TIMEOUT_MS = 1000L
     }
 }

@@ -40,7 +40,7 @@ class WalkthroughTest {
     @get:Rule
     val rules: RuleChain = RuleChain
         .outerRule(GrantPermissionRule.grant(Manifest.permission.CAMERA))
-        .around(ClearPrefsRule())
+        .around(ClearPrefsRule(pro = false))
         .around(activityRule)
 
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -51,6 +51,23 @@ class WalkthroughTest {
     fun walkthrough() {
         waitUntil(20_000) { readout().contains("ISO") }
         SystemClock.sleep(1500)
+        screenshot("simple_auto")
+
+        // Simple mode → Group smart shutter.
+        onView(withId(R.id.intentGroup)).perform(click())
+        SystemClock.sleep(800)
+        screenshot("simple_group")
+        onView(withId(R.id.shutter)).perform(click())
+        SystemClock.sleep(600)
+        screenshot("group_waiting")
+        waitForIdleShutter(20_000)
+        SystemClock.sleep(1500)
+        screenshot("group_done")
+        savePhoto("photo_group")
+
+        // On to the Pro controls.
+        onView(withId(R.id.uiPro)).perform(click())
+        SystemClock.sleep(1000)
         screenshot("launch_auto_mode")
 
         onView(withId(R.id.textureView)).perform(tapAt(0.35f, 0.45f))

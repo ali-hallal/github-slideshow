@@ -88,6 +88,10 @@ data class CameraCaps(
     val zoomRatioApi: Boolean,
     /** Zoom ratios of the phone's real lenses (e.g. 0.5, 1, 3, 5), shown as lens buttons. */
     val lensStops: List<Float>,
+    /** Best face-detection mode the camera offers (OFF if none). */
+    val faceDetectMode: Int,
+    /** Camera can prioritise faces for focus/exposure/white balance by itself. */
+    val facePriorityScene: Boolean,
 ) {
     val isFront get() = facing == CameraCharacteristics.LENS_FACING_FRONT
     val canManualFocus get() = manualSensor && minFocusDistance > 0f
@@ -122,6 +126,10 @@ data class CameraCaps(
                 zoomRange = zoomRange,
                 zoomRatioApi = ratioRange != null,
                 lensStops = lensStops(c, manager, zoomRange),
+                faceDetectMode = (c.get(CameraCharacteristics.STATISTICS_INFO_AVAILABLE_FACE_DETECT_MODES) ?: IntArray(0))
+                    .maxOrNull() ?: CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF,
+                facePriorityScene = (c.get(CameraCharacteristics.CONTROL_AVAILABLE_SCENE_MODES) ?: IntArray(0))
+                    .contains(CameraMetadata.CONTROL_SCENE_MODE_FACE_PRIORITY),
             )
         }
 

@@ -7,6 +7,7 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.RectF
 import android.graphics.SurfaceTexture
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -18,6 +19,8 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
+import android.util.Log
 import android.util.Rational
 import android.util.Size
 import android.view.GestureDetector
@@ -75,6 +78,16 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private lateinit var shutter: ShutterButton
     private lateinit var btnSwitch: TextView
     private lateinit var countdownText: TextView
+    private lateinit var infoRow: View
+    private lateinit var groupStatus: TextView
+    private lateinit var intentScroll: View
+    private lateinit var intentAuto: TextView
+    private lateinit var intentGroup: TextView
+    private lateinit var intentHint: TextView
+    private lateinit var chipScroll: View
+    private lateinit var modeRow: View
+    private lateinit var uiSimple: TextView
+    private lateinit var uiPro: TextView
 
     private lateinit var prefs: Prefs
     private lateinit var camera: CameraController
@@ -117,6 +130,19 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private var aeTarget = 0.18f
     private var meterEv: Float? = null
     private var zoomAnimator: ValueAnimator? = null
+
+    // Group smart shutter
+    private val groupShutter = GroupShutter()
+    private var groupBitmap: Bitmap? = null
+    private var groupTick = 0
+    private var groupWaiting = false
+    private var groupProcessing = false
+    private var groupStart = 0L
+    private var noFaceSince = 0L
+    private var readyStreak = 0
+
+    private val simple get() = !prefs.uiPro
+    private val groupMode get() = simple && prefs.intent == "GROUP"
 
     // ------------------------------------------------------------------ lifecycle
 
@@ -169,6 +195,9 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     override fun onPause() {
         resumed = false
         cancelCountdown()
+        cancelGroup()
+        groupProcessing = false
+        overlay.setFaces(emptyList())
         zoomAnimator?.cancel()
         camera.close()
         capturing = false
@@ -190,6 +219,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
 
     override fun onDestroy() {
         sound.release()
+        groupShutter.close()
         super.onDestroy()
     }
 
@@ -238,6 +268,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             return
         }
         cameraIndex = cameraIndex.coerceIn(0, cameraIds.size - 1)
+        Log.i(TAG, "startCamera index=$cameraIndex ids=$cameraIds")
         camera.open(cameraIds[cameraIndex], texture, settings, prefs.output())
     }
 
@@ -287,6 +318,16 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         shutter = findViewById(R.id.shutter)
         btnSwitch = findViewById(R.id.btnSwitch)
         countdownText = findViewById(R.id.countdown)
+        infoRow = findViewById(R.id.infoRow)
+        groupStatus = findViewById(R.id.groupStatus)
+        intentScroll = findViewById(R.id.intentScroll)
+        intentAuto = findViewById(R.id.intentAuto)
+        intentGroup = findViewById(R.id.intentGroup)
+        intentHint = findViewById(R.id.intentHint)
+        chipScroll = findViewById(R.id.chipScroll)
+        modeRow = findViewById(R.id.modeRow)
+        uiSimple = findViewById(R.id.uiSimple)
+        uiPro = findViewById(R.id.uiPro)
 
         // Preview starts right below the top bar (not hidden behind it)...
         topBar.addOnLayoutChangeListener { v, _, _, _, bottom, _, _, _, _ ->
@@ -395,6 +436,11 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         }
         btnSettings.setOnClickListener { startActivity(Intent(this, SettingsActivity::class.java)) }
 
+        uiSimple.setOnClickListener { setUiPro(false) }
+        uiPro.setOnClickListener { setUiPro(true) }
+        intentAuto.setOnClickListener { setIntent("AUTO") }
+        intentGroup.setOnClickListener { setIntent("GROUP") }
+
         modeAuto.setOnClickListener { setProMode(false) }
         modePro.setOnClickListener { setProMode(true) }
 
@@ -432,6 +478,63 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     // ------------------------------------------------------------------ controls
+
+    private fun setUiPro(pro: Boolean) {
+        if (pro == prefs.uiPro) return
+        prefs.uiPro = pro
+        cancelGroup()
+        overlay.setFaces(emptyList())
+        if (!pro) {
+            // Simple mode: the camera handles exposure and focus.
+            settings = settings.copy(manualExposure = false, manualFocus = false)
+            selected = Param.EV
+        }
+        haptic(if (pro) uiPro else uiSimple, HapticFeedbackConstants.VIRTUAL_KEY)
+        pushSettings()
+    }
+
+    private fun setIntent(intent: String) {
+        if (intent == prefs.intent) return
+        prefs.intent = intent
+        cancelGroup()
+        overlay.setFaces(emptyList())
+        haptic(intentRowView(intent), HapticFeedbackConstants.VIRTUAL_KEY)
+        refreshUi()
+    }
+
+    private fun intentRowView(intent: String) = if (intent == "GROUP") intentGroup else intentAuto
+
+    private fun updateUiMode() {
+        val pro = prefs.uiPro
+        fun show(v: View, on: Boolean) {
+            v.visibility = if (on) View.VISIBLE else View.GONE
+        }
+        // Simple: intents + hint. Pro: dials, chips, histogram, meter, RAW and zebra.
+        show(intentScroll, !pro)
+        show(intentHint, !pro)
+        show(sliderLabel, pro)
+        show(slider, pro)
+        show(chipScroll, pro)
+        show(modeRow, pro)
+        show(infoRow, pro)
+        show(btnRaw, pro)
+        show(btnZebra, pro)
+        uiSimple.setBackgroundResource(if (pro) 0 else R.drawable.segment_selected_bg)
+        uiPro.setBackgroundResource(if (pro) R.drawable.segment_selected_bg else 0)
+        uiSimple.setTextColor(getColor(if (pro) R.color.dim else R.color.white))
+        uiPro.setTextColor(getColor(if (pro) R.color.white else R.color.dim))
+
+        val group = prefs.intent == "GROUP"
+        for ((v, on) in listOf(intentAuto to !group, intentGroup to group)) {
+            v.setBackgroundResource(if (on) R.drawable.pill_selected_bg else R.drawable.pill_bg)
+            v.setTextColor(getColor(if (on) R.color.black else R.color.white))
+        }
+        intentHint.text = if (group) {
+            "Press once · ProCam waits until everyone's eyes are open, takes $GROUP_BURST shots and keeps the best"
+        } else {
+            "ProCam sets everything for you · it finds faces and focuses on them"
+        }
+    }
 
     private fun setProMode(pro: Boolean) {
         val c = caps ?: return
@@ -516,9 +619,17 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         if (countdownRemaining > 0) {
             cancelCountdown(); return
         }
-        if (capturing || caps == null) return
+        if (groupWaiting) {
+            cancelGroup(); return
+        }
+        if (capturing || groupProcessing || caps == null) return
         haptic(shutter, HapticFeedbackConstants.VIRTUAL_KEY)
-        if (prefs.timerSeconds > 0) startCountdown() else capture()
+        if (prefs.timerSeconds > 0) startCountdown() else afterCountdown()
+    }
+
+    /** What the shutter does once any self-timer has run. */
+    private fun afterCountdown() {
+        if (groupMode) startGroup() else capture()
     }
 
     private fun capture() {
@@ -531,7 +642,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         override fun run() {
             if (countdownRemaining <= 0) {
                 countdownText.visibility = View.GONE
-                capture()
+                afterCountdown()
                 return
             }
             countdownText.text = countdownRemaining.toString()
@@ -571,6 +682,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     // ------------------------------------------------------------------ CameraController.Listener
 
     override fun onCameraOpened(caps: CameraCaps, previewSize: Size) {
+        Log.i(TAG, "camera opened id=${caps.id} front=${caps.isFront} faces=${caps.faceDetectMode} facePriority=${caps.facePriorityScene}")
         this.caps = caps
         if (caps.sensorOrientation % 180 == 90) {
             textureView.setAspectRatio(previewSize.height, previewSize.width)
@@ -584,11 +696,11 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         wbSteps = WhiteBalance.values().filter { caps.awbModes.contains(it.awbMode) }.ifEmpty { listOf(WhiteBalance.AUTO) }
 
         settings = settings.copy(
-            manualExposure = settings.manualExposure && caps.manualSensor,
+            manualExposure = settings.manualExposure && caps.manualSensor && prefs.uiPro,
             iso = caps.isoRange?.let { settings.iso.coerceIn(it.lower, it.upper) } ?: settings.iso,
             exposureNs = caps.exposureRange?.let { settings.exposureNs.coerceIn(it.lower, it.upper) } ?: settings.exposureNs,
             evIndex = settings.evIndex.coerceIn(caps.evRange.lower, caps.evRange.upper),
-            manualFocus = settings.manualFocus && caps.canManualFocus,
+            manualFocus = settings.manualFocus && caps.canManualFocus && prefs.uiPro,
             wb = if (settings.wb in wbSteps) settings.wb else WhiteBalance.AUTO,
             flash = if (caps.hasFlash) settings.flash else FlashMode.OFF,
             raw = settings.raw && caps.raw,
@@ -606,6 +718,11 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     override fun onCaptureFinished(success: Boolean) {
+        if (groupProcessing && success) return // wait for the burst to be scored and saved
+        if (!success) {
+            groupProcessing = false
+            groupStatus.visibility = View.GONE
+        }
         capturing = false
         shutter.busy = false
         if (!success) toast("Capture failed")
@@ -646,6 +763,99 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             toast(getString(R.string.raw_unavailable))
         }
         refreshUi()
+    }
+
+    override fun onFaces(faces: List<RectF>) {
+        // In Group mode the smarter ML Kit boxes (green = ready) are drawn instead.
+        if (!groupMode) overlay.setFaces(faces)
+    }
+
+    override fun onBurstCaptured(frames: List<ByteArray>, mimeType: String) {
+        if (!groupProcessing) return
+        groupStatus.text = "Picking the best shot…"
+        Thread {
+            val pick = groupShutter.pickBest(frames)
+            val ext = if (mimeType == "image/heic") "heic" else "jpg"
+            val uri = MediaSaver.save(this, "${MediaSaver.newBaseName()}.$ext", mimeType, writer = { it.write(frames[pick.index]) })
+            runOnUiThread {
+                groupProcessing = false
+                capturing = false
+                shutter.busy = false
+                groupStatus.visibility = View.GONE
+                if (uri != null) onPhotoSaved(uri, mimeType) else toast(getString(R.string.save_failed))
+                toast(
+                    when {
+                        pick.faces > 0 && pick.ready == pick.faces ->
+                            "Kept the best of ${frames.size} · everyone's eyes open"
+                        pick.faces > 0 -> "Kept the best of ${frames.size} · ${pick.ready} of ${pick.faces} ready"
+                        else -> "Kept the sharpest of ${frames.size}"
+                    },
+                )
+            }
+        }.start()
+    }
+
+    // ------------------------------------------------------------------ group smart shutter
+
+    private fun startGroup() {
+        val now = SystemClock.uptimeMillis()
+        groupWaiting = true
+        groupStart = now
+        noFaceSince = now
+        readyStreak = 0
+        shutter.busy = true
+        showGroupStatus("Looking for faces…")
+    }
+
+    private fun cancelGroup() {
+        if (!groupWaiting) return
+        groupWaiting = false
+        shutter.busy = false
+        groupStatus.visibility = View.GONE
+    }
+
+    private fun onGroupPeople(people: List<GroupShutter.Person>) {
+        if (!groupMode) return
+        overlay.setFaces(
+            people.map { it.box },
+            people.map { if (it.ready) OverlayView.FACE_READY else OverlayView.FACE_WAITING }.toIntArray(),
+        )
+        if (!groupWaiting) return
+        val now = SystemClock.uptimeMillis()
+        val total = people.size
+        val ready = people.count { it.ready }
+        if (total == 0) {
+            readyStreak = 0
+            // Nobody in the shot: don't keep the user waiting.
+            if (now - noFaceSince > NO_FACE_GIVE_UP_MS) fireGroup() else showGroupStatus("Looking for faces…")
+            return
+        }
+        noFaceSince = now
+        readyStreak = if (ready == total) readyStreak + 1 else 0
+        when {
+            readyStreak >= READY_FRAMES -> fireGroup()
+            now - groupStart > GROUP_TIMEOUT_MS -> fireGroup()
+            ready == total -> showGroupStatus("Everyone's ready…")
+            else -> {
+                val waiting = people.filter { !it.ready }
+                val why = if (waiting.any { !it.eyesOpen }) "eyes open" else "look at the camera"
+                showGroupStatus("Waiting for ${total - ready} of $total · $why")
+            }
+        }
+    }
+
+    private fun fireGroup() {
+        if (!groupWaiting) return
+        groupWaiting = false
+        groupProcessing = true
+        capturing = true
+        showGroupStatus("Hold still…")
+        camera.takeBurst(deviceOrientation, GROUP_BURST)
+    }
+
+    private fun showGroupStatus(text: String) {
+        groupStatus.text = text
+        groupStatus.visibility = View.VISIBLE
     }
 
     override fun onCameraError(message: String) {
@@ -693,7 +903,28 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             histogram.setData(analyzer)
             overlay.setAnalysis(if (marks) analyzer.overlay else null)
             updateMeter(c)
+            if (groupMode) analyzeGroup()
         }
+    }
+
+    /** Runs the face/eyes detector on a viewfinder snapshot about 3 times a second. */
+    private fun analyzeGroup() {
+        if (groupWaiting && SystemClock.uptimeMillis() - groupStart > GROUP_TIMEOUT_MS + 1000) fireGroup()
+        if (++groupTick % 2 != 0) return
+        val w = GROUP_ANALYSIS_WIDTH
+        val h = (w * textureView.height / textureView.width).coerceAtLeast(1)
+        var bmp = groupBitmap
+        if (bmp == null || bmp.width != w || bmp.height != h) {
+            bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            groupBitmap = bmp
+        }
+        try {
+            textureView.getBitmap(bmp)
+        } catch (_: Exception) {
+            return
+        }
+        // The detector works on a copy so the next snapshot can't change pixels under it.
+        groupShutter.analyzePreview(bmp.copy(Bitmap.Config.ARGB_8888, false)) { onGroupPeople(it) }
     }
 
     private fun evBias(c: CameraCaps) = settings.evIndex * c.evStep.toFloat()
@@ -795,6 +1026,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     // ------------------------------------------------------------------ UI state
 
     private fun refreshUi() {
+        updateUiMode()
         val c = caps
         val pro = settings.manualExposure
 
@@ -810,7 +1042,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         setActive(modePro, pro)
         modePro.alpha = if (c?.manualSensor == false) 0.4f else 1f
         shutter.pro = pro
-        meter.visibility = if (pro) View.VISIBLE else View.GONE
+        meter.visibility = if (pro && prefs.uiPro) View.VISIBLE else View.GONE
 
         updateChips()
         configureSlider()
@@ -940,7 +1172,13 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     companion object {
+        private const val TAG = "ProCam"
         private const val REQUEST_CAMERA = 1
+        private const val GROUP_BURST = 3
+        private const val GROUP_ANALYSIS_WIDTH = 480
+        private const val READY_FRAMES = 2
+        private const val GROUP_TIMEOUT_MS = 6000L
+        private const val NO_FACE_GIVE_UP_MS = 1500L
         private const val FOCUS_STEPS = 100
         private const val ANALYSIS_INTERVAL_MS = 150L
         private const val ANALYSIS_WIDTH = 270

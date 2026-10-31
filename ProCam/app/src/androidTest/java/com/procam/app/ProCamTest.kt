@@ -243,6 +243,34 @@ class ProCamTest {
     }
 
     @Test
+    fun simpleModeHidesProControls() {
+        waitForCamera()
+        onView(withId(R.id.uiSimple)).perform(click())
+        onView(withId(R.id.intentAuto)).check(matches(isDisplayed()))
+        onView(withId(R.id.chipIso)).check(matches(androidx.test.espresso.matcher.ViewMatchers.withEffectiveVisibility(androidx.test.espresso.matcher.ViewMatchers.Visibility.GONE)))
+        onView(withId(R.id.btnRaw)).check(matches(androidx.test.espresso.matcher.ViewMatchers.withEffectiveVisibility(androidx.test.espresso.matcher.ViewMatchers.Visibility.GONE)))
+        assertTrue("Simple saved", !Prefs(context).uiPro)
+        shootAndExpect("image/jpeg") { onView(withId(R.id.shutter)).perform(click()) }
+        onView(withId(R.id.uiPro)).perform(click())
+        onView(withId(R.id.chipIso)).check(matches(isDisplayed()))
+    }
+
+    @Test
+    fun groupShutterKeepsOnePhotoFromBurst() {
+        waitForCamera()
+        onView(withId(R.id.uiSimple)).perform(click())
+        onView(withId(R.id.intentGroup)).perform(click())
+        val before = count("image/jpeg")
+        onView(withId(R.id.shutter)).perform(click())
+        // The emulator scene has no faces: ProCam gives up waiting quickly, takes a burst of 3
+        // and keeps exactly one.
+        waitFor("group photo saved", 25_000) { count("image/jpeg") > before }
+        waitFor("group finished", 15_000) { !shutterBusy() }
+        SystemClock.sleep(2000)
+        assertEquals("exactly one photo kept from the burst", before + 1, count("image/jpeg"))
+    }
+
+    @Test
     fun stopTables() {
         val iso = Stops.isoSteps(Range(100, 3200))
         assertEquals(100, iso.first())

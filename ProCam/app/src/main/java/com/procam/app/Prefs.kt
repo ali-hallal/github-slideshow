@@ -6,6 +6,17 @@ import android.content.Context
 class Prefs(context: Context) {
     private val sp = context.getSharedPreferences("procam", Context.MODE_PRIVATE)
 
+    // ---- mode
+    /** false = Simple (beginner) screen, true = Pro controls. Simple is the default. */
+    var uiPro: Boolean
+        get() = sp.getBoolean("uiPro", false)
+        set(v) = sp.edit().putBoolean("uiPro", v).apply()
+
+    /** Simple-mode intent: "AUTO" or "GROUP". */
+    var intent: String
+        get() = sp.getString("intent", "AUTO") ?: "AUTO"
+        set(v) = sp.edit().putString("intent", v).apply()
+
     // ---- quick settings
     var grid: Boolean
         get() = sp.getBoolean("grid", true)

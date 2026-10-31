@@ -37,6 +37,8 @@ android {
 
 dependencies {
     implementation("androidx.exifinterface:exifinterface:1.3.7")
+    // On-device face detection (bundled model, works offline, no Play Services needed).
+    implementation("com.google.mlkit:face-detection:16.1.7")
 
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test:rules:1.6.1")

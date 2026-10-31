@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.ImageFormat
 import android.graphics.Rect
+import android.graphics.RectF
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
@@ -53,6 +54,10 @@ class CameraController(context: Context, private val listener: Listener) {
         fun onPhotoSaved(uri: Uri, mimeType: String)
         fun onLiveStats(iso: Int?, exposureNs: Long?, focusDiopters: Float?, afState: Int?)
         fun onRawUnavailable()
+        /** Faces in preview coordinates (0..1 of the preview view), updated a few times a second. */
+        fun onFaces(faces: List<RectF>)
+        /** A burst taken with [takeBurst]: encoded photos, not yet saved. */
+        fun onBurstCaptured(frames: List<ByteArray>, mimeType: String)
         fun onCameraError(message: String)
     }
 
@@ -84,6 +89,14 @@ class CameraController(context: Context, private val listener: Listener) {
     private var aeLocked = false
     @Volatile private var location: Location? = null
     private var meteringRect: MeteringRectangle? = null
+    /** Metering on the main face, used when the camera has no built-in face priority. */
+    private var faceRect: MeteringRectangle? = null
+    private var faceRectAt = 0L
+    private var hadFaces = false
+    private var stillCount = 1
+    private var pendingStills = 0
+    private var burstExpected = 0
+    private val burstFrames = mutableListOf<ByteArray>()
     private var state = State.PREVIEW
     private var precaptureFrames = 0
     private var usedPrecapture = false
@@ -126,6 +139,7 @@ class CameraController(context: Context, private val listener: Listener) {
     }
 
     fun open(cameraId: String, texture: SurfaceTexture, initial: ShotSettings, outputPrefs: OutputPrefs) {
+        Log.i(TAG, "open camera $cameraId")
         close()
         val t = HandlerThread("CameraThread").apply { start() }
         thread = t
@@ -197,13 +211,22 @@ class CameraController(context: Context, private val listener: Listener) {
     }
 
     /** [deviceOrientation] is the raw value from an [OrientationEventListener]. */
-    fun takePicture(deviceOrientation: Int) {
+    fun takePicture(deviceOrientation: Int) = takeBurst(deviceOrientation, 1)
+
+    /**
+     * Takes [count] photos back to back. With count > 1 they are NOT saved: they are handed to
+     * [Listener.onBurstCaptured] so the caller can keep the best one.
+     */
+    fun takeBurst(deviceOrientation: Int, count: Int) {
         val h = handler
         if (h == null) {
             main.post { listener.onCaptureFinished(false) }
             return
         }
-        h.post { takePictureInternal(deviceOrientation) }
+        h.post {
+            stillCount = count.coerceIn(1, MAX_BURST)
+            takePictureInternal(deviceOrientation)
+        }
     }
 
     // ------------------------------------------------------------------ open / close
@@ -227,7 +250,7 @@ class CameraController(context: Context, private val listener: Listener) {
             texture.setDefaultBufferSize(previewSize.width, previewSize.height)
             previewSurface = Surface(texture)
 
-            jpegReader = ImageReader.newInstance(jpegSize.width, jpegSize.height, photoFormat, 2).apply {
+            jpegReader = ImageReader.newInstance(jpegSize.width, jpegSize.height, photoFormat, MAX_BURST + 1).apply {
                 setOnImageAvailableListener({ onJpegAvailable(it) }, handler)
             }
             if (cp.raw) {
@@ -278,7 +301,10 @@ class CameraController(context: Context, private val listener: Listener) {
         previewSurface = null
         state = State.PREVIEW
         meteringRect = null
+        faceRect = null
         aeLocked = false
+        burstExpected = 0
+        burstFrames.clear()
     }
 
     private fun releaseOpenLock() {
@@ -373,7 +399,20 @@ class CameraController(context: Context, private val listener: Listener) {
     private fun applySettings(b: CaptureRequest.Builder, still: Boolean) {
         val c = caps ?: return
         val s = settings
-        b.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+        val autoFocus = !(s.manualFocus && c.canManualFocus)
+        val faces = c.faceDetectMode != CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF
+        if (faces) b.set(CaptureRequest.STATISTICS_FACE_DETECT_MODE, c.faceDetectMode)
+        // Face priority: the camera focuses, exposes and white-balances for faces it finds.
+        // Only when the user hasn't picked a point or taken manual control.
+        val facePriority = faces && c.facePriorityScene && s.cameraAe && autoFocus && meteringRect == null
+        if (facePriority) {
+            b.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_USE_SCENE_MODE)
+            b.set(CaptureRequest.CONTROL_SCENE_MODE, CameraMetadata.CONTROL_SCENE_MODE_FACE_PRIORITY)
+        } else {
+            b.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+        }
+        // No built-in face priority: meter on the main face ourselves.
+        val face = if (!facePriority && meteringRect == null) faceRect else null
 
         // ---- exposure + flash
         if (!s.cameraAe && c.manualSensor) {
@@ -410,7 +449,7 @@ class CameraController(context: Context, private val listener: Listener) {
                 if (c.hasFlash && s.flash == FlashMode.TORCH) CameraMetadata.FLASH_MODE_TORCH else CameraMetadata.FLASH_MODE_OFF,
             )
             b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, s.evIndex.coerceIn(c.evRange.lower, c.evRange.upper))
-            val m = meteringRect
+            val m = meteringRect ?: face
             if (m != null && c.maxAeRegions > 0) b.set(CaptureRequest.CONTROL_AE_REGIONS, arrayOf(m))
             b.set(CaptureRequest.CONTROL_AE_LOCK, aeLocked)
         }
@@ -434,8 +473,10 @@ class CameraController(context: Context, private val listener: Listener) {
                 b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_AUTO)
                 b.set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(m))
             }
-            c.afModes.contains(CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE) ->
+            c.afModes.contains(CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE) -> {
                 b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                if (face != null && c.maxAfRegions > 0) b.set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(face))
+            }
             c.afModes.contains(CameraMetadata.CONTROL_AF_MODE_AUTO) ->
                 b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_AUTO)
             else -> b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
@@ -486,8 +527,65 @@ class CameraController(context: Context, private val listener: Listener) {
                 val focus = result.get(CaptureResult.LENS_FOCUS_DISTANCE)
                 val af = result.get(CaptureResult.CONTROL_AF_STATE)
                 main.post { listener.onLiveStats(iso, exp, focus, af) }
+                handleFaces(result.get(CaptureResult.STATISTICS_FACES), now)
             }
         }
+    }
+
+    private fun handleFaces(faces: Array<android.hardware.camera2.params.Face>?, now: Long) {
+        val c = caps ?: return
+        val list = faces?.filter { it.score >= 30 }.orEmpty()
+        if (list.isEmpty() && !hadFaces) return
+        hadFaces = list.isNotEmpty()
+        val frame = sensorFrame(c)
+        val viewRects = list.map { sensorToView(c, frame, it.bounds) }
+        main.post { listener.onFaces(viewRects) }
+
+        if (c.facePriorityScene || state != State.PREVIEW) return
+        // Fallback face metering: follow the biggest face, but don't thrash the camera.
+        val biggest = list.maxByOrNull { it.bounds.width() * it.bounds.height() }
+        val old = faceRect
+        if (biggest == null) {
+            if (old != null && now - faceRectAt > FACE_HOLD_MS) {
+                faceRect = null
+                updateRepeating()
+            }
+            return
+        }
+        val moved = old == null || abs(old.rect.centerX() - biggest.bounds.centerX()) > biggest.bounds.width() / 4 ||
+            abs(old.rect.centerY() - biggest.bounds.centerY()) > biggest.bounds.height() / 4
+        if (moved && now - faceRectAt > FACE_UPDATE_MS) {
+            faceRect = MeteringRectangle(biggest.bounds, MeteringRectangle.METERING_WEIGHT_MAX - 1)
+            faceRectAt = now
+            updateRepeating()
+        } else if (!moved) {
+            faceRectAt = now
+        }
+    }
+
+    /** The coordinate frame that 3A regions and face rectangles use at the current zoom. */
+    private fun sensorFrame(c: CameraCaps): Rect {
+        val area = c.activeArray
+        return if (!c.zoomRatioApi && settings.zoom > 1.001f) cropRegion(c, settings.zoom)
+        else Rect(0, 0, area.width(), area.height())
+    }
+
+    /** Sensor rectangle → 0..1 rectangle in the (portrait) preview view. Inverse of the tap mapping. */
+    private fun sensorToView(c: CameraCaps, frame: Rect, r: Rect): RectF {
+        fun map(px: Int, py: Int): Pair<Float, Float> {
+            var x = (px - frame.left).toFloat() / frame.width()
+            var y = (py - frame.top).toFloat() / frame.height()
+            repeat((c.sensorOrientation % 360) / 90) {
+                val t = y
+                y = x
+                x = 1f - t
+            }
+            if (c.isFront) x = 1f - x
+            return x to y
+        }
+        val (x1, y1) = map(r.left, r.top)
+        val (x2, y2) = map(r.right, r.bottom)
+        return RectF(min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
     }
 
     // ------------------------------------------------------------------ focus
@@ -504,11 +602,9 @@ class CameraController(context: Context, private val listener: Listener) {
             x = y
             y = 1f - t
         }
-        val area = c.activeArray
         // With CONTROL_ZOOM_RATIO, regions are relative to the zoomed view; with crop zoom they
         // are in full-sensor coordinates, so map into the crop.
-        val frame = if (!c.zoomRatioApi && settings.zoom > 1.001f) cropRegion(c, settings.zoom)
-        else Rect(0, 0, area.width(), area.height())
+        val frame = sensorFrame(c)
         val half = (min(frame.width(), frame.height()) * 0.08f).toInt()
         val cx = frame.left + (x * frame.width()).toInt()
         val cy = frame.top + (y * frame.height()).toInt()
@@ -581,12 +677,21 @@ class CameraController(context: Context, private val listener: Listener) {
             val b = d.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
             b.addTarget(jpeg.surface)
             val raw = rawReader
-            if (settings.raw && rawInSession && raw != null) {
+            val burst = stillCount > 1
+            if (!burst && settings.raw && rawInSession && raw != null) {
                 b.addTarget(raw.surface)
                 b.setTag(RAW_TAG)
             }
             applySettings(b, still = true)
-            s.capture(b.build(), stillCallback, handler)
+            pendingStills = stillCount
+            if (burst) {
+                burstFrames.clear()
+                burstExpected = stillCount
+                s.captureBurst(List(stillCount) { b.build() }, stillCallback, handler)
+            } else {
+                burstExpected = 0
+                s.capture(b.build(), stillCallback, handler)
+            }
         } catch (e: Exception) {
             Log.e(TAG, "captureStill", e)
             finishCapture(false)
@@ -595,7 +700,7 @@ class CameraController(context: Context, private val listener: Listener) {
 
     private val stillCallback = object : CameraCaptureSession.CaptureCallback() {
         override fun onCaptureStarted(s: CameraCaptureSession, request: CaptureRequest, timestamp: Long, frameNumber: Long) {
-            main.post { listener.onShutter() }
+            if (pendingStills == stillCount) main.post { listener.onShutter() }
         }
 
         override fun onCaptureCompleted(s: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
@@ -605,13 +710,27 @@ class CameraController(context: Context, private val listener: Listener) {
                 trimOldest(rawResults)
                 tryWriteDng(ts)
             }
-            finishCapture(true)
+            if (--pendingStills <= 0) finishCapture(true)
         }
 
         override fun onCaptureFailed(s: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure) {
             Log.w(TAG, "capture failed: ${failure.reason}")
-            finishCapture(false)
+            if (burstExpected > 0) {
+                burstExpected--
+                if (burstExpected > 0 && burstFrames.size >= burstExpected) deliverBurst()
+            }
+            if (--pendingStills <= 0) finishCapture(burstFrames.isNotEmpty())
         }
+    }
+
+    private var burstMime = "image/jpeg"
+
+    private fun deliverBurst() {
+        val frames = burstFrames.toList()
+        val mime = burstMime
+        burstFrames.clear()
+        burstExpected = 0
+        main.post { listener.onBurstCaptured(frames, mime) }
     }
 
     private fun finishCapture(success: Boolean) {
@@ -644,8 +763,14 @@ class CameraController(context: Context, private val listener: Listener) {
         } finally {
             image.close()
         }
-        val name = nameFor(ts)
         val heic = reader.imageFormat == ImageFormat.HEIC
+        if (burstExpected > 0) {
+            burstMime = if (heic) "image/heic" else "image/jpeg"
+            burstFrames += bytes
+            if (burstFrames.size >= burstExpected) deliverBurst()
+            return
+        }
+        val name = nameFor(ts)
         val mime = if (heic) "image/heic" else "image/jpeg"
         val mirror = output.mirrorFront && caps?.isFront == true && !heic
         saveExecutor.execute {
@@ -762,6 +887,9 @@ class CameraController(context: Context, private val listener: Listener) {
         private const val RAW_TAG = "raw"
         private const val STANDARD_PIXELS = 12_600_000L
         private const val AE_LOCK_DELAY_MS = 700L
+        private const val MAX_BURST = 5
+        private const val FACE_UPDATE_MS = 500L
+        private const val FACE_HOLD_MS = 1500L
         private const val MAX_PREVIEW_EXPOSURE_NS = 66_666_667L // 1/15 s
         private const val PRECAPTURE_TIMEOUT_FRAMES = 30
         private const val STATS_INTERVAL_MS = 200L
