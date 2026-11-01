@@ -657,7 +657,8 @@ class ProCamTest {
             }
         }
         onView(withText("Night")).check(matches(isDisplayed()))
-        onView(withText("Several shots merged for a brighter, cleaner photo")).check(matches(isDisplayed()))
+        // The explanation shares a text block with the camera settings line.
+        onView(withText(org.hamcrest.Matchers.containsString("Several shots merged"))).check(matches(isDisplayed()))
         // Delete it (with confirmation).
         val n = count("image/jpeg")
         onView(withText("Delete")).perform(click())
