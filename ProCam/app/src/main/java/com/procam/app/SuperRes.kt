@@ -61,36 +61,73 @@ object SuperRes {
         return NightProcessor.Gray(sw, sh, v)
     }
 
-    /** Reference frame prepared once for aligning many frames to it. */
-    class Prepared(val frame: Frame, val gray: NightProcessor.Gray, val luma: FloatArray)
+    /** Result of aligning one frame: offset (frame(x+dx, y+dy) ≈ ref(x, y)) and match cost. */
+    data class Offset(val dx: Float, val dy: Float, val cost: Double)
 
-    fun prepare(f: Frame, grayScale: Int) =
-        Prepared(f, gray(f, grayScale), lumaOf(f).also { PortraitProcessor.boxBlur(it, f.w, f.h, 1) })
+    /** A rectangle of the reference used for alignment. */
+    class Window(val x: Int, val y: Int, val w: Int, val h: Int)
 
     /**
-     * Offset of [frame] relative to [ref], with sub-pixel precision:
-     * frame(x + dx, y + dy) ≈ ref(x, y).
+     * Reference frame prepared once for aligning many frames to it: grey copy, lightly smoothed
+     * luma, and the most detailed patch (aligning on a ~256 px patch gives the same answer as the
+     * whole frame at a fraction of the work, whatever the zoom).
      */
-    fun offset(ref: Prepared, frame: Frame, grayScale: Int): Pair<Float, Float> {
+    class Prepared(val frame: Frame, val gray: NightProcessor.Gray, val luma: FloatArray, val window: Window)
+
+    fun prepare(f: Frame, grayScale: Int): Prepared {
+        val luma = lumaOf(f).also { PortraitProcessor.boxBlur(it, f.w, f.h, 1) }
+        return Prepared(f, gray(f, grayScale), luma, detailedWindow(luma, f.w, f.h))
+    }
+
+    /** The patch (about 256x256) with the most edges, away from the borders. */
+    private fun detailedWindow(luma: FloatArray, w: Int, h: Int): Window {
+        val size = min(WINDOW, min(w, h) / 2).coerceAtLeast(16)
+        val margin = max(8, min(w, h) / 10)
+        var best = Window((w - size) / 2, (h - size) / 2, size, size)
+        var bestScore = -1.0
+        val step = max(8, size / 2)
+        var y = margin
+        while (y + size <= h - margin) {
+            var x = margin
+            while (x + size <= w - margin) {
+                var e = 0.0
+                var yy = y + 1
+                while (yy < y + size - 1) {
+                    var xx = x + 1
+                    while (xx < x + size - 1) {
+                        val i = yy * w + xx
+                        e += abs(luma[i + 1] - luma[i - 1]) + abs(luma[i + w] - luma[i - w])
+                        xx += 4
+                    }
+                    yy += 4
+                }
+                if (e > bestScore) {
+                    bestScore = e
+                    best = Window(x, y, size, size)
+                }
+                x += step
+            }
+            y += step
+        }
+        return best
+    }
+
+    fun offset(ref: Prepared, frame: Frame, grayScale: Int): Offset {
         val coarse = NightProcessor.align(ref.gray, gray(frame, grayScale))
         // align() reports shifts in units of ALIGN_SCALE pixels of the grey copy's source.
-        val cx = (coarse.first.toFloat() / NightProcessor.ALIGN_SCALE * grayScale).roundToInt()
-        val cy = (coarse.second.toFloat() / NightProcessor.ALIGN_SCALE * grayScale).roundToInt()
-        val r = ref.frame
-        val (ix, iy) = NightProcessor.refine(r.px, frame.px, r.w, r.h, cx, cy, range = 3)
-        // Sub-pixel, coarse to fine: 1/2-pixel steps within ±1 px, then 1/8-pixel steps within
-        // ±3/8 px of the best. Lightly smoothed luma: raw noisy pixels bias toward half pixels.
+        var bx = (coarse.first.toFloat() / NightProcessor.ALIGN_SCALE * grayScale).roundToInt().toFloat()
+        var by = (coarse.second.toFloat() / NightProcessor.ALIGN_SCALE * grayScale).roundToInt().toFloat()
+        // Refine in the detailed patch: whole pixels (±3), then 1/2 px (±1), then 1/8 px (±3/8).
+        // Lightly smoothed luma: raw noisy pixels bias sub-pixel matching toward half pixels.
         val fl = lumaOf(frame).also { PortraitProcessor.boxBlur(it, frame.w, frame.h, 1) }
-        var bx = ix.toFloat()
-        var by = iy.toFloat()
-        for ((step, reach) in arrayOf(0.5f to 2, 0.125f to 3)) {
+        var best = Double.MAX_VALUE
+        for ((step, reach) in arrayOf(1f to 3, 0.5f to 2, 0.125f to 3)) {
             val cx0 = bx
             val cy0 = by
-            var best = Double.MAX_VALUE
             for (sy in -reach..reach) for (sx in -reach..reach) {
                 val dx = cx0 + sx * step
                 val dy = cy0 + sy * step
-                val c = subCost(ref.luma, fl, r.w, r.h, frame.w, frame.h, dx, dy)
+                val c = subCost(ref.luma, fl, ref.frame.w, ref.frame.h, frame.w, frame.h, dx, dy, ref.window)
                 if (c < best) {
                     best = c
                     bx = dx
@@ -98,22 +135,24 @@ object SuperRes {
                 }
             }
         }
-        return Pair(bx, by)
+        return Offset(bx, by, best)
     }
 
     /** Offsets of all [frames] relative to frames[0], computed in parallel on all CPU cores. */
-    fun offsets(frames: List<Frame>, grayScale: Int): List<Pair<Float, Float>> {
+    fun offsets(frames: List<Frame>, grayScale: Int): List<Offset> {
         val ref = prepare(frames[0], grayScale)
         val pool = java.util.concurrent.Executors.newFixedThreadPool(threads())
         try {
             val jobs = frames.indices.map { k ->
-                pool.submit<Pair<Float, Float>> { if (k == 0) 0f to 0f else offset(ref, frames[k], grayScale) }
+                pool.submit<Offset> { if (k == 0) Offset(0f, 0f, 0.0) else offset(ref, frames[k], grayScale) }
             }
             return jobs.map { it.get() }
         } finally {
             pool.shutdown()
         }
     }
+
+    private const val WINDOW = 256
 
     fun threads() = Runtime.getRuntime().availableProcessors().coerceIn(1, 6)
 
@@ -123,15 +162,15 @@ object SuperRes {
      * Mean squared difference between ref(x - d/2) and frame(x + d/2): both images are resampled
      * by half the shift, so interpolation smooths them equally and doesn't bias the match.
      */
-    private fun subCost(rl: FloatArray, fl: FloatArray, w: Int, h: Int, fw: Int, fh: Int, dx: Float, dy: Float): Double {
+    private fun subCost(
+        rl: FloatArray, fl: FloatArray, w: Int, h: Int, fw: Int, fh: Int, dx: Float, dy: Float, win: Window,
+    ): Double {
         var sum = 0.0
         var n = 0
-        val x0 = w / 6
-        val y0 = h / 6
-        var y = y0
-        while (y < h - y0) {
-            var x = x0
-            while (x < w - x0) {
+        var y = win.y
+        while (y < win.y + win.h) {
+            var x = win.x
+            while (x < win.x + win.w) {
                 val a = sample(fl, fw, fh, x + dx / 2, y + dy / 2)
                 val b = sample(rl, w, h, x - dx / 2, y - dy / 2)
                 if (!a.isNaN() && !b.isNaN()) {
@@ -143,7 +182,8 @@ object SuperRes {
             }
             y += 2
         }
-        return if (n == 0) Double.MAX_VALUE else sum / n
+        // Too little overlap to judge: treat as a bad match.
+        return if (n < (win.w * win.h) / 16) Double.MAX_VALUE else sum / n
     }
 
     private fun sample(a: FloatArray, w: Int, h: Int, x: Float, y: Float): Float {

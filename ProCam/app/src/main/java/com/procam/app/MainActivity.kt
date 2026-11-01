@@ -1201,7 +1201,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         releaseShutterForBackground()
         enhancer.execute {
             val result = try {
-                superZoom.process(frames, crop, quality)
+                superZoom.process(if (frames.size > 3) frames.drop(1) else frames, crop, quality)
             } catch (e: Throwable) {
                 Log.e(TAG, "super zoom failed", e)
                 null
@@ -1243,7 +1243,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         enhancer.execute {
             val t0 = SystemClock.uptimeMillis()
             val result = try {
-                superZoom.processFrames(frames, rotationDegrees, quality)
+                // The first frame of a burst can predate the burst's settings: skip it.
+                superZoom.processFrames(if (frames.size > 3) frames.drop(1) else frames, rotationDegrees, quality)
             } catch (e: Throwable) {
                 Log.e(TAG, "super zoom failed", e)
                 null
@@ -1830,7 +1831,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         private const val SUPER_ZOOM_FACTOR = 4f
         private const val MAX_DISPLAY_ZOOM = 100f
         /** Shots taken for super zoom; the sharpest [SuperZoomProcessor.KEEP_FRAMES] are merged. */
-        private const val SUPER_ZOOM_FRAMES = 10
+        private const val SUPER_ZOOM_FRAMES = 11 // the first is skipped, the sharpest 6 of the other 10 merged
         private const val ZOOM_BAR_HIDE_MS = 3500L
         private const val MAX_PENDING_ENHANCE = 2
         private const val NIGHT_FALLBACK_FRAMES = 6

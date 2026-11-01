@@ -60,16 +60,22 @@ class SuperZoomProcessor {
         val chosen = SuperRes.sharpest(same, KEEP_FRAMES).map { same[it] }
         val t1 = android.os.SystemClock.uptimeMillis()
         // Sub-pixel offsets of every frame relative to the reference (in parallel).
-        val offsets = SuperRes.offsets(chosen, GRAY_SCALE)
+        val all = SuperRes.offsets(chosen, GRAY_SCALE)
+        // Drop frames that don't really match the reference (moved subject, stale frame, failed
+        // alignment) instead of trusting them: cost well above the typical frame's.
+        val typical = all.drop(1).map { it.cost }.sorted().let { if (it.isEmpty()) 0.0 else it[it.size / 2] }
+        val good = all.indices.filter { k -> k == 0 || all[k].cost <= max(typical * 3, 4.0) }
+        val frames = good.map { chosen[it] }
+        val offsets = good.map { all[it].dx to all[it].dy }
         val t2 = android.os.SystemClock.uptimeMillis()
-        val motion = IntArray(chosen.size) { k ->
+        val motion = IntArray(frames.size) { k ->
             val (dx, dy) = offsets[k]
-            if (k == 0) 255 else NightProcessor.motionThreshold(chosen[0].px, chosen[k].px, w0, h0, dx.roundToInt(), dy.roundToInt())
+            if (k == 0) 255 else NightProcessor.motionThreshold(frames[0].px, frames[k].px, w0, h0, dx.roundToInt(), dy.roundToInt())
         }
-        Log.i(TAG, "kept ${chosen.size} of $taken frames; offsets ${offsets.map { "%.2f,%.2f".format(it.first, it.second) }}")
+        Log.i(TAG, "kept ${frames.size} of $taken frames; offsets ${all.map { "%.2f,%.2f (%.0f)".format(it.dx, it.dy, it.cost) }}")
         // Shift-and-add onto a finer grid (2-3x, aiming for ~3000 px), then sharpen.
         val scale = (MAX_SIDE.toFloat() / max(w0, h0)).coerceIn(1f, MAX_SCALE)
-        val merged = SuperRes.merge(chosen, offsets, motion, scale)
+        val merged = SuperRes.merge(frames, offsets, motion, scale)
         val t3 = android.os.SystemClock.uptimeMillis()
         SuperRes.sharpen(merged)
         val t4 = android.os.SystemClock.uptimeMillis()
@@ -83,10 +89,10 @@ class SuperZoomProcessor {
         }
         val bytes = ByteArrayOutputStream()
         out.compress(Bitmap.CompressFormat.JPEG, quality.coerceIn(50, 100), bytes)
-        val result = Result(bytes.toByteArray(), chosen.size, out.width, out.height)
+        val result = Result(bytes.toByteArray(), frames.size, out.width, out.height)
         out.recycle()
         val t5 = android.os.SystemClock.uptimeMillis()
-        Log.i(TAG, "super zoom: ${result.width}x${result.height} from ${chosen.size} of $taken frames ${w0}x$h0 (x$scale); " +
+        Log.i(TAG, "super zoom: ${result.width}x${result.height} from ${frames.size} of $taken frames ${w0}x$h0 (x$scale); " +
             "timing ms: lucky ${t1 - t0}, align ${t2 - t1}, merge ${t3 - t2}, sharpen ${t4 - t3}, encode ${t5 - t4}, " +
             "cores ${Runtime.getRuntime().availableProcessors()}")
         return result
