@@ -323,13 +323,19 @@ class NightProcessor {
             aeIso: Int, aeExposureNs: Long, safeShutterNs: Long,
             isoRange: android.util.Range<Int>, exposureRange: android.util.Range<Long>, brighten: Double = 1.6,
         ): Triple<Int, Long, Int> {
-            val product = aeIso.toDouble() * aeExposureNs * brighten
+            // Only brighten scenes that are actually dim; a bright scene keeps auto's exposure.
+            val dim = aeIso >= 400 || aeExposureNs >= 30_000_000L
+            val product = aeIso.toDouble() * aeExposureNs * (if (dim) brighten else 1.0)
             var t = min(safeShutterNs, MAX_FRAME_NS).coerceIn(exposureRange.lower, exposureRange.upper)
             var iso = (product / t).roundToInt()
             if (iso > isoRange.upper) {
                 // Not enough ISO: allow a bit longer than "safe" (merge forgives some blur).
                 iso = isoRange.upper
                 t = (product / iso).toLong().coerceAtMost(min(MAX_FRAME_NS, safeShutterNs * 2)).coerceIn(exposureRange.lower, exposureRange.upper)
+            } else if (iso < isoRange.lower) {
+                // Bright scene: ISO can't go lower, so shorten the shutter instead (else it overexposes).
+                iso = isoRange.lower
+                t = (product / iso).toLong().coerceIn(exposureRange.lower, exposureRange.upper)
             }
             iso = iso.coerceIn(isoRange.lower, isoRange.upper)
             val frames = if (t > 100_000_000L) 6 else 8

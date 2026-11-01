@@ -406,6 +406,22 @@ class ProCamTest {
     }
 
     @Test
+    fun nightPlanKeepsExposureRight() {
+        val isoR = android.util.Range(100, 6400)
+        val expR = android.util.Range(10_000L, 1_000_000_000L)
+        fun product(p: Triple<Int, Long, Int>) = p.first.toDouble() * p.second
+        // Bright daylight (auto: ISO 100, 1/220 s), very steady hands: must NOT use a long shutter.
+        val day = NightProcessor.plan(100, 4_545_454L, ShakeMeter.MAX_SAFE_NS, isoR, expR)
+        Log.i(TAG, "day plan: $day")
+        assertTrue("daylight exposure unchanged", kotlin.math.abs(product(day) / (100.0 * 4_545_454L) - 1.0) < 0.05)
+        // Dim room (auto: ISO 1600, 1/15 s), hands sharp to 1/30: shorter shutter, more ISO, ~1.6x brighter.
+        val room = NightProcessor.plan(1600, 66_666_667L, 33_333_333L, isoR, expR)
+        Log.i(TAG, "room plan: $room")
+        assertTrue("shutter within hand limit", room.second <= 33_333_333L)
+        assertTrue("brighter than auto", product(room) / (1600.0 * 66_666_667L) in 1.4..1.8)
+    }
+
+    @Test
     fun nightCaptureSavesMergedPhoto() {
         waitForCamera()
         setSimple(true)
