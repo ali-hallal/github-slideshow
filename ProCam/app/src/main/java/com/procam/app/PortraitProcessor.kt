@@ -50,9 +50,7 @@ class PortraitProcessor {
     /** Person mask (0 = background, 1 = person) or null if nobody is in the photo. */
     private fun segment(full: Bitmap): Mask? {
         val scale = SEGMENT_SIDE.toFloat() / max(full.width, full.height)
-        val small = Bitmap.createScaledBitmap(
-            full, (full.width * scale).roundToInt().coerceAtLeast(1), (full.height * scale).roundToInt().coerceAtLeast(1), true,
-        )
+        val small = shrink(full, (full.width * scale).roundToInt().coerceAtLeast(1), (full.height * scale).roundToInt().coerceAtLeast(1))
         val m = Tasks.await(segmenter.process(InputImage.fromBitmap(small, 0)), 15, TimeUnit.SECONDS)
         small.recycle()
         val buf = m.buffer
@@ -105,7 +103,7 @@ class PortraitProcessor {
             val h = full.height
             val sw = max(1, w / BLUR_SCALE)
             val sh = max(1, h / BLUR_SCALE)
-            val small = Bitmap.createScaledBitmap(full, sw, sh, true)
+            val small = shrink(full, sw, sh)
             val px = IntArray(sw * sh)
             small.getPixels(px, 0, sw, 0, 0, sw, sh)
             small.recycle()
@@ -167,6 +165,24 @@ class PortraitProcessor {
                 full.setPixels(rowO, 0, w, 0, y, w, 1)
             }
             blurred.recycle()
+        }
+
+        /**
+         * Downscale that really averages the area each output pixel covers. A single
+         * createScaledBitmap(filter = true) only blends neighbouring source pixels, so a big
+         * reduction (8×, 16×) samples the image instead of averaging it (aliasing). Halving step by
+         * step averages 2×2 blocks each time.
+         */
+        fun shrink(src: Bitmap, w: Int, h: Int): Bitmap {
+            var cur = src
+            while (cur.width / 2 >= w * 2 && cur.height / 2 >= h * 2) {
+                val next = Bitmap.createScaledBitmap(cur, cur.width / 2, cur.height / 2, true)
+                if (cur !== src) cur.recycle()
+                cur = next
+            }
+            val out = Bitmap.createScaledBitmap(cur, w, h, true)
+            if (cur !== src && cur !== out) cur.recycle()
+            return out
         }
 
         /** In-place box blur (horizontal then vertical), O(n) per pass. */

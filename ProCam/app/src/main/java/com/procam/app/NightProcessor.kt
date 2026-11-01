@@ -123,7 +123,7 @@ class NightProcessor {
             fun of(bmp: Bitmap, scale: Int): Gray {
                 val sw = max(1, bmp.width / scale)
                 val sh = max(1, bmp.height / scale)
-                val small = Bitmap.createScaledBitmap(bmp, sw, sh, true)
+                val small = PortraitProcessor.shrink(bmp, sw, sh)
                 val px = IntArray(sw * sh)
                 small.getPixels(px, 0, sw, 0, 0, sw, sh)
                 small.recycle()
@@ -287,7 +287,7 @@ class NightProcessor {
         fun smoothMotion(img: Bitmap, sumL: IntArray, sumSq: IntArray, sumW: IntArray) {
             val w = img.width
             val h = img.height
-            val small = Bitmap.createScaledBitmap(img, max(1, w / MOTION_BLUR_SCALE), max(1, h / MOTION_BLUR_SCALE), true)
+            val small = PortraitProcessor.shrink(img, max(1, w / MOTION_BLUR_SCALE), max(1, h / MOTION_BLUR_SCALE))
             val blurred = Bitmap.createScaledBitmap(small, w, h, true)
             small.recycle()
             // Where did things move? Decided per coarse cell (and spread to neighbours), so the
