@@ -95,6 +95,7 @@ class CameraController(context: Context, private val listener: Listener) {
     private var hadFaces = false
     private var stillCount = 1
     private var stillToMemory = false
+    private var burstExposure: Pair<Int, Long>? = null
     private var pendingStills = 0
     private var burstExpected = 0
     private val burstFrames = mutableListOf<ByteArray>()
@@ -218,7 +219,13 @@ class CameraController(context: Context, private val listener: Listener) {
      * Takes [count] photos back to back. With count > 1 they are NOT saved: they are handed to
      * [Listener.onBurstCaptured] so the caller can keep the best one.
      */
-    fun takeBurst(deviceOrientation: Int, count: Int, toMemory: Boolean = count > 1) {
+    fun takeBurst(
+        deviceOrientation: Int,
+        count: Int,
+        toMemory: Boolean = count > 1,
+        /** Per-frame (ISO, exposure ns) for every frame of the burst, e.g. for Night; null = normal. */
+        exposure: Pair<Int, Long>? = null,
+    ) {
         val h = handler
         if (h == null) {
             main.post { listener.onCaptureFinished(false) }
@@ -227,6 +234,7 @@ class CameraController(context: Context, private val listener: Listener) {
         h.post {
             stillCount = count.coerceIn(1, MAX_BURST)
             stillToMemory = toMemory || stillCount > 1
+            burstExposure = exposure
             takePictureInternal(deviceOrientation)
         }
     }
@@ -252,7 +260,7 @@ class CameraController(context: Context, private val listener: Listener) {
             texture.setDefaultBufferSize(previewSize.width, previewSize.height)
             previewSurface = Surface(texture)
 
-            jpegReader = ImageReader.newInstance(jpegSize.width, jpegSize.height, photoFormat, MAX_BURST + 1).apply {
+            jpegReader = ImageReader.newInstance(jpegSize.width, jpegSize.height, photoFormat, 4).apply {
                 setOnImageAvailableListener({ onJpegAvailable(it) }, handler)
             }
             if (cp.raw) {
@@ -649,7 +657,7 @@ class CameraController(context: Context, private val listener: Listener) {
             return
         }
         captureOrientation = jpegOrientation(c, deviceOrientation)
-        val needsPrecapture = settings.cameraAe && c.hasFlash &&
+        val needsPrecapture = burstExposure == null && settings.cameraAe && c.hasFlash &&
             (settings.flash == FlashMode.AUTO || settings.flash == FlashMode.ON)
         usedPrecapture = needsPrecapture
         if (!needsPrecapture) {
@@ -688,6 +696,15 @@ class CameraController(context: Context, private val listener: Listener) {
                 b.setTag(RAW_TAG)
             }
             applySettings(b, still = true)
+            val override = burstExposure
+            if (override != null && caps?.manualSensor == true) {
+                b.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+                b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
+                b.set(CaptureRequest.SENSOR_SENSITIVITY, override.first)
+                b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, override.second)
+                b.set(CaptureRequest.SENSOR_FRAME_DURATION, override.second)
+                b.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_OFF)
+            }
             pendingStills = stillCount
             if (burst) {
                 burstFrames.clear()
@@ -893,7 +910,7 @@ class CameraController(context: Context, private val listener: Listener) {
         private const val RAW_TAG = "raw"
         private const val STANDARD_PIXELS = 12_600_000L
         private const val AE_LOCK_DELAY_MS = 700L
-        private const val MAX_BURST = 5
+        private const val MAX_BURST = 8
         private const val FACE_UPDATE_MS = 500L
         private const val FACE_HOLD_MS = 1500L
         private const val MAX_PREVIEW_EXPOSURE_NS = 66_666_667L // 1/15 s

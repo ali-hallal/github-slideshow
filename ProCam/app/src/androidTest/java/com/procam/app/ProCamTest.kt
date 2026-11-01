@@ -367,6 +367,63 @@ class ProCamTest {
     }
 
     @Test
+    fun nightMergeReducesNoise() {
+        // 6 noisy, hand-shaken copies of a scene, as JPEGs, like a real burst.
+        val w = 900
+        val h = 675
+        val rnd = java.util.Random(7)
+        val scene = IntArray(w * h) { i -> val x = i % w; val y = i / w
+            (120 + 50 * kotlin.math.sin(x / 31.0) * kotlin.math.cos(y / 19.0) + if ((x / 60 + y / 45) % 2 == 0) 25 else -25).toInt() }
+        val shifts = listOf(0 to 0, 9 to -6, -14 to 4, 5 to 11, -7 to -10, 13 to 8)
+        val frames = shifts.map { (sx, sy) ->
+            val bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+            val px = IntArray(w * h) { i -> val x = i % w; val y = i / w
+                val v = (scene[(y + sy).coerceIn(0, h - 1) * w + (x + sx).coerceIn(0, w - 1)] + rnd.nextGaussian() * 18).toInt().coerceIn(0, 255)
+                (0xFF shl 24) or (v shl 16) or (v shl 8) or v }
+            bmp.setPixels(px, 0, w, 0, 0, w, h)
+            val out = java.io.ByteArrayOutputStream()
+            bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 97, out)
+            out.toByteArray()
+        }
+        val result = NightProcessor().process(frames, iso = 3200, quality = 95)
+        assertEquals("all frames merged", frames.size, result.merged)
+        // Measure noise as roughness in a flat-ish patch: neighbour differences, single vs merged.
+        fun roughness(jpeg: ByteArray, ox: Int, oy: Int): Double {
+            val b = android.graphics.BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size)
+            var s = 0.0; var n = 0
+            for (y in 300 until 380) for (x in 400 until 480) {
+                val a = android.graphics.Color.green(b.getPixel(x + ox, y + oy))
+                val c = android.graphics.Color.green(b.getPixel(x + ox + 1, y + oy))
+                s += (a - c) * (a - c); n++
+            }
+            return kotlin.math.sqrt(s / n)
+        }
+        val ref = shifts[result.reference]
+        val single = roughness(frames[result.reference], 0, 0)
+        val merged = roughness(result.jpeg, 0, 0)
+        Log.i(TAG, "night roughness single=$single merged=$merged (ref shift $ref)")
+        assertTrue("merge should be much cleaner ($single -> $merged)", merged < single / 1.6)
+    }
+
+    @Test
+    fun nightCaptureSavesMergedPhoto() {
+        waitForCamera()
+        setSimple(true)
+        onView(withId(R.id.intentNight)).perform(click())
+        val before = count("image/jpeg")
+        onView(withId(R.id.shutter)).perform(click())
+        waitFor("night photo saved", 60_000) { count("image/jpeg") > before }
+        waitFor("finished", 20_000) { !shutterBusy() }
+        SystemClock.sleep(1500)
+        assertEquals("exactly one photo", before + 1, count("image/jpeg"))
+        val names = context.contentResolver.query(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI, arrayOf(MediaStore.Images.Media.DISPLAY_NAME),
+            "${MediaStore.Images.Media.DISPLAY_NAME} LIKE ?", arrayOf("%_NIGHT%"), null,
+        )?.use { it.count } ?: 0
+        assertTrue("a _NIGHT photo was saved", names > 0)
+    }
+
+    @Test
     fun stopTables() {
         val iso = Stops.isoSteps(Range(100, 3200))
         assertEquals(100, iso.first())

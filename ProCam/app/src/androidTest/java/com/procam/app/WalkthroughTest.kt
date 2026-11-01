@@ -75,6 +75,19 @@ class WalkthroughTest {
         waitForIdleShutter(30_000)
         SystemClock.sleep(800)
         screenshot("portrait_done")
+        // Night: 6-8 shots merged into one.
+        onView(withId(R.id.intentNight)).perform(click())
+        SystemClock.sleep(1500)
+        screenshot("simple_night")
+        onView(withId(R.id.shutter)).perform(click())
+        SystemClock.sleep(400)
+        screenshot("night_hold_still")
+        SystemClock.sleep(2500)
+        screenshot("night_merging")
+        waitForIdleShutter(60_000)
+        SystemClock.sleep(800)
+        screenshot("night_done")
+        savePhoto("photo_night")
         onView(withId(R.id.intentAuto)).perform(click())
 
         // On to the Pro controls.

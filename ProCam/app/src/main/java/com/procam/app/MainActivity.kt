@@ -89,6 +89,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private lateinit var btnMode: TextView
     private lateinit var shakeView: ShakeView
     private lateinit var intentPortrait: TextView
+    private lateinit var intentNight: TextView
     private lateinit var portraitRow: View
     private lateinit var blurButtons: List<TextView>
 
@@ -157,6 +158,12 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private val simple get() = !prefs.uiPro
     private val groupMode get() = simple && prefs.intent == "GROUP"
     private val portraitMode get() = simple && prefs.intent == "PORTRAIT"
+    private val nightMode get() = simple && prefs.intent == "NIGHT"
+
+    // Night
+    private val night = NightProcessor()
+    private var nightProcessing = false
+    private var nightIso = 800
 
     // ------------------------------------------------------------------ lifecycle
 
@@ -214,6 +221,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         cancelGroup()
         groupProcessing = false
         portraitProcessing = false
+        nightProcessing = false
         overlay.setFaces(emptyList())
         zoomAnimator?.cancel()
         camera.close()
@@ -349,6 +357,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         btnMode = findViewById(R.id.btnMode)
         shakeView = findViewById(R.id.shakeView)
         intentPortrait = findViewById(R.id.intentPortrait)
+        intentNight = findViewById(R.id.intentNight)
         portraitRow = findViewById(R.id.portraitRow)
         blurButtons = listOf(findViewById(R.id.blurSoft), findViewById(R.id.blurMedium), findViewById(R.id.blurStrong))
 
@@ -467,6 +476,14 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         intentAuto.setOnClickListener { setIntent("AUTO") }
         intentGroup.setOnClickListener { setIntent("GROUP") }
         intentPortrait.setOnClickListener { setIntent("PORTRAIT") }
+        intentNight.setOnClickListener { setIntent("NIGHT") }
+        // The status pill doubles as a tappable tip ("Dark scene · tap for Night").
+        groupStatus.setOnClickListener {
+            if (it.tag == TIP_NIGHT) {
+                it.tag = null
+                setIntent("NIGHT")
+            }
+        }
         blurButtons.forEachIndexed { i, v ->
             v.setOnClickListener {
                 prefs.portraitStrength = i
@@ -544,6 +561,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private fun intentRowView(intent: String) = when (intent) {
         "GROUP" -> intentGroup
         "PORTRAIT" -> intentPortrait
+        "NIGHT" -> intentNight
         else -> intentAuto
     }
 
@@ -566,7 +584,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         btnMode.text = if (pro) "SIMPLE" else "PRO"
 
         val intent = prefs.intent
-        for ((v, on) in listOf(intentAuto to (intent == "AUTO"), intentPortrait to (intent == "PORTRAIT"), intentGroup to (intent == "GROUP"))) {
+        for ((v, on) in listOf(
+            intentAuto to (intent == "AUTO"), intentPortrait to (intent == "PORTRAIT"),
+            intentNight to (intent == "NIGHT"), intentGroup to (intent == "GROUP"),
+        )) {
             v.setBackgroundResource(if (on) R.drawable.pill_selected_bg else R.drawable.pill_bg)
             v.setTextColor(getColor(if (on) R.color.black else R.color.white))
         }
@@ -581,6 +602,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         intentHint.text = when (intent) {
             "GROUP" -> "Waits until everyone's eyes are open, then keeps the best of $GROUP_BURST"
             "PORTRAIT" -> ""
+            "NIGHT" -> "Merges several shots for brighter, cleaner low-light photos · hold still about 1 s"
             else -> "Finds faces and sets everything for you"
         }
     }
@@ -671,7 +693,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         if (groupWaiting) {
             cancelGroup(); return
         }
-        if (capturing || groupProcessing || portraitProcessing || caps == null) return
+        if (capturing || groupProcessing || portraitProcessing || nightProcessing || caps == null) return
         haptic(shutter, HapticFeedbackConstants.VIRTUAL_KEY)
         if (prefs.timerSeconds > 0) startCountdown() else afterCountdown()
     }
@@ -701,6 +723,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             // Keep the photo in memory: it gets its background blurred before saving.
             portraitProcessing = true
             camera.takeBurst(deviceOrientation, 1, toMemory = true)
+        } else if (nightMode) {
+            startNight()
         } else {
             camera.takePicture(deviceOrientation)
         }
@@ -831,7 +855,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     override fun onCaptureFinished(success: Boolean) {
-        if ((groupProcessing || portraitProcessing) && success) {
+        if ((groupProcessing || portraitProcessing || nightProcessing) && success) {
             // Wait for the photo(s) to be processed and saved.
             if (pressRatio < BLURRY_RATIO) toast("This one may be blurry: your hands moved. Brace your elbows and try again.")
             pressRatio = Float.MAX_VALUE
@@ -840,6 +864,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         if (!success) {
             groupProcessing = false
             portraitProcessing = false
+            nightProcessing = false
             groupStatus.visibility = View.GONE
         }
         if (success && pressRatio < BLURRY_RATIO) {
@@ -899,6 +924,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             processPortrait(frames.first(), mimeType)
             return
         }
+        if (nightProcessing) {
+            processNight(frames, mimeType)
+            return
+        }
         if (!groupProcessing) return
         groupStatus.text = "Picking the best shot…"
         Thread {
@@ -921,6 +950,77 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 )
             }
         }.start()
+    }
+
+    // ------------------------------------------------------------------ night
+
+    private fun startNight() {
+        val c = caps ?: return
+        nightProcessing = true
+        val isoRange = c.isoRange
+        val expRange = c.exposureRange
+        if (c.manualSensor && isoRange != null && expRange != null) {
+            val (iso, t, frames) = NightProcessor.plan(
+                aeIso = liveIso ?: 400,
+                aeExposureNs = liveExposure ?: 33_000_000L,
+                safeShutterNs = safeShutterNs() ?: 66_000_000L,
+                isoRange = isoRange,
+                exposureRange = expRange,
+            )
+            nightIso = iso
+            Log.i(TAG, "night plan: $frames x ISO $iso ${Stops.shutterLabel(t)}")
+            showGroupStatus("Hold still… ${"%.1f".format(Locale.US, frames * t / 1e9 + 0.3)} s")
+            camera.takeBurst(deviceOrientation, frames, toMemory = true, exposure = iso to t)
+        } else {
+            // No manual exposure on this camera: merge a normal burst for less noise.
+            nightIso = liveIso ?: 800
+            showGroupStatus("Hold still…")
+            camera.takeBurst(deviceOrientation, NIGHT_FALLBACK_FRAMES, toMemory = true)
+        }
+    }
+
+    private fun processNight(frames: List<ByteArray>, mimeType: String) {
+        showGroupStatus("Merging ${frames.size} shots…")
+        val iso = nightIso
+        val quality = prefs.jpegQuality
+        Thread {
+            val result = try {
+                night.process(frames, iso, quality)
+            } catch (e: Throwable) {
+                Log.e(TAG, "night merge failed", e)
+                null
+            }
+            val bytes = result?.jpeg ?: frames.first()
+            val mime = if (result != null) "image/jpeg" else mimeType
+            val ext = if (mime == "image/heic") "heic" else "jpg"
+            val source = frames[result?.reference ?: 0]
+            val uri = MediaSaver.save(
+                this, "${MediaSaver.newBaseName()}${if (result != null) "_NIGHT" else ""}.$ext", mime,
+                writer = { it.write(bytes) },
+                afterWrite = if (result != null) { u -> MediaSaver.copyExif(this, u, source) } else null,
+            )
+            runOnUiThread {
+                nightProcessing = false
+                capturing = false
+                shutter.busy = false
+                groupStatus.visibility = View.GONE
+                if (uri != null) onPhotoSaved(uri, mime) else toast(getString(R.string.save_failed))
+                toast(if (result != null) "Night photo · merged ${result.merged} shots" else "Saved a single shot")
+            }
+        }.start()
+    }
+
+    /** In Auto, suggest Night when the scene is dark. */
+    private fun updateNightTip() {
+        if (!simple || prefs.intent != "AUTO" || capturing) return
+        val dark = (liveIso ?: 0) >= DARK_ISO || (liveExposure ?: 0L) >= DARK_EXPOSURE_NS
+        if (dark) {
+            showGroupStatus("Dark scene · tap for Night")
+            groupStatus.tag = TIP_NIGHT
+        } else if (groupStatus.tag == TIP_NIGHT) {
+            groupStatus.tag = null
+            groupStatus.visibility = View.GONE
+        }
     }
 
     // ------------------------------------------------------------------ portrait
@@ -1023,6 +1123,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     private fun showGroupStatus(text: String) {
+        groupStatus.tag = null
         groupStatus.text = text
         groupStatus.visibility = View.VISIBLE
     }
@@ -1075,6 +1176,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             updateShakeMeter()
             if (groupMode) analyzeGroup()
             updatePortraitHint()
+            updateNightTip()
         }
     }
 
@@ -1368,6 +1470,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         private const val GROUP_TIMEOUT_MS = 6000L
         private const val NO_FACE_GIVE_UP_MS = 1500L
         private const val STEADY_WAIT_MS = 800L
+        private const val NIGHT_FALLBACK_FRAMES = 6
+        private const val DARK_ISO = 1600
+        private const val DARK_EXPOSURE_NS = 50_000_000L
+        private const val TIP_NIGHT = "tip_night"
         private const val BLURRY_RATIO = 0.5f
         private const val FOCUS_STEPS = 100
         private const val ANALYSIS_INTERVAL_MS = 150L

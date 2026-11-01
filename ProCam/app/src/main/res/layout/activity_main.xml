@@ -207,6 +207,7 @@
 
                 <TextView android:id="@+id/intentAuto" style="@style/IntentPill" android:text="Auto" />
                 <TextView android:id="@+id/intentPortrait" style="@style/IntentPill" android:text="Portrait" />
+                <TextView android:id="@+id/intentNight" style="@style/IntentPill" android:text="Night" />
                 <TextView android:id="@+id/intentGroup" style="@style/IntentPill" android:text="Group" />
             </LinearLayout>
         </HorizontalScrollView>
