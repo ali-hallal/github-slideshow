@@ -290,20 +290,49 @@ class NightProcessor {
             val small = Bitmap.createScaledBitmap(img, max(1, w / MOTION_BLUR_SCALE), max(1, h / MOTION_BLUR_SCALE), true)
             val blurred = Bitmap.createScaledBitmap(small, w, h, true)
             small.recycle()
+            // Where did things move? Decided per coarse cell (and spread to neighbours), so the
+            // still gaps between the "steps" of a moving object get smoothed too.
+            val cw = max(1, w / MOTION_BLUR_SCALE)
+            val ch = max(1, h / MOTION_BLUR_SCALE)
+            val cellVar = FloatArray(cw * ch)
+            val cellN = IntArray(cw * ch)
+            for (y in 0 until h) {
+                val cy = min(ch - 1, y * ch / h)
+                for (x in 0 until w) {
+                    val i = y * w + x
+                    val count = sumW[i] / 256
+                    if (count < 2) continue
+                    val mean = sumL[i].toFloat() / count
+                    val c = cy * cw + min(cw - 1, x * cw / w)
+                    cellVar[c] += sumSq[i].toFloat() / count - mean * mean
+                    cellN[c]++
+                }
+            }
+            val cellMask = FloatArray(cw * ch) { c ->
+                val v = if (cellN[c] > 0) cellVar[c] / cellN[c] else 0f
+                ((v - CELL_VAR_LOW) / (CELL_VAR_HIGH - CELL_VAR_LOW)).coerceIn(0f, 1f)
+            }
+            val spread = FloatArray(cw * ch) { c ->
+                val cx = c % cw
+                val cy = c / cw
+                var m = 0f
+                for (yy in max(0, cy - 1)..min(ch - 1, cy + 1)) for (xx in max(0, cx - 1)..min(cw - 1, cx + 1)) {
+                    m = max(m, cellMask[yy * cw + xx])
+                }
+                m
+            }
+            val mask = PortraitProcessor.Mask(spread, cw, ch)
+
             val rowO = IntArray(w)
             val rowB = IntArray(w)
             for (y in 0 until h) {
                 img.getPixels(rowO, 0, w, 0, y, w, 1)
                 blurred.getPixels(rowB, 0, w, 0, y, w, 1)
                 var changed = false
+                val fy = (y + 0.5f) / h
                 for (x in 0 until w) {
-                    val i = y * w + x
-                    val count = sumW[i] / 256
-                    if (count < 2) continue
-                    val mean = sumL[i].toFloat() / count
-                    val variance = sumSq[i].toFloat() / count - mean * mean
-                    val m = ((variance - VAR_LOW) / (VAR_HIGH - VAR_LOW)).coerceIn(0f, 1f)
-                    if (m <= 0f) continue
+                    val m = mask.sample((x + 0.5f) / w, fy)
+                    if (m <= 0.01f) continue
                     val o = rowO[x]
                     val b = rowB[x]
                     val r = (((o shr 16) and 0xFF) * (1 - m) + ((b shr 16) and 0xFF) * m).toInt()
@@ -319,8 +348,9 @@ class NightProcessor {
 
         /** Motion smoothing: blur scale, and the variance range (levels²) that fades it in. */
         private const val MOTION_BLUR_SCALE = 12
-        private const val VAR_LOW = 60f
-        private const val VAR_HIGH = 400f
+        /** Mean variance per cell: a cell with a moving object averages a few hundred levels². */
+        private const val CELL_VAR_LOW = 40f
+        private const val CELL_VAR_HIGH = 250f
 
         /**
          * Final alignment at full resolution: tries shifts within ±[range] px of the coarse

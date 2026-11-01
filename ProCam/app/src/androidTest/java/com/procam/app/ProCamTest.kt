@@ -427,7 +427,8 @@ class ProCamTest {
         val w = 900
         val h = 675
         val scene = IntArray(w * h) { i -> val x = i % w; val y = i / w
-            (110 + 50 * kotlin.math.sin(x / 29.0) * kotlin.math.cos(y / 41.0) + if ((x / 60 + y / 45) % 2 == 0) 30 else -30).toInt() }
+            if (y >= 420) 90 + x / 30 // plain "water" with a gentle gradient
+            else (110 + 50 * kotlin.math.sin(x / 29.0) * kotlin.math.cos(y / 41.0) + if ((x / 60 + y / 45) % 2 == 0) 30 else -30).toInt() }
         val frames = (0 until 12).map { k ->
             val sx = (k * 7) % 11 - 5
             val sy = (k * 5) % 9 - 4
@@ -456,6 +457,7 @@ class ProCamTest {
         Log.i(TAG, "silky: background error ${err / n}, streak lift $lift")
         assertTrue("still scene stays sharp (${err / n})", err / n < 6)
         assertTrue("smooth streak without gaps: $lift", lift.all { it >= 3 })
+        assertTrue("even streak: $lift", lift.max() - lift.min() < 25)
     }
 
     @Test

@@ -202,8 +202,8 @@
                 android:layout_height="wrap_content"
                 android:gravity="center_horizontal"
                 android:orientation="horizontal"
-                android:paddingStart="12dp"
-                android:paddingEnd="12dp">
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp">
 
                 <TextView android:id="@+id/intentAuto" style="@style/IntentPill" android:text="Auto" />
                 <TextView android:id="@+id/intentPortrait" style="@style/IntentPill" android:text="Portrait" />
