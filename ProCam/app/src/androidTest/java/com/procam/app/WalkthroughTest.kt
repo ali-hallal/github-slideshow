@@ -79,8 +79,8 @@ class WalkthroughTest {
         onView(withId(R.id.intentAuto)).perform(click())
         SystemClock.sleep(500)
         tryClick("Zoom 1×")
-        SystemClock.sleep(700)
-        screenshot("zoom_slider")
+        SystemClock.sleep(300)
+        // Slide straight away (the slider hides itself after a few seconds; screenshots are slow).
         onView(withId(R.id.zoomSlider)).perform(tapAt(0.8f, 0.5f))
         SystemClock.sleep(300)
         screenshot("super_zoom_preview")

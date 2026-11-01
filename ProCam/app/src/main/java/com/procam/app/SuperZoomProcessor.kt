@@ -52,13 +52,16 @@ class SuperZoomProcessor {
      */
     fun processFrames(crops: List<SuperRes.Frame>, rotation: Int, quality: Int, taken: Int = crops.size): Result {
         require(crops.isNotEmpty())
+        val t0 = android.os.SystemClock.uptimeMillis()
         val w0 = crops[0].w
         val h0 = crops[0].h
         val same = crops.filter { it.w == w0 && it.h == h0 }
         // Lucky frames: keep the sharpest (frames taken mid-tremor are dropped). Sharpest first = reference.
         val chosen = SuperRes.sharpest(same, KEEP_FRAMES).map { same[it] }
+        val t1 = android.os.SystemClock.uptimeMillis()
         // Sub-pixel offsets of every frame relative to the reference (in parallel).
         val offsets = SuperRes.offsets(chosen, GRAY_SCALE)
+        val t2 = android.os.SystemClock.uptimeMillis()
         val motion = IntArray(chosen.size) { k ->
             val (dx, dy) = offsets[k]
             if (k == 0) 255 else NightProcessor.motionThreshold(chosen[0].px, chosen[k].px, w0, h0, dx.roundToInt(), dy.roundToInt())
@@ -67,7 +70,9 @@ class SuperZoomProcessor {
         // Shift-and-add onto a finer grid (2-3x, aiming for ~3000 px), then sharpen.
         val scale = (MAX_SIDE.toFloat() / max(w0, h0)).coerceIn(1f, MAX_SCALE)
         val merged = SuperRes.merge(chosen, offsets, motion, scale)
+        val t3 = android.os.SystemClock.uptimeMillis()
         SuperRes.sharpen(merged)
+        val t4 = android.os.SystemClock.uptimeMillis()
 
         var out = Bitmap.createBitmap(merged.px, merged.w, merged.h, Bitmap.Config.ARGB_8888)
         if (rotation != 0) {
@@ -80,14 +85,18 @@ class SuperZoomProcessor {
         out.compress(Bitmap.CompressFormat.JPEG, quality.coerceIn(50, 100), bytes)
         val result = Result(bytes.toByteArray(), chosen.size, out.width, out.height)
         out.recycle()
-        Log.i(TAG, "super zoom: ${result.width}x${result.height} from ${chosen.size} frames (x$scale)")
+        val t5 = android.os.SystemClock.uptimeMillis()
+        Log.i(TAG, "super zoom: ${result.width}x${result.height} from ${chosen.size} of $taken frames ${w0}x$h0 (x$scale); " +
+            "timing ms: lucky ${t1 - t0}, align ${t2 - t1}, merge ${t3 - t2}, sharpen ${t4 - t3}, encode ${t5 - t4}, " +
+            "cores ${Runtime.getRuntime().availableProcessors()}")
         return result
     }
 
     companion object {
         private const val TAG = "SuperZoom"
         private const val MAX_SIDE = 3000
-        private const val MAX_SCALE = 3f
+        /** Enlargement measured to recover real detail from ~6 frames; more would only add pixels. */
+        private const val MAX_SCALE = 2f
         /** Frames merged out of the burst (the sharpest ones). */
         const val KEEP_FRAMES = 6
         private const val GRAY_SCALE = 2
