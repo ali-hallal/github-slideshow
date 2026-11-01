@@ -35,6 +35,10 @@
             </intent-filter>
         </activity>
         <activity
+            android:name=".ReviewActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
+        <activity
             android:name=".SettingsActivity"
             android:exported="false"
             android:screenOrientation="portrait" />

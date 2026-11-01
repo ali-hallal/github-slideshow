@@ -637,6 +637,46 @@ class ProCamTest {
     }
 
     @Test
+    fun reviewShowsBeforeAfterAndDeletes() {
+        waitForCamera()
+        setSimple(true)
+        onView(withId(R.id.intentNight)).perform(click())
+        val before = count("image/jpeg")
+        onView(withId(R.id.shutter)).perform(click())
+        waitFor("night photo saved", 60_000) { count("image/jpeg") > before }
+        waitFor("finished", 20_000) { !shutterBusy() }
+        SystemClock.sleep(1500)
+        // Thumbnail → review screen with the before/after comparison.
+        onView(withId(R.id.thumbnail)).perform(click())
+        waitFor("review shows the comparison", 15_000) {
+            try {
+                onView(withContentDescription("Before and after comparison")).check(matches(isDisplayed()))
+                true
+            } catch (_: Throwable) {
+                false
+            }
+        }
+        onView(withText("Night")).check(matches(isDisplayed()))
+        onView(withText("Several shots merged for a brighter, cleaner photo")).check(matches(isDisplayed()))
+        // Delete it (with confirmation).
+        val n = count("image/jpeg")
+        onView(withText("Delete")).perform(click())
+        onView(withText("Delete")).inRoot(androidx.test.espresso.matcher.RootMatchers.isDialog()).perform(click())
+        waitFor("photo deleted", 10_000) { count("image/jpeg") == n - 1 }
+        Espresso.pressBack()
+    }
+
+    @Test
+    fun photoKindsAreExplained() {
+        assertEquals("Portrait", ReviewActivity.describe("PROCAM_1_PORTRAIT.jpg").first)
+        assertEquals("Night", ReviewActivity.describe("PROCAM_1_NIGHT.jpg").first)
+        assertEquals("Super zoom", ReviewActivity.describe("PROCAM_1_ZOOM.jpg").first)
+        assertEquals("Freeze", ReviewActivity.describe("PROCAM_1_ACTION.jpg").first)
+        assertEquals("RAW", ReviewActivity.describe("PROCAM_1.dng").first)
+        assertEquals("Photo", ReviewActivity.describe("PROCAM_1.jpg").first)
+    }
+
+    @Test
     fun lensPlannerFindsAllLenses() {
         fun show(l: List<LensStop>) = l.joinToString { "${Stops.zoomLabel(it.zoom)}@${it.cameraId}" }
         // Phone exposing ultra-wide and 3x tele as separate cameras (Xiaomi/OnePlus style).

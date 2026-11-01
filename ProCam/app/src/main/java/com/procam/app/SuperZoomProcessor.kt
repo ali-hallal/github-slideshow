@@ -23,7 +23,8 @@ import kotlin.math.roundToInt
  */
 class SuperZoomProcessor {
 
-    class Result(val jpeg: ByteArray, val merged: Int, val width: Int, val height: Int)
+    /** [before] = the reference frame's plain crop (what ordinary digital zoom gives), for review. */
+    class Result(val jpeg: ByteArray, val merged: Int, val width: Int, val height: Int, val before: ByteArray? = null)
 
     /**
      * @param crop how much further than the camera's own zoom (e.g. 3 = the centre third).
@@ -89,7 +90,19 @@ class SuperZoomProcessor {
         }
         val bytes = ByteArrayOutputStream()
         out.compress(Bitmap.CompressFormat.JPEG, quality.coerceIn(50, 100), bytes)
-        val result = Result(bytes.toByteArray(), frames.size, out.width, out.height)
+        // "Before": the reference crop on its own, upright, for the review screen.
+        val before = try {
+            var b = Bitmap.createBitmap(frames[0].px, w0, h0, Bitmap.Config.ARGB_8888)
+            if (rotation != 0) {
+                val r = Bitmap.createBitmap(b, 0, 0, w0, h0, Matrix().apply { postRotate(rotation.toFloat()) }, true)
+                b.recycle()
+                b = r
+            }
+            ByteArrayOutputStream().also { o -> b.compress(Bitmap.CompressFormat.JPEG, 90, o); b.recycle() }.toByteArray()
+        } catch (e: Throwable) {
+            null
+        }
+        val result = Result(bytes.toByteArray(), frames.size, out.width, out.height, before)
         out.recycle()
         val t5 = android.os.SystemClock.uptimeMillis()
         Log.i(TAG, "super zoom: ${result.width}x${result.height} from ${frames.size} of $taken frames ${w0}x$h0 (x$scale); " +

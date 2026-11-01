@@ -118,6 +118,12 @@ class WalkthroughTest {
         SystemClock.sleep(800)
         screenshot("night_done")
         savePhoto("photo_night")
+        // Review screen: before / after of the Night photo.
+        onView(withId(R.id.thumbnail)).perform(click())
+        SystemClock.sleep(2500)
+        screenshot("review_night")
+        androidx.test.espresso.Espresso.pressBack()
+        SystemClock.sleep(1500)
         // Silky: blend a burst into a long-exposure look.
         onView(withId(R.id.intentSilky)).perform(click())
         SystemClock.sleep(1500)

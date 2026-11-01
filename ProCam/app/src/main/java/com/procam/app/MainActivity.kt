@@ -3,7 +3,6 @@ package com.procam.app
 import android.Manifest
 import android.animation.ValueAnimator
 import android.app.Activity
-import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -1034,16 +1033,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     private fun openLastPhoto() {
-        val uri = lastPhoto ?: return
-        try {
-            startActivity(
-                Intent(Intent.ACTION_VIEW)
-                    .setDataAndType(uri, "image/*")
-                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
-            )
-        } catch (e: ActivityNotFoundException) {
-            toast(getString(R.string.no_viewer))
-        }
+        // The review screen (before/after, share, delete); it also finds the latest photo itself.
+        startActivity(Intent(this, ReviewActivity::class.java).apply { lastPhoto?.let { data = it } })
     }
 
     // ------------------------------------------------------------------ CameraController.Listener
@@ -1233,8 +1224,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 null
             }
             val uri = if (result != null) {
+                val name = "${MediaSaver.newBaseName()}_ZOOM.jpg"
+                result.before?.let { OriginalStore.save(this, name, it) }
                 MediaSaver.save(
-                    this, "${MediaSaver.newBaseName()}_ZOOM.jpg", "image/jpeg",
+                    this, name, "image/jpeg",
                     writer = { it.write(result.jpeg) },
                     afterWrite = { u -> MediaSaver.copyExif(this, u, frames.first()) },
                 )
@@ -1342,8 +1335,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             }
             Log.i(TAG, "super zoom processed in ${SystemClock.uptimeMillis() - t0} ms")
             val uri = result?.let { r ->
+                val name = "${MediaSaver.newBaseName()}_ZOOM.jpg"
+                r.before?.let { OriginalStore.save(this, name, it) }
                 MediaSaver.save(
-                    this, "${MediaSaver.newBaseName()}_ZOOM.jpg", "image/jpeg",
+                    this, name, "image/jpeg",
                     writer = { it.write(r.jpeg) },
                     afterWrite = { u -> MediaSaver.writeBasicExif(this, u, loc) },
                 )
@@ -1417,8 +1412,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             val mime = if (result != null) "image/jpeg" else mimeType
             val ext = if (mime == "image/heic") "heic" else "jpg"
             val source = frames[result?.reference ?: 0]
+            val name = "${MediaSaver.newBaseName()}${if (result == null) "" else if (silky) "_SILKY" else "_NIGHT"}.$ext"
+            if (result != null) OriginalStore.save(this, name, source)
             val uri = MediaSaver.save(
-                this, "${MediaSaver.newBaseName()}${if (result == null) "" else if (silky) "_SILKY" else "_NIGHT"}.$ext", mime,
+                this, name, mime,
                 writer = { it.write(bytes) },
                 afterWrite = if (result != null) { u -> MediaSaver.copyExif(this, u, source) } else null,
             )
@@ -1470,8 +1467,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             val mime = if (result.jpeg != null) "image/jpeg" else mimeType
             val ext = if (mime == "image/heic") "heic" else "jpg"
             val processed = result.jpeg != null
+            val name = "${MediaSaver.newBaseName()}${if (processed) "_PORTRAIT" else ""}.$ext"
+            if (processed) OriginalStore.save(this, name, jpeg)
             val uri = MediaSaver.save(
-                this, "${MediaSaver.newBaseName()}${if (processed) "_PORTRAIT" else ""}.$ext", mime,
+                this, name, mime,
                 writer = { it.write(bytes) },
                 afterWrite = if (processed) { u -> MediaSaver.copyExif(this, u, jpeg) } else null,
             )
@@ -1790,7 +1789,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         setActive(modeAuto, !pro)
         setActive(modePro, pro)
         modePro.alpha = if (c?.manualSensor == false) 0.4f else 1f
-        shutter.pro = pro
+        shutter.pro = pro && prefs.uiPro
         meter.visibility = if (pro && prefs.uiPro) View.VISIBLE else View.GONE
 
         updateChips()
