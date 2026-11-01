@@ -499,6 +499,72 @@ class ProCamTest {
     }
 
     @Test
+    fun superZoomMergesBurstIntoCleanerCrop() {
+        // 6 noisy, hand-shaken frames of a detailed scene with a flat area (for measuring noise).
+        val w = 1600
+        val h = 1200
+        val rnd = java.util.Random(3)
+        val scene = IntArray(w * h) { i -> val x = i % w; val y = i / w
+            if (x in 700 until 900 && y in 500 until 700) 128
+            else (128 + 60 * kotlin.math.sin(x / 7.0) * kotlin.math.cos(y / 9.0)).toInt() }
+        val frames = (0 until 6).map { k ->
+            val sx = (k * 5) % 7 - 3
+            val sy = (k * 3) % 5 - 2
+            val bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+            val px = IntArray(w * h) { i -> val x = i % w; val y = i / w
+                val v = (scene[(y + sy).coerceIn(0, h - 1) * w + (x + sx).coerceIn(0, w - 1)] + rnd.nextGaussian() * 16).toInt().coerceIn(0, 255)
+                (0xFF shl 24) or (v shl 16) or (v shl 8) or v }
+            bmp.setPixels(px, 0, w, 0, 0, w, h)
+            val out = java.io.ByteArrayOutputStream()
+            bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 97, out)
+            out.toByteArray()
+        }
+        val result = SuperZoomProcessor().process(frames, crop = 2f, quality = 95)
+        Log.i(TAG, "super zoom: ${result.width}x${result.height} from ${result.merged} frames")
+        assertEquals(6, result.merged)
+        assertEquals("centre half enlarged 2x", 1600, result.width)
+        assertEquals(1200, result.height)
+        // Noise in the flat patch (scene centre → middle of the zoomed photo) vs. one enlarged crop.
+        fun noise(b: android.graphics.Bitmap): Double {
+            var s = 0.0; var n = 0
+            for (y in 700 until 900 step 2) for (x in 700 until 900 step 2) {
+                val d = android.graphics.Color.green(b.getPixel(x, y)) - android.graphics.Color.green(b.getPixel(x + 1, y))
+                s += d * d; n++
+            }
+            return kotlin.math.sqrt(s / n)
+        }
+        val merged = android.graphics.BitmapFactory.decodeByteArray(result.jpeg, 0, result.jpeg.size)
+        val single = android.graphics.Bitmap.createScaledBitmap(SuperZoomProcessor.decodeCentre(frames[0], 2f)!!, 1600, 1200, true)
+        Log.i(TAG, "super zoom noise: single=${noise(single)} merged=${noise(merged)}")
+        assertTrue("merged crop is cleaner", noise(merged) < noise(single) * 0.85)
+    }
+
+    @Test
+    fun zoomSliderAndSuperZoomCapture() {
+        waitForCamera()
+        setSimple(true)
+        // Tapping the highlighted lens button opens the zoom slider.
+        onView(withContentDescription("Zoom 1×")).perform(click())
+        onView(withId(R.id.zoomBar)).check(matches(isDisplayed()))
+        val maxLabel = text(R.id.zoomMax)
+        Log.i(TAG, "zoom slider max: $maxLabel")
+        assertTrue("slider reaches past the camera's own zoom: $maxLabel", maxLabel.startsWith("✦"))
+        onView(withId(R.id.zoomSlider)).perform(tapAt(0.98f, 0.5f))
+        SystemClock.sleep(500)
+        Log.i(TAG, "after slider: ${readout().replace("\n", " | ")}")
+        val before = count("image/jpeg")
+        onView(withId(R.id.shutter)).perform(click())
+        waitFor("super zoom photo saved", 60_000) { count("image/jpeg") > before }
+        waitFor("finished", 20_000) { !shutterBusy() }
+        SystemClock.sleep(1500)
+        val zoomed = context.contentResolver.query(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI, arrayOf(MediaStore.Images.Media.DISPLAY_NAME),
+            "${MediaStore.Images.Media.DISPLAY_NAME} LIKE ?", arrayOf("%_ZOOM%"), null,
+        )?.use { it.count } ?: 0
+        assertTrue("a _ZOOM photo was saved", zoomed > 0)
+    }
+
+    @Test
     fun lensPlannerFindsAllLenses() {
         fun show(l: List<LensStop>) = l.joinToString { "${Stops.zoomLabel(it.zoom)}@${it.cameraId}" }
         // Phone exposing ultra-wide and 3x tele as separate cameras (Xiaomi/OnePlus style).

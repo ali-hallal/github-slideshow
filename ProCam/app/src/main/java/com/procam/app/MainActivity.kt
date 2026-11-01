@@ -7,6 +7,7 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.graphics.RectF
 import android.graphics.SurfaceTexture
 import android.hardware.Sensor
@@ -113,6 +114,15 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private var lensBase = 1f
     private var stops: List<LensStop> = emptyList()
     private lateinit var zoomIndicator: TextView
+    private lateinit var zoomBar: View
+    private lateinit var zoomSlider: SeekBar
+    private lateinit var zoomMin: TextView
+    private lateinit var zoomMax: TextView
+    /** Super zoom: extra crop beyond the camera's own maximum zoom (1 = none). */
+    private var extraCrop = 1f
+    private val superZoom = SuperZoomProcessor()
+    private var zoomProcessing = false
+    private var updatingZoomSlider = false
     private var cameraIndex = 0
 
     private var isoSteps = listOf(100)
@@ -233,6 +243,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         groupProcessing = false
         portraitProcessing = false
         nightProcessing = false
+        zoomProcessing = false
         overlay.setFaces(emptyList())
         zoomAnimator?.cancel()
         camera.close()
@@ -360,6 +371,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         btnSwitch = findViewById(R.id.btnSwitch)
         countdownText = findViewById(R.id.countdown)
         zoomIndicator = findViewById(R.id.zoomIndicator)
+        zoomBar = findViewById(R.id.zoomBar)
+        zoomSlider = findViewById(R.id.zoomSlider)
+        zoomMin = findViewById(R.id.zoomMin)
+        zoomMax = findViewById(R.id.zoomMax)
         infoRow = findViewById(R.id.infoRow)
         groupStatus = findViewById(R.id.groupStatus)
         intentScroll = findViewById(R.id.intentScroll)
@@ -428,7 +443,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             override fun onSingleTapUp(e: MotionEvent): Boolean {
                 if (textureView.width == 0 || textureView.height == 0) return false
                 overlay.showFocus(e.x, e.y)
-                camera.focusAt(e.x / textureView.width, e.y / textureView.height)
+                camera.focusAt(unzoomX(e.x), unzoomY(e.y))
                 showBadge("FOCUS POINT")
                 return true
             }
@@ -436,7 +451,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             override fun onLongPress(e: MotionEvent) {
                 if (textureView.width == 0 || textureView.height == 0) return
                 overlay.showFocus(e.x, e.y)
-                camera.lockAt(e.x / textureView.width, e.y / textureView.height)
+                camera.lockAt(unzoomX(e.x), unzoomY(e.y))
                 showBadge("AE/AF LOCK")
                 haptic(textureView, HapticFeedbackConstants.LONG_PRESS)
             }
@@ -444,7 +459,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         val pinch = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
             override fun onScale(detector: ScaleGestureDetector): Boolean {
                 zoomAnimator?.cancel()
-                setZoom(settings.zoom * detector.scaleFactor)
+                setZoom(cameraZoom() * detector.scaleFactor)
+                showZoomBar()
                 return true
             }
         })
@@ -520,6 +536,22 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             }
         }
 
+        zoomSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                if (!fromUser || updatingZoomSlider) return
+                val c = caps ?: return
+                val lo = c.zoomRange.lower
+                val hi = maxCameraZoom()
+                zoomAnimator?.cancel()
+                setZoom(lo * (hi / lo).pow(progress / 1000f))
+                if (progress % 50 == 0) haptic(seekBar, HapticFeedbackConstants.CLOCK_TICK)
+                mainHandler.removeCallbacks(hideZoomBar)
+                mainHandler.postDelayed(hideZoomBar, ZOOM_BAR_HIDE_MS)
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar) = Unit
+            override fun onStopTrackingTouch(seekBar: SeekBar) = Unit
+        })
+
         slider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
                 if (fromUser && !updatingSlider) {
@@ -571,6 +603,11 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         cancelGroup()
         overlay.setFaces(emptyList())
         groupStatus.visibility = View.GONE
+        if (!superZoomAllowed() && extraCrop > 1f) {
+            extraCrop = 1f
+            applyPreviewCrop()
+        }
+        updateZoomSlider()
         haptic(intentRowView(intent), HapticFeedbackConstants.VIRTUAL_KEY)
         if (intent == "PORTRAIT") toast("Blurs the background · step back and use 2× for natural-looking faces")
         if (intent == "SILKY") toast("Turns moving water, clouds and lights into silky streaks · hold still or rest the phone")
@@ -679,24 +716,100 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         pushSettings()
     }
 
+    /**
+     * Sets the zoom of the open camera. Past the camera's own maximum (where allowed) the rest is
+     * "super zoom": the preview is enlarged and photos are rebuilt from a burst.
+     */
     private fun setZoom(z: Float) {
         val c = caps ?: return
-        val clamped = z.coerceIn(c.zoomRange.lower, c.zoomRange.upper)
-        if (abs(clamped - settings.zoom) < 0.001f) return
-        settings = settings.copy(zoom = clamped)
-        camera.update(settings)
+        val target = z.coerceIn(c.zoomRange.lower, maxCameraZoom())
+        if (abs(target - cameraZoom()) < 0.001f) return
+        val hardware = target.coerceAtMost(c.zoomRange.upper)
+        extraCrop = (target / hardware).coerceAtLeast(1f)
+        applyPreviewCrop()
+        if (abs(hardware - settings.zoom) > 0.0005f) {
+            settings = settings.copy(zoom = hardware)
+            camera.update(settings)
+        }
         updateLensRow()
         updateReadout()
+        updateZoomSlider()
         showZoomIndicator()
     }
 
+    /** The open camera's total zoom including super zoom. */
+    private fun cameraZoom() = settings.zoom * extraCrop
+
     /** Zoom as the user sees it (relative to the main back camera). */
-    private fun displayZoom() = lensBase * settings.zoom
+    private fun displayZoom() = lensBase * cameraZoom()
+
+    /** Super zoom is offered in Auto and Pro (the other intents already process the photo). */
+    private fun superZoomAllowed() = !simple || prefs.intent == "AUTO"
+
+    private fun maxCameraZoom(): Float {
+        val c = caps ?: return 1f
+        if (!superZoomAllowed()) return c.zoomRange.upper
+        return (c.zoomRange.upper * SUPER_ZOOM_FACTOR).coerceAtMost(MAX_DISPLAY_ZOOM / lensBase)
+    }
+
+    /** Enlarges the preview for super zoom (the camera itself is already at its maximum). */
+    private fun applyPreviewCrop() {
+        val w = textureView.width.toFloat()
+        val h = textureView.height.toFloat()
+        if (extraCrop <= 1.001f || w == 0f) {
+            textureView.setTransform(null)
+        } else {
+            textureView.setTransform(Matrix().apply { setScale(extraCrop, extraCrop, w / 2, h / 2) })
+            overlay.setFaces(emptyList())
+        }
+    }
+
+    /** Screen tap → 0..1 position in the camera's (un-super-zoomed) frame. */
+    private fun unzoomX(x: Float) = 0.5f + (x / textureView.width - 0.5f) / extraCrop
+    private fun unzoomY(y: Float) = 0.5f + (y / textureView.height - 0.5f) / extraCrop
+
+    // ---- zoom slider (log scale, from widest to maximum incl. super zoom)
+
+    private val hideZoomBar = Runnable { zoomBar.visibility = View.GONE }
+
+    private fun showZoomBar() {
+        if (caps == null) return
+        zoomBar.visibility = View.VISIBLE
+        updateZoomSlider()
+        positionLensRow()
+        mainHandler.removeCallbacks(hideZoomBar)
+        mainHandler.postDelayed(hideZoomBar, ZOOM_BAR_HIDE_MS)
+    }
+
+    private fun toggleZoomBar() {
+        if (zoomBar.visibility == View.VISIBLE) {
+            mainHandler.removeCallbacks(hideZoomBar)
+            zoomBar.visibility = View.GONE
+        } else {
+            showZoomBar()
+        }
+    }
+
+    private fun updateZoomSlider() {
+        val c = caps ?: return
+        val lo = c.zoomRange.lower
+        val hi = maxCameraZoom()
+        zoomMin.text = Stops.zoomLabel(lo * lensBase)
+        zoomMax.text = if (hi > c.zoomRange.upper + 0.01f) "✦ ${Stops.zoomLabel(hi * lensBase)}" else Stops.zoomLabel(hi * lensBase)
+        updatingZoomSlider = true
+        val p = if (hi > lo) ln(cameraZoom() / lo) / ln(hi / lo) else 0f
+        zoomSlider.progress = (p * 1000).roundToInt().coerceIn(0, 1000)
+        updatingZoomSlider = false
+    }
+
+    private fun zoomIndicatorText(): String =
+        if (extraCrop > 1.001f) "${Stops.zoomLabel(displayZoom())} ✦\nSuper zoom" else Stops.zoomLabel(displayZoom())
 
     private val hideZoomIndicator = Runnable { zoomIndicator.animate().alpha(0f).setDuration(200).withEndAction { zoomIndicator.visibility = View.GONE }.start() }
 
     private fun showZoomIndicator() {
-        zoomIndicator.text = Stops.zoomLabel(displayZoom())
+        zoomIndicator.text = zoomIndicatorText()
+        zoomIndicator.setTextColor(getColor(if (extraCrop > 1.001f) R.color.accent else R.color.white))
         zoomIndicator.animate().cancel()
         zoomIndicator.alpha = 1f
         zoomIndicator.visibility = View.VISIBLE
@@ -707,10 +820,17 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     /** Zoom button tapped: zoom on this camera, or open the camera that has that lens. */
     private fun selectStop(stop: LensStop) {
         val current = caps?.id
+        if (stop == activeStop()) {
+            // Tapping the highlighted button opens the zoom slider.
+            toggleZoomBar()
+            return
+        }
         if (stop.cameraId == current) {
             animateZoom(stop.cameraZoom)
             return
         }
+        extraCrop = 1f
+        applyPreviewCrop()
         val main = cameraIds.getOrNull(0) ?: return
         lensCameraId = if (stop.cameraId == main) null else stop.cameraId
         lensBase = if (stop.cameraId == main) 1f else stop.zoom / stop.cameraZoom
@@ -722,7 +842,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
 
     private fun animateZoom(target: Float) {
         zoomAnimator?.cancel()
-        zoomAnimator = ValueAnimator.ofFloat(settings.zoom, target).apply {
+        zoomAnimator = ValueAnimator.ofFloat(cameraZoom(), target).apply {
             duration = 220
             addUpdateListener { setZoom(it.animatedValue as Float) }
             start()
@@ -748,7 +868,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         if (groupWaiting) {
             cancelGroup(); return
         }
-        if (capturing || groupProcessing || portraitProcessing || nightProcessing || caps == null) return
+        if (capturing || groupProcessing || portraitProcessing || nightProcessing || zoomProcessing || caps == null) return
         haptic(shutter, HapticFeedbackConstants.VIRTUAL_KEY)
         if (prefs.timerSeconds > 0) startCountdown() else afterCountdown()
     }
@@ -782,6 +902,11 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             startNight()
         } else if (silkyMode) {
             startSilky()
+        } else if (extraCrop > 1.01f) {
+            // Super zoom: a short burst, rebuilt into one detailed zoomed photo.
+            zoomProcessing = true
+            showGroupStatus("Hold still… super zoom")
+            camera.takeBurst(deviceOrientation, SUPER_ZOOM_FRAMES, toMemory = true)
         } else {
             camera.takePicture(deviceOrientation)
         }
@@ -905,7 +1030,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             zoom = settings.zoom.coerceIn(caps.zoomRange.lower, caps.zoomRange.upper),
         )
         camera.update(settings)
+        if (settings.zoom < caps.zoomRange.upper - 0.001f) extraCrop = 1f
         buildLensRow()
+        applyPreviewCrop()
+        updateZoomSlider()
         refreshUi()
     }
 
@@ -916,7 +1044,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     override fun onCaptureFinished(success: Boolean) {
-        if ((groupProcessing || portraitProcessing || nightProcessing) && success) {
+        if ((groupProcessing || portraitProcessing || nightProcessing || zoomProcessing) && success) {
             // Wait for the photo(s) to be processed and saved.
             if (pressRatio < BLURRY_RATIO) toast("This one may be blurry: your hands moved. Brace your elbows and try again.")
             pressRatio = Float.MAX_VALUE
@@ -926,6 +1054,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             groupProcessing = false
             portraitProcessing = false
             nightProcessing = false
+            zoomProcessing = false
             groupStatus.visibility = View.GONE
         }
         if (success && pressRatio < BLURRY_RATIO) {
@@ -975,14 +1104,19 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     override fun onFaces(faces: List<RectF>) {
-        // In Group mode the smarter ML Kit boxes (green = ready) are drawn instead.
-        if (!groupMode) overlay.setFaces(faces)
+        // In Group mode the smarter ML Kit boxes (green = ready) are drawn instead; with super
+        // zoom the camera's face positions no longer match the enlarged preview.
+        if (!groupMode && extraCrop <= 1.001f) overlay.setFaces(faces)
         if (faces.isNotEmpty()) lastFaceSeen = SystemClock.uptimeMillis()
     }
 
     override fun onBurstCaptured(frames: List<ByteArray>, mimeType: String) {
         if (portraitProcessing) {
             processPortrait(frames.first(), mimeType)
+            return
+        }
+        if (zoomProcessing) {
+            processSuperZoom(frames, mimeType)
             return
         }
         if (nightProcessing) {
@@ -1009,6 +1143,41 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                         else -> "Kept the sharpest of ${frames.size}"
                     },
                 )
+            }
+        }.start()
+    }
+
+    // ------------------------------------------------------------------ super zoom
+
+    private fun processSuperZoom(frames: List<ByteArray>, mimeType: String) {
+        showGroupStatus("Enhancing ${Stops.zoomLabel(displayZoom())} zoom…")
+        val crop = extraCrop
+        val quality = prefs.jpegQuality
+        Thread {
+            val result = try {
+                superZoom.process(frames, crop, quality)
+            } catch (e: Throwable) {
+                Log.e(TAG, "super zoom failed", e)
+                null
+            }
+            val uri = if (result != null) {
+                MediaSaver.save(
+                    this, "${MediaSaver.newBaseName()}_ZOOM.jpg", "image/jpeg",
+                    writer = { it.write(result.jpeg) },
+                    afterWrite = { u -> MediaSaver.copyExif(this, u, frames.first()) },
+                )
+            } else {
+                // Fall back to the camera's own photo (at the camera's maximum zoom).
+                val ext = if (mimeType == "image/heic") "heic" else "jpg"
+                MediaSaver.save(this, "${MediaSaver.newBaseName()}.$ext", mimeType, writer = { it.write(frames.first()) })
+            }
+            runOnUiThread {
+                zoomProcessing = false
+                capturing = false
+                shutter.busy = false
+                groupStatus.visibility = View.GONE
+                if (uri != null) onPhotoSaved(uri, if (result != null) "image/jpeg" else mimeType) else toast(getString(R.string.save_failed))
+                toast(if (result != null) "Super zoom · built from ${result.merged} shots" else "Saved at the camera's maximum zoom")
             }
         }.start()
     }
@@ -1356,6 +1525,12 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 lp.topMargin = top
                 lensRow.layoutParams = lp
             }
+            val zp = zoomBar.layoutParams as FrameLayout.LayoutParams
+            val zTop = (top - zoomBar.height - gap / 2).coerceAtLeast(0)
+            if (zp.topMargin != zTop) {
+                zp.topMargin = zTop
+                zoomBar.layoutParams = zp
+            }
         }
     }
 
@@ -1391,13 +1566,17 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         positionLensRow()
     }
 
-    private fun updateLensRow() {
-        val id = caps?.id ?: return
-        if (stops.isEmpty()) return
-        // The active button is the largest stop on the open camera at or below the current zoom.
-        val z = displayZoom()
+    /** The highlighted button: the largest stop on the open camera at or below the current zoom. */
+    private fun activeStop(): LensStop? {
+        val id = caps?.id ?: return null
         val mine = stops.filter { it.cameraId == id }
-        val active = mine.lastOrNull { it.zoom <= z + 0.01f } ?: mine.firstOrNull()
+        return mine.lastOrNull { it.zoom <= displayZoom() + 0.01f } ?: mine.firstOrNull()
+    }
+
+    private fun updateLensRow() {
+        if (caps == null || stops.isEmpty()) return
+        val z = displayZoom()
+        val active = activeStop()
         for (i in 0 until lensRow.childCount) {
             val tv = lensRow.getChildAt(i) as TextView
             val stop = tv.tag as LensStop
@@ -1568,6 +1747,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         private const val GROUP_TIMEOUT_MS = 6000L
         private const val NO_FACE_GIVE_UP_MS = 1500L
         private const val STEADY_WAIT_MS = 800L
+        private const val SUPER_ZOOM_FACTOR = 4f
+        private const val MAX_DISPLAY_ZOOM = 100f
+        private const val SUPER_ZOOM_FRAMES = 6
+        private const val ZOOM_BAR_HIDE_MS = 3500L
         private const val NIGHT_FALLBACK_FRAMES = 6
         private val SILKY_FRAMES = intArrayOf(8, 12, 16)
         private const val DARK_ISO = 1600
