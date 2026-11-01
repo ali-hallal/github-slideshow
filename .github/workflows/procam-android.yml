@@ -65,7 +65,7 @@ jobs:
           sudo udevadm trigger --name-match=kvm
 
       - name: Build app and test APKs
-        run: ./gradlew assembleDebug assembleDebugAndroidTest --no-daemon
+        run: ./gradlew assembleBenchmark assembleBenchmarkAndroidTest --no-daemon
 
       - name: Run tests on emulator
         uses: reactivecircus/android-emulator-runner@v2
@@ -81,7 +81,7 @@ jobs:
             adb shell settings put global hide_error_dialogs 1 || true
             adb shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS || true
             adb logcat -c
-            ./gradlew connectedDebugAndroidTest --no-daemon || touch tests-failed
+            ./gradlew connectedBenchmarkAndroidTest --no-daemon || touch tests-failed
             adb logcat -d -v time ProCam:V ProCamTest:V SuperZoom:V Night:V Portrait:V GroupShutter:V AndroidRuntime:E CameraService:W '*:S' | tail -300
             adb pull /sdcard/Download/procam-screens screens || true
             for f in screens/*.jpg; do echo "=== SCREEN $(basename $f)"; base64 -w 2000 "$f"; echo "=== END"; done

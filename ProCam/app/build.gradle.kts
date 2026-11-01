@@ -16,7 +16,17 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    // Instrumentation tests run against an optimised, non-debuggable build so the measured
+    // processing times match what users get (debuggable builds run tight loops much slower).
+    testBuildType = "benchmark"
+
     buildTypes {
+        create("benchmark") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("debug")
+            isMinifyEnabled = false
+            matchingFallbacks += listOf("release")
+        }
         release {
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")

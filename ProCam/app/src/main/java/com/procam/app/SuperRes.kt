@@ -72,11 +72,27 @@ object SuperRes {
      * luma, and the most detailed patch (aligning on a ~256 px patch gives the same answer as the
      * whole frame at a fraction of the work, whatever the zoom).
      */
-    class Prepared(val frame: Frame, val gray: NightProcessor.Gray, val luma: FloatArray, val window: Window)
+    class Prepared(
+        val frame: Frame, val gray: NightProcessor.Gray, val luma: FloatArray, val window: Window,
+        /** Mean edge strength in the window (luma levels). */
+        val texture: Double,
+    )
 
     fun prepare(f: Frame, grayScale: Int): Prepared {
         val luma = lumaOf(f).also { PortraitProcessor.boxBlur(it, f.w, f.h, 1) }
-        return Prepared(f, gray(f, grayScale), luma, detailedWindow(luma, f.w, f.h))
+        val win = detailedWindow(luma, f.w, f.h)
+        return Prepared(f, gray(f, grayScale), luma, win, textureIn(luma, f.w, win))
+    }
+
+    private fun textureIn(luma: FloatArray, w: Int, win: Window): Double {
+        var e = 0.0
+        var n = 0
+        for (y in win.y + 1 until win.y + win.h - 1 step 2) for (x in win.x + 1 until win.x + win.w - 1 step 2) {
+            val i = y * w + x
+            e += abs(luma[i + 1] - luma[i - 1]) + abs(luma[i + w] - luma[i - w])
+            n++
+        }
+        return if (n == 0) 0.0 else e / n
     }
 
     /** The patch (about 256x256) with the most edges, away from the borders. */
@@ -113,6 +129,8 @@ object SuperRes {
     }
 
     fun offset(ref: Prepared, frame: Frame, grayScale: Int): Offset {
+        // A featureless patch (sky, wall) can't be aligned: every shift matches. Don't wander.
+        if (ref.texture < MIN_TEXTURE) return Offset(0f, 0f, 0.0)
         val coarse = NightProcessor.align(ref.gray, gray(frame, grayScale))
         // align() reports shifts in units of ALIGN_SCALE pixels of the grey copy's source.
         var bx = (coarse.first.toFloat() / NightProcessor.ALIGN_SCALE * grayScale).roundToInt().toFloat()
@@ -127,7 +145,9 @@ object SuperRes {
             for (sy in -reach..reach) for (sx in -reach..reach) {
                 val dx = cx0 + sx * step
                 val dy = cy0 + sy * step
-                val c = subCost(ref.luma, fl, ref.frame.w, ref.frame.h, frame.w, frame.h, dx, dy, ref.window)
+                // Tiny bias toward small shifts: breaks ties on flat areas, negligible on detail.
+                val c = subCost(ref.luma, fl, ref.frame.w, ref.frame.h, frame.w, frame.h, dx, dy, ref.window) +
+                    TIE_BREAK * (abs(dx) + abs(dy))
                 if (c < best) {
                     best = c
                     bx = dx
@@ -153,6 +173,9 @@ object SuperRes {
     }
 
     private const val WINDOW = 256
+    /** Below this mean edge strength the patch is featureless (alignment would be guesswork). */
+    private const val MIN_TEXTURE = 1.5
+    private const val TIE_BREAK = 0.02
 
     fun threads() = Runtime.getRuntime().availableProcessors().coerceIn(1, 6)
 
