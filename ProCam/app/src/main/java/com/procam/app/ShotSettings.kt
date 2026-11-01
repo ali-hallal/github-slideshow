@@ -60,6 +60,10 @@ data class OutputPrefs(
     val heif: Boolean = false,
     val jpegQuality: Int = 95,
     val mirrorFront: Boolean = false,
+    /** Open the camera for video (16:9 preview + recorder) instead of photos. */
+    val video: Boolean = false,
+    val video4k: Boolean = false,
+    val stabilize: Boolean = true,
 )
 
 /** What a given camera can do. */

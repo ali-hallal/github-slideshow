@@ -177,6 +177,7 @@ class WelcomeActivity : Activity() {
         row(this, "Silky", "Smooth water, clouds and light trails")
         row(this, "Freeze", "Sharp kids, pets and sports · even if you press late")
         row(this, "Group", "Waits until everyone's eyes are open")
+        row(this, "Video", "Steady videos with sound · tap red to start and stop")
     }
 
     private fun steadyPage(): View = pageLayout(

@@ -52,7 +52,7 @@ class ProCamTest {
 
     @get:Rule
     val rules: RuleChain = RuleChain
-        .outerRule(GrantPermissionRule.grant(Manifest.permission.CAMERA))
+        .outerRule(GrantPermissionRule.grant(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO))
         .around(ClearPrefsRule())
         .around(activityRule)
 
@@ -797,6 +797,80 @@ class ProCamTest {
         waitFor("HDR badge hidden") { !visible(R.id.hdrBadge) }
     }
 
+    @Test
+    fun videoHelpers() {
+        val offered = arrayOf(android.util.Size(3840, 2160), android.util.Size(1920, 1080), android.util.Size(1440, 1080), android.util.Size(1280, 720))
+        assertEquals(android.util.Size(1920, 1080), VideoRecorder.pickSize(offered, allow4k = false, fps = 30))
+        val k4 = VideoRecorder.pickSize(offered, allow4k = true, fps = 30)
+        assertTrue("16:9 size, 4K only if the encoder can: $k4", k4 == android.util.Size(3840, 2160) || k4 == android.util.Size(1920, 1080))
+        assertEquals("1:05", VideoRecorder.durationLabel(65_000))
+        assertEquals("1:00:01", VideoRecorder.durationLabel(3_601_000))
+        val rate = VideoRecorder.bitRate(android.util.Size(1920, 1080), 30)
+        assertTrue("1080p bit rate ~17 Mbit/s: $rate", rate in 14_000_000..20_000_000)
+        assertEquals("Video", ReviewActivity.describe("PROCAM_1.mp4").first)
+    }
+
+    @Test
+    fun videoRecordsAndSaves() {
+        waitForCamera()
+        setSimple(true)
+        onView(withId(R.id.intentVideo)).perform(click())
+        SystemClock.sleep(1500)
+        waitForCamera()
+        assertTrue("hint explains recording", text(R.id.intentHint).contains("red button"))
+        val before = videoCount()
+        onView(withId(R.id.shutter)).perform(click())
+        waitFor("recording started") { visible(R.id.recTime) }
+        assertTrue("mode buttons hidden while recording", !visible(R.id.intentScroll))
+        SystemClock.sleep(3500)
+        val secs = text(R.id.recTime).substringAfterLast(':').trim().toIntOrNull() ?: -1
+        assertTrue("timer counts: ${text(R.id.recTime)}", secs in 3..6)
+        onView(withId(R.id.shutter)).perform(click())
+        waitFor("video saved", 15_000) { videoCount() > before }
+        waitFor("recording UI gone") { !visible(R.id.recTime) && visible(R.id.intentScroll) }
+        // The saved file is a real, playable video of about the recorded length.
+        val uri = latestVideo()!!
+        val r = android.media.MediaMetadataRetriever()
+        r.setDataSource(context, uri)
+        val ms = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)!!.toLong()
+        val w = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)!!.toInt()
+        val h = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)!!.toInt()
+        val frame = r.getFrameAtTime(1_000_000)
+        r.release()
+        Log.i(TAG, "video: $uri ${ms} ms ${w}x$h frame=${frame?.width}x${frame?.height}")
+        assertTrue("about 4 s long: $ms ms", ms in 2500..7000)
+        assertEquals("16:9", 16f / 9f, maxOf(w, h).toFloat() / minOf(w, h), 0.05f)
+        assertTrue("has a picture", frame != null)
+        // Back to photos: the camera reopens for photos and the shutter takes one.
+        onView(withId(R.id.intentAuto)).perform(click())
+        SystemClock.sleep(1500)
+        waitForCamera()
+        shootAndExpect("image/jpeg") { onView(withId(R.id.shutter)).perform(click()) }
+        context.contentResolver.delete(uri, null, null)
+    }
+
+    @Test
+    fun reviewPlaysVideo() {
+        waitForCamera()
+        setSimple(true)
+        onView(withId(R.id.intentVideo)).perform(click())
+        SystemClock.sleep(1500)
+        waitForCamera()
+        val before = videoCount()
+        onView(withId(R.id.shutter)).perform(click())
+        waitFor("recording started") { visible(R.id.recTime) }
+        SystemClock.sleep(2500)
+        onView(withId(R.id.shutter)).perform(click())
+        waitFor("video saved", 15_000) { videoCount() > before }
+        waitFor("thumbnail back") { visible(R.id.thumbnail) }
+        SystemClock.sleep(800)
+        onView(withId(R.id.thumbnail)).perform(click())
+        onView(withText("Video")).check(matches(isDisplayed()))
+        onView(withContentDescription("Play video")).check(matches(isDisplayed()))
+        Espresso.pressBack()
+        latestVideo()?.let { context.contentResolver.delete(it, null, null) }
+    }
+
     // ------------------------------------------------------------------ helpers
 
     /** Switches between Simple and Pro with the top-bar button. */
@@ -845,6 +919,17 @@ class ProCamTest {
     }
 
     private fun readout() = text(R.id.readout)
+
+    private fun videoCount(): Int = context.contentResolver.query(
+        MediaStore.Video.Media.EXTERNAL_CONTENT_URI, arrayOf(MediaStore.Video.Media._ID),
+        "${MediaStore.Video.Media.RELATIVE_PATH} LIKE ?", arrayOf("Movies/ProCam%"), null,
+    )?.use { it.count } ?: 0
+
+    private fun latestVideo(): android.net.Uri? = context.contentResolver.query(
+        MediaStore.Video.Media.EXTERNAL_CONTENT_URI, arrayOf(MediaStore.Video.Media._ID),
+        "${MediaStore.Video.Media.RELATIVE_PATH} LIKE ?", arrayOf("Movies/ProCam%"),
+        "${MediaStore.Video.Media._ID} DESC",
+    )?.use { c -> if (c.moveToFirst()) android.content.ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, c.getLong(0)) else null }
 
     private fun visible(id: Int): Boolean {
         var v = false

@@ -33,8 +33,11 @@ import kotlin.math.max
  */
 class ReviewActivity : Activity() {
 
-    private class Photo(val id: Long, val name: String, val mime: String) {
-        val uri: Uri get() = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
+    private class Photo(val id: Long, val name: String, val mime: String, val date: Long = 0, val durationMs: Long = 0) {
+        val isVideo get() = mime.startsWith("video/")
+        val uri: Uri get() = ContentUris.withAppendedId(
+            if (isVideo) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id,
+        )
     }
 
     private lateinit var prefs: Prefs
@@ -48,6 +51,7 @@ class ReviewActivity : Activity() {
     private lateinit var saveOriginal: TextView
     private lateinit var prev: TextView
     private lateinit var next: TextView
+    private lateinit var play: TextView
 
     private val io = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
@@ -110,7 +114,21 @@ class ReviewActivity : Activity() {
         root.addView(top)
 
         view = BeforeAfterView(this)
-        root.addView(view, LinearLayout.LayoutParams(-1, 0, 1f))
+        // Videos: a play button over the first frame (opens the phone's video player).
+        play = TextView(this).apply {
+            text = "▶"
+            textSize = 34f
+            gravity = Gravity.CENTER
+            setTextColor(getColor(R.color.white))
+            setBackgroundResource(R.drawable.circle_bg)
+            contentDescription = "Play video"
+            visibility = View.GONE
+            setOnClickListener { openInGallery() }
+        }
+        val stage = android.widget.FrameLayout(this)
+        stage.addView(view, android.widget.FrameLayout.LayoutParams(-1, -1))
+        stage.addView(play, android.widget.FrameLayout.LayoutParams(dp(84), dp(84), Gravity.CENTER))
+        root.addView(stage, LinearLayout.LayoutParams(-1, 0, 1f))
 
         info = TextView(this).apply {
             textSize = 13f
@@ -214,6 +232,7 @@ class ReviewActivity : Activity() {
         val p = photos[index]
         val (mode, what) = describe(p.name)
         title.text = mode
+        play.visibility = if (p.isVideo) View.VISIBLE else View.GONE
         counter.text = "${index + 1} / ${photos.size}"
         prev.alpha = if (index > 0) 1f else 0.3f
         next.alpha = if (index < photos.size - 1) 1f else 0.3f
@@ -221,6 +240,24 @@ class ReviewActivity : Activity() {
         val token = ++loadToken
         val target = max(resources.displayMetrics.widthPixels, resources.displayMetrics.heightPixels)
         io.execute {
+            if (p.isVideo) {
+                val frame = try {
+                    contentResolver.loadThumbnail(p.uri, android.util.Size(target, target), null)
+                } catch (e: Exception) {
+                    null
+                }
+                val line = videoLine(p)
+                main.post {
+                    if (token != loadToken) return@post
+                    view.after = frame
+                    view.before = null
+                    info.text = line
+                    status.text = "Tap ▶ to watch"
+                    blurRow.visibility = View.GONE
+                    saveOriginal.visibility = View.GONE
+                }
+                return@execute
+            }
             val after = decode(p.uri, target)
             val original = OriginalStore.get(this, p.name)
             val before = original?.let { decodeFile(it, target) }
@@ -267,6 +304,22 @@ class ReviewActivity : Activity() {
             val s = target.toFloat() / longest
             d.setTargetSize((info.size.width * s).toInt().coerceAtLeast(1), (info.size.height * s).toInt().coerceAtLeast(1))
         }
+    }
+
+    /** "1:05 · 1920×1080 · 24 MB" */
+    private fun videoLine(p: Photo): String = try {
+        val parts = mutableListOf(VideoRecorder.durationLabel(p.durationMs))
+        android.media.MediaMetadataRetriever().apply {
+            setDataSource(this@ReviewActivity, p.uri)
+            val w = extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+            val h = extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+            if (w != null && h != null) parts += "${w}×${h}"
+            release()
+        }
+        contentResolver.openFileDescriptor(p.uri, "r")?.use { parts += "${(it.statSize + 500_000) / 1_000_000} MB" }
+        parts.joinToString(" · ")
+    } catch (e: Exception) {
+        VideoRecorder.durationLabel(p.durationMs)
     }
 
     /** "ISO 3200 · 1/30 s · f/1.8" from the photo's EXIF (what the camera did). */
@@ -324,7 +377,7 @@ class ReviewActivity : Activity() {
             .setType(p.mime)
             .putExtra(Intent.EXTRA_STREAM, p.uri)
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        startActivity(Intent.createChooser(send, "Share photo"))
+        startActivity(Intent.createChooser(send, if (p.isVideo) "Share video" else "Share photo"))
     }
 
     private fun saveOriginal() {
@@ -354,7 +407,7 @@ class ReviewActivity : Activity() {
     private fun confirmDelete() {
         if (photos.isEmpty()) return
         AlertDialog.Builder(this)
-            .setTitle("Delete this photo?")
+            .setTitle(if (photos[index].isVideo) "Delete this video?" else "Delete this photo?")
             .setMessage("It will be removed from your gallery.")
             .setPositiveButton("Delete") { _, _ -> delete() }
             .setNegativeButton("Cancel", null)
@@ -401,20 +454,42 @@ class ReviewActivity : Activity() {
 
     // ------------------------------------------------------------------ data
 
-    private fun queryPhotos(): List<Photo> = try {
+    /** ProCam photos and videos, newest first. */
+    private fun queryPhotos(): List<Photo> = (queryImages() + queryVideos())
+        .sortedWith(compareByDescending<Photo> { it.date }.thenByDescending { it.id })
+
+    private fun queryImages(): List<Photo> = try {
         contentResolver.query(
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-            arrayOf(MediaStore.Images.Media._ID, MediaStore.Images.Media.DISPLAY_NAME, MediaStore.Images.Media.MIME_TYPE),
+            arrayOf(MediaStore.Images.Media._ID, MediaStore.Images.Media.DISPLAY_NAME, MediaStore.Images.Media.MIME_TYPE, MediaStore.Images.Media.DATE_ADDED),
             "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?",
             arrayOf("Pictures/ProCam%"),
             "${MediaStore.Images.Media.DATE_ADDED} DESC, ${MediaStore.Images.Media._ID} DESC",
         )?.use { c ->
             val out = mutableListOf<Photo>()
-            while (c.moveToNext()) out += Photo(c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "image/jpeg")
+            while (c.moveToNext()) out += Photo(c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "image/jpeg", c.getLong(3))
             out
         } ?: emptyList()
     } catch (e: Exception) {
         Log.w(TAG, "query", e)
+        emptyList()
+    }
+
+    private fun queryVideos(): List<Photo> = try {
+        contentResolver.query(
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+            arrayOf(MediaStore.Video.Media._ID, MediaStore.Video.Media.DISPLAY_NAME, MediaStore.Video.Media.MIME_TYPE,
+                MediaStore.Video.Media.DATE_ADDED, MediaStore.Video.Media.DURATION),
+            "${MediaStore.Video.Media.RELATIVE_PATH} LIKE ?",
+            arrayOf("Movies/ProCam%"),
+            null,
+        )?.use { c ->
+            val out = mutableListOf<Photo>()
+            while (c.moveToNext()) out += Photo(c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "video/mp4", c.getLong(3), c.getLong(4))
+            out
+        } ?: emptyList()
+    } catch (e: Exception) {
+        Log.w(TAG, "query videos", e)
         emptyList()
     }
 
@@ -432,6 +507,7 @@ class ReviewActivity : Activity() {
             name.contains("_ACTION") -> "Freeze" to "The sharpest moment around your press"
             name.contains("_ORIGINAL") -> "Original" to "Saved without ProCam's enhancement"
             name.endsWith(".dng", ignoreCase = true) -> "RAW" to "Unprocessed sensor data, for editing apps"
+            name.endsWith(".mp4", ignoreCase = true) -> "Video" to ""
             else -> "Photo" to ""
         }
     }

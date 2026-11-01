@@ -40,7 +40,7 @@ class WalkthroughTest {
 
     @get:Rule
     val rules: RuleChain = RuleChain
-        .outerRule(GrantPermissionRule.grant(Manifest.permission.CAMERA))
+        .outerRule(GrantPermissionRule.grant(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO))
         .around(ClearPrefsRule(pro = false))
         .around(activityRule)
 
@@ -136,6 +136,24 @@ class WalkthroughTest {
         SystemClock.sleep(800)
         screenshot("silky_done")
         onView(withId(R.id.intentAuto)).perform(click())
+
+        // Video: record a few seconds, then the review screen.
+        onView(withId(R.id.intentVideo)).perform(click())
+        SystemClock.sleep(3000)
+        screenshot("simple_video")
+        onView(withId(R.id.shutter)).perform(click())
+        SystemClock.sleep(3200)
+        screenshot("video_recording")
+        onView(withId(R.id.shutter)).perform(click())
+        SystemClock.sleep(3000)
+        screenshot("video_saved")
+        onView(withId(R.id.thumbnail)).perform(click())
+        SystemClock.sleep(2500)
+        screenshot("review_video")
+        androidx.test.espresso.Espresso.pressBack()
+        SystemClock.sleep(1500)
+        onView(withId(R.id.intentAuto)).perform(click())
+        SystemClock.sleep(2500)
 
         // Auto HDR (forced on here, as the emulator scene isn't backlit): badge, capture, review.
         context.getSharedPreferences("procam", android.content.Context.MODE_PRIVATE).edit().putBoolean("forceHdr", true).commit()

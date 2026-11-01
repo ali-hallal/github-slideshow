@@ -83,6 +83,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private lateinit var intentScroll: View
     private lateinit var intentAuto: TextView
     private lateinit var intentGroup: TextView
+    private lateinit var intentVideo: TextView
+    private lateinit var recTime: TextView
     private lateinit var intentHint: TextView
     private lateinit var chipScroll: View
     private lateinit var modeRow: View
@@ -183,6 +185,14 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private val nightMode get() = simple && prefs.intent == "NIGHT"
     private val silkyMode get() = simple && prefs.intent == "SILKY"
     private val freezeMode get() = simple && prefs.intent == "FREEZE"
+    private val videoMode get() = simple && prefs.intent == "VIDEO"
+
+    // Video
+    /** The camera is currently open for video (it reopens when switching between photo and video). */
+    private var openedForVideo = false
+    private var recording = false
+    private var recordingStartedAt = 0L
+    private var videoStarting = false
     private var freezeProcessing = false
     /** Freeze's fast-shutter exposure is active (so it can be undone when leaving Freeze). */
     private var freezeExposureOn = false
@@ -267,9 +277,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         nightProcessing = false
         zoomProcessing = false
         freezeProcessing = false
+        videoStarting = false
         overlay.setFaces(emptyList())
         zoomAnimator?.cancel()
-        camera.close()
+        camera.close() // saves a recording in progress
         capturing = false
         shutter.busy = false
         orientationListener.disable()
@@ -298,6 +309,12 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_AUDIO) {
+            // With or without the microphone: start the recording the user asked for.
+            if (videoStarting && resumed) camera.startRecording(deviceOrientation, hasAudioPermission())
+            else videoStarting = false
+            return
+        }
         if (requestCode != REQUEST_CAMERA) return
         if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
             cameraIds = camera.primaryCameras()
@@ -344,7 +361,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         cameraIndex = cameraIndex.coerceIn(0, cameraIds.size - 1)
         val id = if (cameraIndex == 0) lensCameraId ?: cameraIds[0] else cameraIds[cameraIndex]
         Log.i(TAG, "startCamera index=$cameraIndex id=$id ids=$cameraIds extra lenses=$extraLenses")
-        camera.open(id, texture, settings, prefs.output())
+        openedForVideo = videoMode
+        camera.open(id, texture, settings, prefs.output().copy(video = openedForVideo))
     }
 
     // ------------------------------------------------------------------ setup
@@ -403,6 +421,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         intentScroll = findViewById(R.id.intentScroll)
         intentAuto = findViewById(R.id.intentAuto)
         intentGroup = findViewById(R.id.intentGroup)
+        intentVideo = findViewById(R.id.intentVideo)
+        recTime = findViewById(R.id.recTime)
         intentHint = findViewById(R.id.intentHint)
         chipScroll = findViewById(R.id.chipScroll)
         modeRow = findViewById(R.id.modeRow)
@@ -531,6 +551,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         btnMode.setOnClickListener { setUiPro(!prefs.uiPro) }
         intentAuto.setOnClickListener { setIntent("AUTO") }
         intentGroup.setOnClickListener { setIntent("GROUP") }
+        intentVideo.setOnClickListener { setIntent("VIDEO") }
         intentPortrait.setOnClickListener { setIntent("PORTRAIT") }
         intentNight.setOnClickListener { setIntent("NIGHT") }
         intentSilky.setOnClickListener { setIntent("SILKY") }
@@ -624,6 +645,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             freezeExposureOn = false
         }
         syncFreeze()
+        syncVideo()
         haptic(btnMode, HapticFeedbackConstants.VIRTUAL_KEY)
         pushSettings()
     }
@@ -643,6 +665,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         if (intent == "PORTRAIT") toast("Blurs the background · step back and use 2× for natural-looking faces")
         if (intent == "SILKY") toast("Turns moving water, clouds and lights into silky streaks · hold still or rest the phone")
         syncFreeze()
+        syncVideo()
         refreshUi()
     }
 
@@ -652,6 +675,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         "NIGHT" -> intentNight
         "SILKY" -> intentSilky
         "FREEZE" -> intentFreeze
+        "VIDEO" -> intentVideo
         else -> intentAuto
     }
 
@@ -678,6 +702,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             intentAuto to (intent == "AUTO"), intentPortrait to (intent == "PORTRAIT"),
             intentNight to (intent == "NIGHT"), intentSilky to (intent == "SILKY"),
             intentFreeze to (intent == "FREEZE"), intentGroup to (intent == "GROUP"),
+            intentVideo to (intent == "VIDEO"),
         )) {
             v.setBackgroundResource(if (on) R.drawable.pill_selected_bg else R.drawable.pill_bg)
             v.setTextColor(getColor(if (on) R.color.black else R.color.white))
@@ -702,7 +727,20 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             "PORTRAIT" -> ""
             "NIGHT" -> "Merges several shots for brighter, cleaner low-light photos · hold still about 1 s"
             "FREEZE" -> "Sharp action: kids, pets, sports · catches the moment even if you press a little late"
+            "VIDEO" -> "Tap the red button to start and stop · " + (if (prefs.video4k) "4K" else "1080p") +
+                (if (prefs.stabilize) ", stabilized" else "")
             else -> "Finds faces and sets everything for you"
+        }
+        shutter.video = videoMode
+        shutter.recording = recording
+        if (recording) {
+            show(intentScroll, false)
+            show(intentHint, false)
+            show(portraitRow, false)
+        }
+        // While recording: nothing that would stop or reopen the camera.
+        for (v in listOf(thumbnail, btnSwitch, btnMode, btnSettings, btnTimer)) {
+            v.visibility = if (recording) View.INVISIBLE else View.VISIBLE
         }
     }
 
@@ -900,6 +938,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     // ------------------------------------------------------------------ capture
 
     private fun onShutterPressed() {
+        if (videoMode) {
+            if (caps != null && openedForVideo) toggleRecording()
+            return
+        }
         if (countdownRemaining > 0) {
             cancelCountdown(); return
         }
@@ -1165,6 +1207,74 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         if (!groupMode && extraCrop <= 1.001f) overlay.setFaces(faces)
         if (faces.isNotEmpty()) lastFaceSeen = SystemClock.uptimeMillis()
         lastFaces = faces
+    }
+
+    // ------------------------------------------------------------------ video
+
+    /** Reopens the camera when switching between photos and video (they use different setups). */
+    private fun syncVideo() {
+        if (videoMode == openedForVideo || !resumed || !hasCameraPermission()) return
+        if (recording) camera.stopRecording()
+        caps = null
+        readout.text = ""
+        startCamera()
+    }
+
+    private fun hasAudioPermission() =
+        checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
+    private fun toggleRecording() {
+        if (videoStarting) return
+        haptic(shutter, HapticFeedbackConstants.VIRTUAL_KEY)
+        if (recording) {
+            shutter.busy = true
+            camera.stopRecording()
+            return
+        }
+        videoStarting = true
+        shutter.busy = true
+        if (!hasAudioPermission() && !prefs.audioAsked) {
+            // Ask once for the microphone; if declined, videos are recorded without sound.
+            prefs.audioAsked = true
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_AUDIO)
+            return
+        }
+        camera.startRecording(deviceOrientation, hasAudioPermission())
+    }
+
+    override fun onRecordingStarted(withSound: Boolean) {
+        videoStarting = false
+        recording = true
+        recordingStartedAt = SystemClock.uptimeMillis()
+        shutter.busy = false
+        recTime.visibility = View.VISIBLE
+        mainHandler.post(recTick)
+        if (!withSound) toast("Recording without sound (microphone not allowed)")
+        refreshUi()
+    }
+
+    override fun onRecordingStopped(uri: Uri?) {
+        videoStarting = false
+        val length = SystemClock.uptimeMillis() - recordingStartedAt
+        recording = false
+        mainHandler.removeCallbacks(recTick)
+        recTime.visibility = View.GONE
+        shutter.busy = false
+        if (uri != null) {
+            onPhotoSaved(uri, "video/mp4")
+            toast("Video saved · ${VideoRecorder.durationLabel(length)}")
+        } else {
+            toast("Video not saved (too short?)")
+        }
+        refreshUi()
+    }
+
+    private val recTick = object : Runnable {
+        override fun run() {
+            if (!recording) return
+            recTime.text = "● " + VideoRecorder.durationLabel(SystemClock.uptimeMillis() - recordingStartedAt)
+            mainHandler.postDelayed(this, 500)
+        }
     }
 
     // ------------------------------------------------------------------ auto HDR
@@ -2006,6 +2116,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     companion object {
         private const val TAG = "ProCam"
         private const val REQUEST_CAMERA = 1
+        private const val REQUEST_AUDIO = 3
         private const val GROUP_BURST = 3
         private const val GROUP_ANALYSIS_WIDTH = 480
         private const val READY_FRAMES = 2

@@ -151,6 +151,21 @@
             android:gravity="center_vertical"
             android:orientation="horizontal">
 
+            <!-- Video: recording time. -->
+            <TextView
+                android:id="@+id/recTime"
+                android:layout_width="wrap_content"
+                android:layout_height="30dp"
+                android:layout_marginEnd="6dp"
+                android:background="@drawable/rec_bg"
+                android:fontFamily="monospace"
+                android:gravity="center"
+                android:paddingStart="10dp"
+                android:paddingEnd="10dp"
+                android:textColor="@color/white"
+                android:textSize="13sp"
+                android:visibility="gone" />
+
             <com.procam.app.ShakeView
                 android:id="@+id/shakeView"
                 android:layout_width="wrap_content"
@@ -285,6 +300,7 @@
                 <TextView android:id="@+id/intentSilky" style="@style/IntentPill" android:text="Silky" />
                 <TextView android:id="@+id/intentFreeze" style="@style/IntentPill" android:text="Freeze" />
                 <TextView android:id="@+id/intentGroup" style="@style/IntentPill" android:text="Group" />
+                <TextView android:id="@+id/intentVideo" style="@style/IntentPill" android:text="Video" />
             </LinearLayout>
         </HorizontalScrollView>
 

@@ -11,6 +11,21 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("onboarded", false)
         set(v) = sp.edit().putBoolean("onboarded", v).apply()
 
+    /** The microphone permission was asked for once already. */
+    var audioAsked: Boolean
+        get() = sp.getBoolean("audioAsked", false)
+        set(v) = sp.edit().putBoolean("audioAsked", v).apply()
+
+    /** Record video in 4K when the phone can (otherwise 1080p). */
+    var video4k: Boolean
+        get() = sp.getBoolean("video4k", false)
+        set(v) = sp.edit().putBoolean("video4k", v).apply()
+
+    /** Steady video (electronic stabilization, slightly narrower view). */
+    var stabilize: Boolean
+        get() = sp.getBoolean("stabilize", true)
+        set(v) = sp.edit().putBoolean("stabilize", v).apply()
+
     /** Auto mode uses HDR automatically for backlit, high-contrast scenes. */
     var autoHdr: Boolean
         get() = sp.getBoolean("autoHdr", true)
@@ -104,6 +119,8 @@ class Prefs(context: Context) {
         heif = heif,
         jpegQuality = jpegQuality,
         mirrorFront = mirrorFront,
+        video4k = video4k,
+        stabilize = stabilize,
     )
 
     // ---- last-used shooting settings

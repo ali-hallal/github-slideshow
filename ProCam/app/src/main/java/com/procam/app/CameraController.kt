@@ -30,6 +30,7 @@ import android.os.HandlerThread
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import android.util.Range
 import android.util.Size
 import android.view.OrientationEventListener
 import android.view.Surface
@@ -66,6 +67,10 @@ class CameraController(context: Context, private val listener: Listener) {
         /** "Never miss the moment": the frame picked from around the shutter press. */
         fun onMoment(frame: MomentBuffer.Frame, rotationDegrees: Int)
         fun onCameraError(message: String)
+        /** Video recording started ([withSound] = microphone is recording too). */
+        fun onRecordingStarted(withSound: Boolean) {}
+        /** Video recording ended; [uri] is the saved video, or null if it couldn't be saved. */
+        fun onRecordingStopped(uri: Uri?) {}
     }
 
     private enum class State { PREVIEW, WAIT_PRECAPTURE, WAIT_NON_PRECAPTURE, CAPTURING }
@@ -106,6 +111,10 @@ class CameraController(context: Context, private val listener: Listener) {
     private var burstMinimal = false
     // Fast bursts: a video-size YUV stream (no JPEG encode/decode), centre-cropped on arrival.
     private var yuvReader: ImageReader? = null
+    // Video
+    private var videoRecorder: VideoRecorder? = null
+    private var videoStabMode: Int? = null
+    private var videoFps: Range<Int>? = null
     @Volatile private var yuvInSession = false
     private var burstToYuv = false
     private var yuvCrop = 1f
@@ -361,6 +370,10 @@ class CameraController(context: Context, private val listener: Listener) {
             val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
                 ?: throw IllegalStateException("No stream configuration map")
 
+            if (output.video) {
+                openVideo(cameraId, c, cp, map, texture)
+                return
+            }
             val heicSizes = if (output.heif) map.getOutputSizes(ImageFormat.HEIC) else null
             photoFormat = if (!heicSizes.isNullOrEmpty()) ImageFormat.HEIC else ImageFormat.JPEG
             if (output.heif && photoFormat != ImageFormat.HEIC) postError("HEIF isn't supported on this camera, using JPEG")
@@ -411,7 +424,100 @@ class CameraController(context: Context, private val listener: Listener) {
         }
     }
 
+    /** Video: a 16:9 preview plus the recorder's surface, nothing else. */
+    private fun openVideo(cameraId: String, c: CameraCharacteristics, cp: CameraCaps, map: android.hardware.camera2.params.StreamConfigurationMap, texture: SurfaceTexture) {
+        val fpsRanges = c.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: emptyArray()
+        videoFps = fpsRanges.firstOrNull { it.lower == VIDEO_FPS && it.upper == VIDEO_FPS }
+            ?: fpsRanges.filter { it.upper == VIDEO_FPS }.maxByOrNull { it.lower }
+        val fps = videoFps?.upper ?: VIDEO_FPS
+        val size = VideoRecorder.pickSize(map.getOutputSizes(android.media.MediaRecorder::class.java), output.video4k, fps)
+        val stab = c.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES) ?: IntArray(0)
+        videoStabMode = when {
+            !output.stabilize -> null
+            // Preview stabilization (Android 13+) steadies the viewfinder too, so what you see is what's recorded.
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                stab.contains(CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION) ->
+                CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION
+            stab.contains(CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON) -> CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON
+            else -> null
+        }
+        val previewSize = pickPreviewSize(map.getOutputSizes(SurfaceTexture::class.java), size)
+        texture.setDefaultBufferSize(previewSize.width, previewSize.height)
+        previewSurface = Surface(texture)
+        videoRecorder = VideoRecorder(appContext, size, fps)
+        Log.i(TAG, "video: ${size.width}x${size.height} @$fps preview=$previewSize stabilization=$videoStabMode ois=${cp.ois}")
+        main.post { listener.onCameraOpened(cp, previewSize) }
+        if (!openLock.tryAcquire(2500, TimeUnit.MILLISECONDS)) throw IllegalStateException("Timed out waiting to open camera")
+        opening = true
+        try {
+            manager.openCamera(cameraId, deviceCallback, handler)
+        } catch (e: Exception) {
+            releaseOpenLock()
+            throw e
+        }
+    }
+
+    private fun createVideoSession() {
+        val d = device ?: return
+        val preview = previewSurface ?: return
+        val rec = videoRecorder ?: return
+        val callback = object : CameraCaptureSession.StateCallback() {
+            override fun onConfigured(s: CameraCaptureSession) {
+                if (device == null) return
+                session = s
+                Log.i(TAG, "session: video")
+                state = State.PREVIEW
+                updateRepeating()
+            }
+
+            override fun onConfigureFailed(s: CameraCaptureSession) = postError("This camera can't record video here")
+        }
+        try {
+            d.createCaptureSession(SessionConfiguration(
+                SessionConfiguration.SESSION_REGULAR,
+                listOf(OutputConfiguration(preview), OutputConfiguration(rec.surface)), sessionExecutor, callback,
+            ))
+        } catch (e: Exception) {
+            Log.e(TAG, "createVideoSession", e)
+            postError("Failed to start video: ${e.message}")
+        }
+    }
+
+    /** Starts recording (video mode only). [audio] = the microphone permission is granted. */
+    fun startRecording(deviceOrientation: Int, audio: Boolean) {
+        handler?.post {
+            val rec = videoRecorder
+            val c = caps
+            if (rec == null || c == null || session == null || rec.recording) return@post
+            val ok = rec.start(jpegOrientation(c, deviceOrientation), audio, location)
+            if (!ok) {
+                postError("Couldn't start recording")
+                main.post { listener.onRecordingStopped(null) }
+                return@post
+            }
+            updateRepeating()
+            main.post { listener.onRecordingStarted(rec.withSound) }
+        }
+    }
+
+    fun stopRecording() {
+        handler?.post { finishRecording() }
+    }
+
+    val isVideo get() = output.video
+
+    private fun finishRecording() {
+        val rec = videoRecorder ?: return
+        if (!rec.recording) return
+        val uri = rec.stop()
+        updateRepeating()
+        Log.i(TAG, "video: saved $uri")
+        main.post { listener.onRecordingStopped(uri) }
+    }
+
     private fun closeInternal() {
+        // Leaving the app while recording keeps what was recorded so far.
+        finishRecording()
         try {
             session?.close()
         } catch (_: Exception) {
@@ -434,6 +540,8 @@ class CameraController(context: Context, private val listener: Listener) {
         shotNames.clear()
         rawReader?.close()
         rawReader = null
+        videoRecorder?.release()
+        videoRecorder = null
         previewSurface?.release()
         previewSurface = null
         state = State.PREVIEW
@@ -455,7 +563,8 @@ class CameraController(context: Context, private val listener: Listener) {
         override fun onOpened(camera: CameraDevice) {
             releaseOpenLock()
             device = camera
-            createSession(withRaw = rawReader != null, withYuv = yuvReader != null)
+            if (videoRecorder != null) createVideoSession()
+            else createSession(withRaw = rawReader != null, withYuv = yuvReader != null)
         }
 
         override fun onDisconnected(camera: CameraDevice) {
@@ -523,6 +632,23 @@ class CameraController(context: Context, private val listener: Listener) {
     private fun updateRepeating() {
         val s = session ?: return
         try {
+            val rec = videoRecorder
+            if (rec != null) {
+                val d = device ?: return
+                val surface = previewSurface ?: return
+                val b = d.createCaptureRequest(if (rec.recording) CameraDevice.TEMPLATE_RECORD else CameraDevice.TEMPLATE_PREVIEW)
+                b.addTarget(surface)
+                if (rec.recording) b.addTarget(rec.surface)
+                applySettings(b, still = false)
+                videoFps?.let { b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
+                videoStabMode?.let { b.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, it) }
+                // Video AF: smooth, without the hunting of photo AF.
+                if (b.get(CaptureRequest.CONTROL_AF_MODE) == CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE &&
+                    caps?.afModes?.contains(CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO) == true
+                ) b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+                s.setRepeatingRequest(b.build(), previewCallback, handler)
+                return
+            }
             val b = previewBuilder() ?: return
             val yuv = yuvReader
             if (momentEnabled && yuvInSession && yuv != null) b.addTarget(yuv.surface)
@@ -1123,6 +1249,7 @@ class CameraController(context: Context, private val listener: Listener) {
         private const val MOMENT_AFTER = 2 // ~65 ms after
         private const val FAST_MAX_W = 1920
         private const val FAST_MAX_H = 1440
+        private const val VIDEO_FPS = 30
 
         /**
          * Centre 1/[crop] of a YUV_420_888 image as ARGB pixels (BT.601 full range, as used by

@@ -96,6 +96,12 @@ class SettingsActivity : Activity() {
         row(locationRow)
         pendingLocationRow = locationRow
 
+        section("Video")
+        row(Option("Video quality", "4K is sharper but uses about 3× the space (1080p if your phone can't)",
+            listOf("1080p", "4K"), { if (prefs.video4k) 1 else 0 }, { prefs.video4k = it == 1 }))
+        row(Option("Stabilization", "Smooths out shaky hands while walking (the view is slightly narrower)",
+            listOf("Off", "On"), { if (prefs.stabilize) 1 else 0 }, { prefs.stabilize = it == 1 }))
+
         section("Viewfinder")
         row(Option("Grid", "Rule-of-thirds lines",
             listOf("Off", "On"), { if (prefs.grid) 1 else 0 }, { prefs.grid = it == 1 }))
