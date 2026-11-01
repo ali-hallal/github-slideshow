@@ -55,7 +55,7 @@ class WalkthroughTest {
         screenshot("simple_auto")
 
         // Simple mode → Group smart shutter.
-        onView(withId(R.id.intentGroup)).perform(click())
+        onView(withId(R.id.intentGroup)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
         SystemClock.sleep(800)
         screenshot("simple_group")
         onView(withId(R.id.shutter)).perform(click())
@@ -67,7 +67,7 @@ class WalkthroughTest {
         savePhoto("photo_group")
 
         // Portrait (the emulator scene has no person, so this shows the UI and the fallback).
-        onView(withId(R.id.intentPortrait)).perform(click())
+        onView(withId(R.id.intentPortrait)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
         SystemClock.sleep(2000)
         screenshot("simple_portrait")
         onView(withId(R.id.shutter)).perform(click())
@@ -77,7 +77,7 @@ class WalkthroughTest {
         SystemClock.sleep(800)
         screenshot("portrait_done")
         // Zoom slider + super zoom (Auto).
-        onView(withId(R.id.intentAuto)).perform(click())
+        onView(withId(R.id.intentAuto)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
         SystemClock.sleep(500)
         tryClick("Zoom 1×")
         SystemClock.sleep(300)
@@ -96,18 +96,18 @@ class WalkthroughTest {
         SystemClock.sleep(800)
 
         // Freeze: fast shutter + moment buffer.
-        onView(withId(R.id.intentFreeze)).perform(click())
+        onView(withId(R.id.intentFreeze)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
         SystemClock.sleep(1500)
         screenshot("simple_freeze")
         onView(withId(R.id.shutter)).perform(click())
         waitForIdleShutter(30_000)
         SystemClock.sleep(2000)
         savePhoto("photo_freeze")
-        onView(withId(R.id.intentAuto)).perform(click())
+        onView(withId(R.id.intentAuto)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
         SystemClock.sleep(500)
 
         // Night: 6-8 shots merged into one.
-        onView(withId(R.id.intentNight)).perform(click())
+        onView(withId(R.id.intentNight)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
         SystemClock.sleep(1500)
         screenshot("simple_night")
         onView(withId(R.id.shutter)).perform(click())
@@ -126,7 +126,7 @@ class WalkthroughTest {
         androidx.test.espresso.Espresso.pressBack()
         SystemClock.sleep(1500)
         // Silky: blend a burst into a long-exposure look.
-        onView(withId(R.id.intentSilky)).perform(click())
+        onView(withId(R.id.intentSilky)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
         SystemClock.sleep(1500)
         screenshot("simple_silky")
         onView(withId(R.id.shutter)).perform(click())
@@ -135,10 +135,10 @@ class WalkthroughTest {
         waitForIdleShutter(90_000)
         SystemClock.sleep(800)
         screenshot("silky_done")
-        onView(withId(R.id.intentAuto)).perform(click())
+        onView(withId(R.id.intentAuto)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
 
         // Video: record a few seconds, then the review screen.
-        onView(withId(R.id.intentVideo)).perform(click())
+        onView(withId(R.id.intentVideo)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
         SystemClock.sleep(3000)
         screenshot("simple_video")
         onView(withId(R.id.shutter)).perform(click())
@@ -152,7 +152,7 @@ class WalkthroughTest {
         screenshot("review_video")
         androidx.test.espresso.Espresso.pressBack()
         SystemClock.sleep(1500)
-        onView(withId(R.id.intentAuto)).perform(click())
+        onView(withId(R.id.intentAuto)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
         SystemClock.sleep(2500)
 
         // Auto HDR (forced on here, as the emulator scene isn't backlit): badge, capture, review.

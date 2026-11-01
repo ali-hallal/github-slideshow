@@ -260,7 +260,7 @@ class ProCamTest {
     fun groupShutterKeepsOnePhotoFromBurst() {
         waitForCamera()
         setSimple(true)
-        onView(withId(R.id.intentGroup)).perform(click())
+        onView(withId(R.id.intentGroup)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
         val before = count("image/jpeg")
         onView(withId(R.id.shutter)).perform(click())
         // The emulator scene has no faces: ProCam gives up waiting quickly, takes a burst of 3
@@ -337,7 +337,7 @@ class ProCamTest {
     fun portraitWithoutPersonSavesNormalPhoto() {
         waitForCamera()
         setSimple(true)
-        onView(withId(R.id.intentPortrait)).perform(click())
+        onView(withId(R.id.intentPortrait)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
         onView(withId(R.id.blurStrong)).perform(click())
         assertEquals(2, Prefs(context).portraitStrength)
         val before = count("image/jpeg")
@@ -353,7 +353,7 @@ class ProCamTest {
         waitForCamera()
         for (simple in listOf(true, false)) {
             setSimple(simple)
-            if (simple) onView(withId(R.id.intentPortrait)).perform(click()) // the tallest Simple layout
+            if (simple) onView(withId(R.id.intentPortrait)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click()) // the tallest Simple layout
             SystemClock.sleep(800)
             val picture = screenRect(R.id.textureView)
             val panel = screenRect(R.id.bottomPanel)
@@ -464,7 +464,7 @@ class ProCamTest {
     fun silkyCaptureSavesBlendedPhoto() {
         waitForCamera()
         setSimple(true)
-        onView(withId(R.id.intentSilky)).perform(click())
+        onView(withId(R.id.intentSilky)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
         onView(withId(R.id.blurSoft)).perform(click()) // "Softer": 8 frames
         assertEquals(0, Prefs(context).silkyStrength)
         val before = count("image/jpeg")
@@ -484,7 +484,7 @@ class ProCamTest {
     fun nightCaptureSavesMergedPhoto() {
         waitForCamera()
         setSimple(true)
-        onView(withId(R.id.intentNight)).perform(click())
+        onView(withId(R.id.intentNight)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
         val before = count("image/jpeg")
         onView(withId(R.id.shutter)).perform(click())
         waitFor("night photo saved", 60_000) { count("image/jpeg") > before }
@@ -610,7 +610,7 @@ class ProCamTest {
     fun freezeCapturesTheMoment() {
         waitForCamera()
         setSimple(true)
-        onView(withId(R.id.intentFreeze)).perform(click())
+        onView(withId(R.id.intentFreeze)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
         if (backCameraHas(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)) {
             waitFor("fast shutter") {
                 val label = text(R.id.chipShutter)
@@ -631,7 +631,7 @@ class ProCamTest {
         )?.use { it.count } ?: 0
         assertTrue("an _ACTION photo from the moment buffer", action > 0)
         // Leaving Freeze puts exposure back to automatic.
-        onView(withId(R.id.intentAuto)).perform(click())
+        onView(withId(R.id.intentAuto)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
         SystemClock.sleep(500)
         assertTrue(text(R.id.chipIso).contains("AUTO"))
     }
@@ -640,7 +640,7 @@ class ProCamTest {
     fun reviewShowsBeforeAfterAndDeletes() {
         waitForCamera()
         setSimple(true)
-        onView(withId(R.id.intentNight)).perform(click())
+        onView(withId(R.id.intentNight)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
         val before = count("image/jpeg")
         onView(withId(R.id.shutter)).perform(click())
         waitFor("night photo saved", 60_000) { count("image/jpeg") > before }
@@ -793,7 +793,7 @@ class ProCamTest {
         )?.use { it.count } ?: 0
         assertTrue("an _HDR photo was saved", names > 0)
         // Other intents turn HDR off.
-        onView(withId(R.id.intentNight)).perform(click())
+        onView(withId(R.id.intentNight)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
         waitFor("HDR badge hidden") { !visible(R.id.hdrBadge) }
     }
 
@@ -814,7 +814,7 @@ class ProCamTest {
     fun videoRecordsAndSaves() {
         waitForCamera()
         setSimple(true)
-        onView(withId(R.id.intentVideo)).perform(click())
+        onView(withId(R.id.intentVideo)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
         SystemClock.sleep(1500)
         waitForCamera()
         assertTrue("hint explains recording", text(R.id.intentHint).contains("red button"))
@@ -842,7 +842,7 @@ class ProCamTest {
         assertEquals("16:9", 16f / 9f, maxOf(w, h).toFloat() / minOf(w, h), 0.05f)
         assertTrue("has a picture", frame != null)
         // Back to photos: the camera reopens for photos and the shutter takes one.
-        onView(withId(R.id.intentAuto)).perform(click())
+        onView(withId(R.id.intentAuto)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
         SystemClock.sleep(1500)
         waitForCamera()
         shootAndExpect("image/jpeg") { onView(withId(R.id.shutter)).perform(click()) }
@@ -853,7 +853,7 @@ class ProCamTest {
     fun reviewPlaysVideo() {
         waitForCamera()
         setSimple(true)
-        onView(withId(R.id.intentVideo)).perform(click())
+        onView(withId(R.id.intentVideo)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
         SystemClock.sleep(1500)
         waitForCamera()
         val before = videoCount()
