@@ -906,7 +906,15 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             // Super zoom: a short burst, rebuilt into one detailed zoomed photo.
             zoomProcessing = true
             showGroupStatus("Hold still… super zoom")
-            camera.takeBurst(deviceOrientation, SUPER_ZOOM_FRAMES, toMemory = true)
+            val c = caps
+            val isoR = c?.isoRange
+            val expR = c?.exposureRange
+            // A shutter fast enough to freeze hand shake at this zoom; the merge removes the extra noise.
+            val exposure = if (c != null && c.manualSensor && isoR != null && expR != null && liveIso != null && liveExposure != null) {
+                SuperZoomProcessor.plan(liveIso!!, liveExposure!!, safeShutterNs() ?: liveExposure!!, isoR, expR)
+            } else null
+            exposure?.let { Log.i(TAG, "super zoom plan: ISO ${it.first} ${Stops.shutterLabel(it.second)}") }
+            camera.takeBurst(deviceOrientation, SUPER_ZOOM_FRAMES, toMemory = true, exposure = exposure, minimalProcessing = true)
         } else {
             camera.takePicture(deviceOrientation)
         }
@@ -928,7 +936,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private fun safeShutterNs(): Long? {
         val c = caps ?: return null
         if (!shake.available) return null
-        return ShakeMeter.safeShutterNs(shake.omega, c.focalLength ?: return null, c.sensorWidthMm, settings.zoom, c.ois)
+        return ShakeMeter.safeShutterNs(shake.omega, c.focalLength ?: return null, c.sensorWidthMm, cameraZoom(), c.ois)
     }
 
     /** > 1 means the current shutter is fast enough for how much the hands are moving. */
@@ -1177,7 +1185,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 shutter.busy = false
                 groupStatus.visibility = View.GONE
                 if (uri != null) onPhotoSaved(uri, if (result != null) "image/jpeg" else mimeType) else toast(getString(R.string.save_failed))
-                toast(if (result != null) "Super zoom · built from ${result.merged} shots" else "Saved at the camera's maximum zoom")
+                toast(if (result != null) "Super zoom · sharpest ${result.merged} of $SUPER_ZOOM_FRAMES shots merged" else "Saved at the camera's maximum zoom")
             }
         }.start()
     }
@@ -1749,7 +1757,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         private const val STEADY_WAIT_MS = 800L
         private const val SUPER_ZOOM_FACTOR = 4f
         private const val MAX_DISPLAY_ZOOM = 100f
-        private const val SUPER_ZOOM_FRAMES = 6
+        /** Shots taken for super zoom; the sharpest [SuperZoomProcessor.KEEP_FRAMES] are merged. */
+        private const val SUPER_ZOOM_FRAMES = 10
         private const val ZOOM_BAR_HIDE_MS = 3500L
         private const val NIGHT_FALLBACK_FRAMES = 6
         private val SILKY_FRAMES = intArrayOf(8, 12, 16)

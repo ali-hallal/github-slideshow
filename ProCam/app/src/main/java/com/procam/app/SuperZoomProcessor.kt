@@ -32,83 +32,76 @@ class SuperZoomProcessor {
     fun process(frames: List<ByteArray>, crop: Float, quality: Int): Result {
         require(frames.isNotEmpty())
         val rotation = exifRotation(frames.first())
-        val crops = frames.mapNotNull { decodeCentre(it, crop) }
+        // 1. Full-resolution centre crops.
+        val crops = frames.mapNotNull { bytes ->
+            decodeCentre(bytes, crop)?.let { bmp ->
+                val px = IntArray(bmp.width * bmp.height)
+                bmp.getPixels(px, 0, bmp.width, 0, 0, bmp.width, bmp.height)
+                val f = SuperRes.Frame(px, bmp.width, bmp.height)
+                bmp.recycle()
+                f
+            }
+        }
         require(crops.isNotEmpty()) { "could not decode any frame" }
-        val cw = crops[0].width
-        val ch = crops[0].height
-        // Enlarge 2x (or less, to keep the result around 3000 px).
-        val up = (MAX_SIDE.toFloat() / max(cw, ch)).coerceIn(1f, 2f)
-        val w = (cw * up).roundToInt()
-        val h = (ch * up).roundToInt()
-        val n = w * h
-
-        // Enlarge one crop at a time (keeps memory low): an enlarged frame's pixels, or null.
-        fun enlarged(i: Int, into: IntArray): Boolean {
-            val c = crops[i]
-            if (c.width != cw || c.height != ch) return false
-            val big = Bitmap.createScaledBitmap(c, w, h, true)
-            big.getPixels(into, 0, w, 0, 0, w, h)
-            if (big !== c) big.recycle()
-            return true
+        val w0 = crops[0].w
+        val h0 = crops[0].h
+        val same = crops.filter { it.w == w0 && it.h == h0 }
+        // 2. Lucky frames: keep the sharpest (frames taken mid-tremor are dropped). Sharpest first = reference.
+        val chosen = SuperRes.sharpest(same, KEEP_FRAMES).map { same[it] }
+        // 3. Sub-pixel offsets of every frame relative to the reference.
+        val grays = chosen.map { SuperRes.gray(it, GRAY_SCALE) }
+        val offsets = chosen.indices.map { k ->
+            if (k == 0) 0f to 0f else SuperRes.offset(chosen[0], chosen[k], grays[0], grays[k], GRAY_SCALE)
         }
-        val grays = crops.map { NightProcessor.Gray.of(it, max(1, (NightProcessor.ALIGN_SCALE / up).roundToInt())) }
-        val refIndex = grays.indices.maxByOrNull { grays[it].sharpness() } ?: 0
-        val refPx = IntArray(n)
-        enlarged(refIndex, refPx)
-        // Gray copies were made from the small crops: scale their shifts to the enlarged size.
-        val alignScale = w.toFloat() / grays[refIndex].w
-
-        val sumR = IntArray(n)
-        val sumG = IntArray(n)
-        val sumB = IntArray(n)
-        val sumW = IntArray(n)
-        NightProcessor.accumulate(refPx, refPx, w, h, 0, 0, 0, sumR, sumG, sumB, sumW, isReference = true)
-        var merged = 1
-        val px = IntArray(n)
-        for (i in crops.indices) {
-            if (i == refIndex) continue
-            if (!enlarged(i, px)) continue
-            val coarse = NightProcessor.align(grays[refIndex], grays[i])
-            val cx = (coarse.first / NightProcessor.ALIGN_SCALE * alignScale).roundToInt()
-            val cy = (coarse.second / NightProcessor.ALIGN_SCALE * alignScale).roundToInt()
-            // Refined on the enlarged image: 1 px here = half a pixel of the original crop.
-            val (dx, dy) = NightProcessor.refine(refPx, px, w, h, cx, cy, range = 4)
-            val t = NightProcessor.motionThreshold(refPx, px, w, h, dx, dy)
-            NightProcessor.accumulate(refPx, px, w, h, dx, dy, t, sumR, sumG, sumB, sumW, isReference = false)
-            merged++
-            Log.i(TAG, "frame $i offset ($dx, $dy) threshold $t")
+        val motion = IntArray(chosen.size) { k ->
+            val (dx, dy) = offsets[k]
+            if (k == 0) 255 else NightProcessor.motionThreshold(chosen[0].px, chosen[k].px, w0, h0, dx.roundToInt(), dy.roundToInt())
         }
-        crops.forEach { it.recycle() }
+        Log.i(TAG, "kept ${chosen.size} of ${frames.size} frames; offsets ${offsets.map { "%.2f,%.2f".format(it.first, it.second) }}")
+        // 4. Shift-and-add onto a 2x finer grid (less if that would exceed ~3000 px), then sharpen.
+        val scale = (MAX_SIDE.toFloat() / max(w0, h0)).coerceIn(1f, 2f)
+        val merged = SuperRes.merge(chosen, offsets, motion, scale)
+        SuperRes.sharpen(merged)
 
-        for (i in 0 until n) {
-            val wt = sumW[i]
-            refPx[i] = (0xFF shl 24) or
-                ((sumR[i] / wt).coerceIn(0, 255) shl 16) or
-                ((sumG[i] / wt).coerceIn(0, 255) shl 8) or
-                (sumB[i] / wt).coerceIn(0, 255)
-        }
-        sharpen(refPx, w, h)
-
-        var out = Bitmap.createBitmap(refPx, w, h, Bitmap.Config.ARGB_8888)
+        var out = Bitmap.createBitmap(merged.px, merged.w, merged.h, Bitmap.Config.ARGB_8888)
         if (rotation != 0) {
             val m = Matrix().apply { postRotate(rotation.toFloat()) }
-            val rotated = Bitmap.createBitmap(out, 0, 0, w, h, m, true)
+            val rotated = Bitmap.createBitmap(out, 0, 0, out.width, out.height, m, true)
             out.recycle()
             out = rotated
         }
         val bytes = ByteArrayOutputStream()
         out.compress(Bitmap.CompressFormat.JPEG, quality.coerceIn(50, 100), bytes)
-        val result = Result(bytes.toByteArray(), merged, out.width, out.height)
+        val result = Result(bytes.toByteArray(), chosen.size, out.width, out.height)
         out.recycle()
-        Log.i(TAG, "super zoom x$crop: merged $merged frames into ${result.width}x${result.height}")
+        Log.i(TAG, "super zoom x$crop: ${result.width}x${result.height} from ${chosen.size} frames")
         return result
     }
 
     companion object {
         private const val TAG = "SuperZoom"
         private const val MAX_SIDE = 3000
-        private const val SHARPEN_AMOUNT = 0.7f
-        private const val SHARPEN_RADIUS = 2
+        /** Frames merged out of the burst (the sharpest ones). */
+        const val KEEP_FRAMES = 6
+        private const val GRAY_SCALE = 2
+
+        /**
+         * Exposure for a super-zoom burst: a shutter fast enough to freeze hand shake at this
+         * zoom (with margin), ISO raised to keep the brightness; the merge removes the extra noise.
+         */
+        fun plan(
+            aeIso: Int, aeExposureNs: Long, safeShutterNs: Long,
+            isoRange: android.util.Range<Int>, exposureRange: android.util.Range<Long>,
+        ): Pair<Int, Long> {
+            val product = aeIso.toDouble() * aeExposureNs
+            var t = min(aeExposureNs, (safeShutterNs * 0.7).toLong()).coerceIn(exposureRange.lower, exposureRange.upper)
+            var iso = (product / t).roundToInt()
+            if (iso > isoRange.upper) {
+                iso = isoRange.upper
+                t = (product / iso).toLong().coerceIn(exposureRange.lower, exposureRange.upper)
+            }
+            return Pair(iso.coerceIn(isoRange.lower, isoRange.upper), t)
+        }
 
         /** Full-resolution centre 1/[crop] of a JPEG, decoded without decoding the rest. */
         @Suppress("DEPRECATION")
@@ -139,21 +132,6 @@ class SuperZoomProcessor {
             }
         } catch (e: Exception) {
             0
-        }
-
-        /** Unsharp mask: adds back fine detail lost to enlarging and averaging. */
-        fun sharpen(px: IntArray, w: Int, h: Int) {
-            val chans = Array(3) { c -> FloatArray(w * h) { i -> ((px[i] shr (16 - 8 * c)) and 0xFF).toFloat() } }
-            val blurred = Array(3) { c -> chans[c].copyOf() }
-            for (b in blurred) repeat(2) { PortraitProcessor.boxBlur(b, w, h, SHARPEN_RADIUS) }
-            for (i in px.indices) {
-                var p = 0xFF shl 24
-                for (c in 0 until 3) {
-                    val v = chans[c][i] + SHARPEN_AMOUNT * (chans[c][i] - blurred[c][i])
-                    p = p or (min(255, max(0, v.roundToInt())) shl (16 - 8 * c))
-                }
-                px[i] = p
-            }
         }
     }
 }

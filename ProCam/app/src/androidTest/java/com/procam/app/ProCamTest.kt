@@ -499,44 +499,59 @@ class ProCamTest {
     }
 
     @Test
-    fun superZoomMergesBurstIntoCleanerCrop() {
-        // 6 noisy, hand-shaken frames of a detailed scene with a flat area (for measuring noise).
-        val w = 1600
-        val h = 1200
-        val rnd = java.util.Random(3)
-        val scene = IntArray(w * h) { i -> val x = i % w; val y = i / w
-            if (x in 700 until 900 && y in 500 until 700) 128
-            else (128 + 60 * kotlin.math.sin(x / 7.0) * kotlin.math.cos(y / 9.0)).toInt() }
-        val frames = (0 until 6).map { k ->
-            val sx = (k * 5) % 7 - 3
-            val sy = (k * 3) % 5 - 2
-            val bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
-            val px = IntArray(w * h) { i -> val x = i % w; val y = i / w
-                val v = (scene[(y + sy).coerceIn(0, h - 1) * w + (x + sx).coerceIn(0, w - 1)] + rnd.nextGaussian() * 16).toInt().coerceIn(0, 255)
-                (0xFF shl 24) or (v shl 16) or (v shl 8) or v }
-            bmp.setPixels(px, 0, w, 0, 0, w, h)
+    fun superZoomRecoversRealDetail() {
+        // A detailed "true" scene, photographed 6x at 1/4 resolution with hand-shake offsets and
+        // noise (as JPEGs), plus 2 frames smeared by shake. Super zoom must rebuild it at 2x much
+        // closer to the truth than enlarging a single shot.
+        val w4 = 1600
+        val h4 = 1200
+        val rnd = java.util.Random(11)
+        val tex = FloatArray(w4 * h4) { rnd.nextFloat() }
+        repeat(2) { PortraitProcessor.boxBlur(tex, w4, h4, 3) }
+        val truth4 = IntArray(w4 * h4) { i -> val x = i % w4; val y = i / w4
+            var v = 60 + 140 * tex[i]
+            if ((x / 24 + y / 24) % 2 == 0 && x in 200..700 && y in 200..700) v = 30f
+            if (x in 900..1400 && y in 300..900 && ((x - 900) / 6) % 3 == 0) v = 230f
+            v += 25f * kotlin.math.sin(x * x / 9000f) * kotlin.math.cos(y / 13f)
+            v.toInt().coerceIn(0, 255) }
+        fun boxDown(f: Int, ox: Int, oy: Int): SuperRes.Frame {
+            val ow = w4 / f - 2
+            val oh = h4 / f - 2
+            return SuperRes.Frame(IntArray(ow * oh) { i -> val x = i % ow; val y = i / ow; var s = 0
+                for (yy in 0 until f) for (xx in 0 until f) s += truth4[(y * f + f + oy + yy).coerceIn(0, h4 - 1) * w4 + (x * f + f + ox + xx).coerceIn(0, w4 - 1)]
+                val v = s / (f * f); (0xFF shl 24) or (v shl 16) or (v shl 8) or v }, ow, oh)
+        }
+        val shifts = listOf(0 to 0, 2 to 1, -1 to 3, 3 to -2, -2 to -1, 1 to 2)
+        fun jpeg(f: SuperRes.Frame, k: Int, smear: Boolean): ByteArray {
+            val noise = java.util.Random(k * 7919L)
+            val px = IntArray(f.px.size) { i ->
+                var v = f.px[i] and 0xFF
+                if (smear) { val x = i % f.w; var s = 0; for (d in -3..3) s += f.px[i - x + (x + d).coerceIn(0, f.w - 1)] and 0xFF; v = s / 7 }
+                val n = (v + noise.nextGaussian() * 6).toInt().coerceIn(0, 255)
+                (0xFF shl 24) or (n shl 16) or (n shl 8) or n }
+            val bmp = android.graphics.Bitmap.createBitmap(px, f.w, f.h, android.graphics.Bitmap.Config.ARGB_8888)
             val out = java.io.ByteArrayOutputStream()
             bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 97, out)
-            out.toByteArray()
+            return out.toByteArray()
         }
-        val result = SuperZoomProcessor().process(frames, crop = 2f, quality = 95)
-        Log.i(TAG, "super zoom: ${result.width}x${result.height} from ${result.merged} frames")
-        assertEquals(6, result.merged)
-        assertEquals("centre half enlarged 2x", 1600, result.width)
-        assertEquals(1200, result.height)
-        // Noise in the flat patch (scene centre → middle of the zoomed photo) vs. one enlarged crop.
-        fun noise(b: android.graphics.Bitmap): Double {
-            var s = 0.0; var n = 0
-            for (y in 700 until 900 step 2) for (x in 700 until 900 step 2) {
-                val d = android.graphics.Color.green(b.getPixel(x, y)) - android.graphics.Color.green(b.getPixel(x + 1, y))
-                s += d * d; n++
-            }
-            return kotlin.math.sqrt(s / n)
+        val lowRes = shifts.map { (sx, sy) -> boxDown(4, sx, sy) }
+        val frames = lowRes.mapIndexed { k, f -> jpeg(f, k, smear = false) } + listOf(jpeg(lowRes[1], 90, true), jpeg(lowRes[2], 91, true))
+        val result = SuperZoomProcessor().process(frames, crop = 1f, quality = 97)
+        assertEquals("kept the 6 sharp frames", 6, result.merged)
+        val out = android.graphics.BitmapFactory.decodeByteArray(result.jpeg, 0, result.jpeg.size)
+        val outFrame = SuperRes.Frame(IntArray(out.width * out.height).also { out.getPixels(it, 0, out.width, 0, 0, out.width, out.height) }, out.width, out.height)
+        // Compare with the truth on the grid of whichever frame was the reference (the sharpest).
+        fun err(f: SuperRes.Frame) = shifts.minOf { (sx, sy) ->
+            val t = boxDown(2, 2 + sx, 2 + sy)
+            SuperRes.rmse(f, SuperRes.Frame(IntArray(f.w * f.h) { i -> t.px[(i / f.w).coerceIn(0, t.h - 1) * t.w + (i % f.w).coerceIn(0, t.w - 1)] }, f.w, f.h), 30)
         }
-        val merged = android.graphics.BitmapFactory.decodeByteArray(result.jpeg, 0, result.jpeg.size)
-        val single = android.graphics.Bitmap.createScaledBitmap(SuperZoomProcessor.decodeCentre(frames[0], 2f)!!, 1600, 1200, true)
-        Log.i(TAG, "super zoom noise: single=${noise(single)} merged=${noise(merged)}")
-        assertTrue("merged crop is cleaner", noise(merged) < noise(single) * 0.85)
+        val single0 = android.graphics.BitmapFactory.decodeByteArray(frames[0], 0, frames[0].size)
+        val s0 = SuperRes.Frame(IntArray(single0.width * single0.height).also { single0.getPixels(it, 0, single0.width, 0, 0, single0.width, single0.height) }, single0.width, single0.height)
+        val single = SuperRes.Frame(SuperRes.enlarge(s0, outFrame.w, outFrame.h), outFrame.w, outFrame.h)
+        val eSingle = err(single)
+        val eSuper = err(outFrame)
+        Log.i(TAG, "super zoom detail: single enlarged error=$eSingle, super zoom error=$eSuper (${out.width}x${out.height})")
+        assertTrue("super zoom recovers real detail ($eSingle -> $eSuper)", eSuper < eSingle * 0.8)
     }
 
     @Test

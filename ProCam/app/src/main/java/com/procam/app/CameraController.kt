@@ -96,6 +96,9 @@ class CameraController(context: Context, private val listener: Listener) {
     private var stillCount = 1
     private var stillToMemory = false
     private var burstExposure: Pair<Int, Long>? = null
+    private var burstMinimal = false
+    /** Last focus distance the camera reported (diopters), to lock focus for a burst. */
+    @Volatile private var lastFocusDistance: Float? = null
     private var pendingStills = 0
     private var burstExpected = 0
     private val burstFrames = mutableListOf<ByteArray>()
@@ -244,6 +247,11 @@ class CameraController(context: Context, private val listener: Listener) {
         toMemory: Boolean = count > 1,
         /** Per-frame (ISO, exposure ns) for every frame of the burst, e.g. for Night; null = normal. */
         exposure: Pair<Int, Long>? = null,
+        /**
+         * For multi-frame merging (super zoom): switch off the camera's own noise reduction and
+         * sharpening (they erase the fine detail the merge recovers) and lock focus.
+         */
+        minimalProcessing: Boolean = false,
     ) {
         val h = handler
         if (h == null) {
@@ -254,6 +262,7 @@ class CameraController(context: Context, private val listener: Listener) {
             stillCount = count.coerceIn(1, MAX_BURST)
             stillToMemory = toMemory || stillCount > 1
             burstExposure = exposure
+            burstMinimal = minimalProcessing
             takePictureInternal(deviceOrientation)
         }
     }
@@ -557,6 +566,7 @@ class CameraController(context: Context, private val listener: Listener) {
                 val iso = result.get(CaptureResult.SENSOR_SENSITIVITY)
                 val exp = result.get(CaptureResult.SENSOR_EXPOSURE_TIME)
                 val focus = result.get(CaptureResult.LENS_FOCUS_DISTANCE)
+                if (focus != null) lastFocusDistance = focus
                 val af = result.get(CaptureResult.CONTROL_AF_STATE)
                 main.post { listener.onLiveStats(iso, exp, focus, af) }
                 handleFaces(result.get(CaptureResult.STATISTICS_FACES), now)
@@ -723,6 +733,20 @@ class CameraController(context: Context, private val listener: Listener) {
                 b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, override.second)
                 b.set(CaptureRequest.SENSOR_FRAME_DURATION, override.second)
                 b.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_OFF)
+            }
+            val cc = caps
+            if (burstMinimal && cc != null) {
+                fun pick(modes: IntArray, vararg prefs: Int) = prefs.firstOrNull { modes.contains(it) }
+                pick(cc.noiseReductionModes, CameraMetadata.NOISE_REDUCTION_MODE_OFF, CameraMetadata.NOISE_REDUCTION_MODE_MINIMAL, CameraMetadata.NOISE_REDUCTION_MODE_FAST)
+                    ?.let { b.set(CaptureRequest.NOISE_REDUCTION_MODE, it) }
+                pick(cc.edgeModes, CameraMetadata.EDGE_MODE_OFF, CameraMetadata.EDGE_MODE_FAST)
+                    ?.let { b.set(CaptureRequest.EDGE_MODE, it) }
+                val focus = lastFocusDistance
+                if (cc.canManualFocus && !settings.manualFocus && focus != null) {
+                    // Same focus for every frame (no hunting mid-burst).
+                    b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
+                    b.set(CaptureRequest.LENS_FOCUS_DISTANCE, focus)
+                }
             }
             pendingStills = stillCount
             if (burst) {
