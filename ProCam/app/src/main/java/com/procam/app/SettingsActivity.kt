@@ -118,6 +118,13 @@ class SettingsActivity : Activity() {
 
         section("")
         list.addView(TextView(this).apply {
+            text = "Show the welcome guide"
+            textSize = 16f
+            setTextColor(getColor(R.color.white))
+            setPadding(dp(24), dp(16), dp(24), dp(16))
+            setOnClickListener { startActivity(android.content.Intent(this@SettingsActivity, WelcomeActivity::class.java)) }
+        })
+        list.addView(TextView(this).apply {
             text = "Reset all settings"
             textSize = 16f
             setTextColor(getColor(R.color.accent))

@@ -224,6 +224,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
 
         setupListeners()
         refreshUi()
+        // First launch: a short guide before anything else (including the camera permission prompt).
+        if (!prefs.onboarded) startActivity(Intent(this, WelcomeActivity::class.java))
     }
 
     override fun onResume() {
@@ -238,6 +240,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         if (prefs.location) locationTracker.start() else locationTracker.stop()
         shake.start()
         mainHandler.post(analysisTick)
+        if (!prefs.onboarded) return // the welcome guide is on top; continue when it closes
         if (hasCameraPermission()) {
             startCamera()
         } else if (!permissionRequested) {

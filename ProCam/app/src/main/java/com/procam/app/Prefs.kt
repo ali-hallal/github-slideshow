@@ -6,6 +6,11 @@ import android.content.Context
 class Prefs(context: Context) {
     private val sp = context.getSharedPreferences("procam", Context.MODE_PRIVATE)
 
+    /** The first-launch welcome guide has been shown. */
+    var onboarded: Boolean
+        get() = sp.getBoolean("onboarded", false)
+        set(v) = sp.edit().putBoolean("onboarded", v).apply()
+
     // ---- mode
     /** false = Simple (beginner) screen, true = Pro controls. Simple is the default. */
     var uiPro: Boolean
