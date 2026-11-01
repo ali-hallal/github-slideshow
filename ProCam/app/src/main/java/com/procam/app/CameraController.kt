@@ -910,7 +910,7 @@ class CameraController(context: Context, private val listener: Listener) {
         private const val RAW_TAG = "raw"
         private const val STANDARD_PIXELS = 12_600_000L
         private const val AE_LOCK_DELAY_MS = 700L
-        private const val MAX_BURST = 8
+        private const val MAX_BURST = 16
         private const val FACE_UPDATE_MS = 500L
         private const val FACE_HOLD_MS = 1500L
         private const val MAX_PREVIEW_EXPOSURE_NS = 66_666_667L // 1/15 s

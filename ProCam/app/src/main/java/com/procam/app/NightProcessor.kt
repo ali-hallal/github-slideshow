@@ -23,7 +23,11 @@ class NightProcessor {
     class Result(val jpeg: ByteArray, val merged: Int, val reference: Int)
 
     /** Blocking: call off the main thread. [iso] is the per-frame ISO (sets the motion threshold). */
-    fun process(frames: List<ByteArray>, iso: Int, quality: Int): Result {
+    /**
+     * @param silky Silky (long-exposure look): keep motion instead of rejecting it, so moving water,
+     *   clouds and lights blur into streaks while the aligned still parts stay sharp; no shadow lift.
+     */
+    fun process(frames: List<ByteArray>, iso: Int, quality: Int, silky: Boolean = false): Result {
         require(frames.isNotEmpty())
         // Small grey copies for choosing the reference and aligning.
         val smalls = frames.map { bytes ->
@@ -45,7 +49,10 @@ class NightProcessor {
         val sumG = IntArray(n)
         val sumB = IntArray(n)
         val sumW = IntArray(n)
-        accumulate(refPx, refPx, w, h, 0, 0, 0, sumR, sumG, sumB, sumW, isReference = true)
+        // Silky: also track per-pixel brightness variance to find the moving areas.
+        val sumL = if (silky) IntArray(n) else null
+        val sumSq = if (silky) IntArray(n) else null
+        accumulate(refPx, refPx, w, h, 0, 0, 0, sumR, sumG, sumB, sumW, isReference = true, sumL = sumL, sumSq = sumSq)
 
         var merged = 1
         val framePx = IntArray(n)
@@ -61,24 +68,26 @@ class NightProcessor {
                 bmp.getPixels(framePx, 0, w, 0, 0, w, h)
                 bmp.recycle()
                 val (dx, dy) = refine(refPx, framePx, w, h, coarse.first, coarse.second)
-                val t = motionThreshold(refPx, framePx, w, h, dx, dy)
+                val t = if (silky) 255 else motionThreshold(refPx, framePx, w, h, dx, dy)
                 Log.i(TAG, "frame $i offset ($dx, $dy), motion threshold $t")
-                accumulate(refPx, framePx, w, h, dx, dy, t, sumR, sumG, sumB, sumW, isReference = false)
+                accumulate(refPx, framePx, w, h, dx, dy, t, sumR, sumG, sumB, sumW, isReference = false, sumL = sumL, sumSq = sumSq)
                 merged++
             } catch (e: Exception) {
                 Log.w(TAG, "frame $i skipped", e)
             }
         }
 
-        // Average + shadow lift.
+        // Average (+ shadow lift for Night).
+        val curve = if (silky) IDENTITY else LIFT
         for (i in 0 until n) {
             val wt = sumW[i]
-            val r = LIFT[(sumR[i] / wt).coerceIn(0, 255)]
-            val g = LIFT[(sumG[i] / wt).coerceIn(0, 255)]
-            val b = LIFT[(sumB[i] / wt).coerceIn(0, 255)]
+            val r = curve[(sumR[i] / wt).coerceIn(0, 255)]
+            val g = curve[(sumG[i] / wt).coerceIn(0, 255)]
+            val b = curve[(sumB[i] / wt).coerceIn(0, 255)]
             refPx[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
         }
         ref.setPixels(refPx, 0, w, 0, 0, w, h)
+        if (silky && sumL != null && sumSq != null) smoothMotion(ref, sumL, sumSq, sumW)
         val out = ByteArrayOutputStream(frames[refIndex].size)
         ref.compress(Bitmap.CompressFormat.JPEG, quality.coerceIn(50, 100), out)
         ref.recycle()
@@ -127,6 +136,27 @@ class NightProcessor {
         private const val TAG = "Night"
         /** Alignment works on 1/4-size grey copies, then a 1/16 pyramid level for the coarse search. */
         const val ALIGN_SCALE = 4
+
+        private val IDENTITY = IntArray(256) { it }
+
+        /**
+         * Exposure plan for Silky: normal brightness per frame (lowest ISO, so the shutter is as
+         * long as the light allows, up to 1/8 s), [frames] frames.
+         */
+        fun silkyPlan(
+            aeIso: Int, aeExposureNs: Long, isoRange: android.util.Range<Int>, exposureRange: android.util.Range<Long>,
+        ): Pair<Int, Long> {
+            val product = aeIso.toDouble() * aeExposureNs
+            var iso = isoRange.lower
+            var t = (product / iso).toLong()
+            if (t > SILKY_MAX_FRAME_NS) {
+                t = SILKY_MAX_FRAME_NS
+                iso = (product / t).roundToInt().coerceIn(isoRange.lower, isoRange.upper)
+            }
+            return Pair(iso, t.coerceIn(exposureRange.lower, exposureRange.upper))
+        }
+
+        private const val SILKY_MAX_FRAME_NS = 125_000_000L
 
         /** Shadow lift: brightens dark tones, leaves highlights alone. */
         private val LIFT = IntArray(256) { i ->
@@ -205,6 +235,7 @@ class NightProcessor {
         fun accumulate(
             refPx: IntArray, framePx: IntArray, w: Int, h: Int, dx: Int, dy: Int, t: Int,
             sumR: IntArray, sumG: IntArray, sumB: IntArray, sumW: IntArray, isReference: Boolean,
+            sumL: IntArray? = null, sumSq: IntArray? = null,
         ) {
             for (y in 0 until h) {
                 val fy = y + dy
@@ -217,6 +248,11 @@ class NightProcessor {
                         sumG[i] += ((p shr 8) and 0xFF) * 256
                         sumB[i] += (p and 0xFF) * 256
                         sumW[i] += 256
+                        if (sumL != null && sumSq != null) {
+                            val l = luma(p)
+                            sumL[i] += l
+                            sumSq[i] += l * l
+                        }
                         continue
                     }
                     if (!rowOk) continue
@@ -234,9 +270,57 @@ class NightProcessor {
                     sumG[i] += ((p shr 8) and 0xFF) * wt
                     sumB[i] += (p and 0xFF) * wt
                     sumW[i] += wt
+                    if (sumL != null && sumSq != null) {
+                        val l = luma(p)
+                        sumL[i] += l
+                        sumSq[i] += l * l
+                    }
                 }
             }
         }
+
+        /**
+         * Silky: a burst of short exposures leaves moving things as separate "steps". Where the
+         * frames disagreed (high variance = motion), blend in a softly blurred copy so the streaks
+         * become smooth like a real long exposure; still areas stay untouched and sharp.
+         */
+        fun smoothMotion(img: Bitmap, sumL: IntArray, sumSq: IntArray, sumW: IntArray) {
+            val w = img.width
+            val h = img.height
+            val small = Bitmap.createScaledBitmap(img, max(1, w / MOTION_BLUR_SCALE), max(1, h / MOTION_BLUR_SCALE), true)
+            val blurred = Bitmap.createScaledBitmap(small, w, h, true)
+            small.recycle()
+            val rowO = IntArray(w)
+            val rowB = IntArray(w)
+            for (y in 0 until h) {
+                img.getPixels(rowO, 0, w, 0, y, w, 1)
+                blurred.getPixels(rowB, 0, w, 0, y, w, 1)
+                var changed = false
+                for (x in 0 until w) {
+                    val i = y * w + x
+                    val count = sumW[i] / 256
+                    if (count < 2) continue
+                    val mean = sumL[i].toFloat() / count
+                    val variance = sumSq[i].toFloat() / count - mean * mean
+                    val m = ((variance - VAR_LOW) / (VAR_HIGH - VAR_LOW)).coerceIn(0f, 1f)
+                    if (m <= 0f) continue
+                    val o = rowO[x]
+                    val b = rowB[x]
+                    val r = (((o shr 16) and 0xFF) * (1 - m) + ((b shr 16) and 0xFF) * m).toInt()
+                    val g = (((o shr 8) and 0xFF) * (1 - m) + ((b shr 8) and 0xFF) * m).toInt()
+                    val bb = ((o and 0xFF) * (1 - m) + (b and 0xFF) * m).toInt()
+                    rowO[x] = (0xFF shl 24) or (r shl 16) or (g shl 8) or bb
+                    changed = true
+                }
+                if (changed) img.setPixels(rowO, 0, w, 0, y, w, 1)
+            }
+            blurred.recycle()
+        }
+
+        /** Motion smoothing: blur scale, and the variance range (levels²) that fades it in. */
+        private const val MOTION_BLUR_SCALE = 12
+        private const val VAR_LOW = 60f
+        private const val VAR_HIGH = 400f
 
         /**
          * Final alignment at full resolution: tries shifts within ±[range] px of the coarse

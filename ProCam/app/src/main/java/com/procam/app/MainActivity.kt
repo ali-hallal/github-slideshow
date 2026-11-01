@@ -90,6 +90,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private lateinit var shakeView: ShakeView
     private lateinit var intentPortrait: TextView
     private lateinit var intentNight: TextView
+    private lateinit var intentSilky: TextView
     private lateinit var portraitRow: View
     private lateinit var blurButtons: List<TextView>
 
@@ -159,6 +160,9 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private val groupMode get() = simple && prefs.intent == "GROUP"
     private val portraitMode get() = simple && prefs.intent == "PORTRAIT"
     private val nightMode get() = simple && prefs.intent == "NIGHT"
+    private val silkyMode get() = simple && prefs.intent == "SILKY"
+    /** The running merge is Silky (keep motion) rather than Night. */
+    private var mergeSilky = false
 
     // Night
     private val night = NightProcessor()
@@ -358,6 +362,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         shakeView = findViewById(R.id.shakeView)
         intentPortrait = findViewById(R.id.intentPortrait)
         intentNight = findViewById(R.id.intentNight)
+        intentSilky = findViewById(R.id.intentSilky)
         portraitRow = findViewById(R.id.portraitRow)
         blurButtons = listOf(findViewById(R.id.blurSoft), findViewById(R.id.blurMedium), findViewById(R.id.blurStrong))
 
@@ -477,6 +482,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         intentGroup.setOnClickListener { setIntent("GROUP") }
         intentPortrait.setOnClickListener { setIntent("PORTRAIT") }
         intentNight.setOnClickListener { setIntent("NIGHT") }
+        intentSilky.setOnClickListener { setIntent("SILKY") }
         // The status pill doubles as a tappable tip ("Dark scene · tap for Night").
         groupStatus.setOnClickListener {
             if (it.tag == TIP_NIGHT) {
@@ -486,7 +492,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         }
         blurButtons.forEachIndexed { i, v ->
             v.setOnClickListener {
-                prefs.portraitStrength = i
+                if (prefs.intent == "SILKY") prefs.silkyStrength = i else prefs.portraitStrength = i
                 haptic(v, HapticFeedbackConstants.VIRTUAL_KEY)
                 refreshUi()
             }
@@ -555,6 +561,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         groupStatus.visibility = View.GONE
         haptic(intentRowView(intent), HapticFeedbackConstants.VIRTUAL_KEY)
         if (intent == "PORTRAIT") toast("Blurs the background · step back and use 2× for natural-looking faces")
+        if (intent == "SILKY") toast("Turns moving water, clouds and lights into silky streaks · hold still or rest the phone")
         refreshUi()
     }
 
@@ -562,6 +569,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         "GROUP" -> intentGroup
         "PORTRAIT" -> intentPortrait
         "NIGHT" -> intentNight
+        "SILKY" -> intentSilky
         else -> intentAuto
     }
 
@@ -586,16 +594,20 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         val intent = prefs.intent
         for ((v, on) in listOf(
             intentAuto to (intent == "AUTO"), intentPortrait to (intent == "PORTRAIT"),
-            intentNight to (intent == "NIGHT"), intentGroup to (intent == "GROUP"),
+            intentNight to (intent == "NIGHT"), intentSilky to (intent == "SILKY"), intentGroup to (intent == "GROUP"),
         )) {
             v.setBackgroundResource(if (on) R.drawable.pill_selected_bg else R.drawable.pill_bg)
             v.setTextColor(getColor(if (on) R.color.black else R.color.white))
         }
         // Portrait shows its blur selector in place of the hint line, keeping the panel short.
-        show(portraitRow, !pro && intent == "PORTRAIT")
-        show(intentHint, !pro && intent != "PORTRAIT")
+        val options = intent == "PORTRAIT" || intent == "SILKY"
+        show(portraitRow, !pro && options)
+        show(intentHint, !pro && !options)
+        val labels = if (intent == "SILKY") listOf("Softer", "Medium", "Dreamy") else listOf("Soft blur", "Medium", "Strong")
+        val strength = if (intent == "SILKY") prefs.silkyStrength else prefs.portraitStrength
+        blurButtons.forEachIndexed { i, v -> v.text = labels[i] }
         blurButtons.forEachIndexed { i, v ->
-            val on = i == prefs.portraitStrength
+            val on = i == strength
             v.setBackgroundResource(if (on) R.drawable.segment_selected_bg else 0)
             v.setTextColor(getColor(if (on) R.color.white else R.color.dim))
         }
@@ -725,6 +737,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             camera.takeBurst(deviceOrientation, 1, toMemory = true)
         } else if (nightMode) {
             startNight()
+        } else if (silkyMode) {
+            startSilky()
         } else {
             camera.takePicture(deviceOrientation)
         }
@@ -954,9 +968,29 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
 
     // ------------------------------------------------------------------ night
 
+    private fun startSilky() {
+        val c = caps ?: return
+        nightProcessing = true
+        mergeSilky = true
+        val frames = SILKY_FRAMES[prefs.silkyStrength.coerceIn(0, 2)]
+        val isoRange = c.isoRange
+        val expRange = c.exposureRange
+        if (c.manualSensor && isoRange != null && expRange != null) {
+            val (iso, t) = NightProcessor.silkyPlan(liveIso ?: 100, liveExposure ?: 10_000_000L, isoRange, expRange)
+            nightIso = iso
+            Log.i(TAG, "silky plan: $frames x ISO $iso ${Stops.shutterLabel(t)}")
+            camera.takeBurst(deviceOrientation, frames, toMemory = true, exposure = iso to t)
+        } else {
+            nightIso = liveIso ?: 100
+            camera.takeBurst(deviceOrientation, frames, toMemory = true)
+        }
+        showGroupStatus("Hold still… capturing $frames shots")
+    }
+
     private fun startNight() {
         val c = caps ?: return
         nightProcessing = true
+        mergeSilky = false
         val isoRange = c.isoRange
         val expRange = c.exposureRange
         if (c.manualSensor && isoRange != null && expRange != null) {
@@ -980,12 +1014,13 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     private fun processNight(frames: List<ByteArray>, mimeType: String) {
-        showGroupStatus("Merging ${frames.size} shots…")
+        val silky = mergeSilky
+        showGroupStatus(if (silky) "Blending ${frames.size} shots…" else "Merging ${frames.size} shots…")
         val iso = nightIso
         val quality = prefs.jpegQuality
         Thread {
             val result = try {
-                night.process(frames, iso, quality)
+                night.process(frames, iso, quality, silky)
             } catch (e: Throwable) {
                 Log.e(TAG, "night merge failed", e)
                 null
@@ -995,7 +1030,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             val ext = if (mime == "image/heic") "heic" else "jpg"
             val source = frames[result?.reference ?: 0]
             val uri = MediaSaver.save(
-                this, "${MediaSaver.newBaseName()}${if (result != null) "_NIGHT" else ""}.$ext", mime,
+                this, "${MediaSaver.newBaseName()}${if (result == null) "" else if (silky) "_SILKY" else "_NIGHT"}.$ext", mime,
                 writer = { it.write(bytes) },
                 afterWrite = if (result != null) { u -> MediaSaver.copyExif(this, u, source) } else null,
             )
@@ -1005,7 +1040,13 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 shutter.busy = false
                 groupStatus.visibility = View.GONE
                 if (uri != null) onPhotoSaved(uri, mime) else toast(getString(R.string.save_failed))
-                toast(if (result != null) "Night photo · merged ${result.merged} shots" else "Saved a single shot")
+                toast(
+                    when {
+                        result == null -> "Saved a single shot"
+                        silky -> "Silky photo · blended ${result.merged} shots"
+                        else -> "Night photo · merged ${result.merged} shots"
+                    },
+                )
             }
         }.start()
     }
@@ -1471,6 +1512,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         private const val NO_FACE_GIVE_UP_MS = 1500L
         private const val STEADY_WAIT_MS = 800L
         private const val NIGHT_FALLBACK_FRAMES = 6
+        private val SILKY_FRAMES = intArrayOf(8, 12, 16)
         private const val DARK_ISO = 1600
         private const val DARK_EXPOSURE_NS = 50_000_000L
         private const val TIP_NIGHT = "tip_night"

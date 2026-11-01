@@ -88,6 +88,16 @@ class WalkthroughTest {
         SystemClock.sleep(800)
         screenshot("night_done")
         savePhoto("photo_night")
+        // Silky: blend a burst into a long-exposure look.
+        onView(withId(R.id.intentSilky)).perform(click())
+        SystemClock.sleep(1500)
+        screenshot("simple_silky")
+        onView(withId(R.id.shutter)).perform(click())
+        SystemClock.sleep(600)
+        screenshot("silky_capturing")
+        waitForIdleShutter(90_000)
+        SystemClock.sleep(800)
+        screenshot("silky_done")
         onView(withId(R.id.intentAuto)).perform(click())
 
         // On to the Pro controls.

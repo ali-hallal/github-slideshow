@@ -22,6 +22,11 @@ class Prefs(context: Context) {
         get() = sp.getInt("portraitStrength", 1)
         set(v) = sp.edit().putInt("portraitStrength", v).apply()
 
+    /** Silky strength: 0 softer (8 frames), 1 medium (12), 2 dreamy (16). */
+    var silkyStrength: Int
+        get() = sp.getInt("silkyStrength", 1)
+        set(v) = sp.edit().putInt("silkyStrength", v).apply()
+
     // ---- quick settings
     var grid: Boolean
         get() = sp.getBoolean("grid", true)

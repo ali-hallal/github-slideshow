@@ -422,6 +422,63 @@ class ProCamTest {
     }
 
     @Test
+    fun silkyBlendSmoothsMotionKeepsSceneSharp() {
+        // 12 hand-shaken frames: a still textured scene with a bright "wave" moving along the bottom.
+        val w = 900
+        val h = 675
+        val scene = IntArray(w * h) { i -> val x = i % w; val y = i / w
+            (110 + 50 * kotlin.math.sin(x / 29.0) * kotlin.math.cos(y / 41.0) + if ((x / 60 + y / 45) % 2 == 0) 30 else -30).toInt() }
+        val frames = (0 until 12).map { k ->
+            val sx = (k * 7) % 11 - 5
+            val sy = (k * 5) % 9 - 4
+            val bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+            val px = IntArray(w * h) { i -> val x = i % w; val y = i / w
+                val X = (x + sx).coerceIn(0, w - 1); val Y = (y + sy).coerceIn(0, h - 1)
+                val v = if (Y in 450 until 600 && X in (150 + 45 * k) until (180 + 45 * k)) 250 else scene[Y * w + X]
+                (0xFF shl 24) or (v shl 16) or (v shl 8) or v }
+            bmp.setPixels(px, 0, w, 0, 0, w, h)
+            val out = java.io.ByteArrayOutputStream()
+            bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 97, out)
+            out.toByteArray()
+        }
+        val result = NightProcessor().process(frames, iso = 100, quality = 95, silky = true)
+        assertEquals(12, result.merged)
+        val b = android.graphics.BitmapFactory.decodeByteArray(result.jpeg, 0, result.jpeg.size)
+        // Still part (top) stays sharp: close to the clean scene (shifted like the reference frame).
+        val rs = (result.reference * 7) % 11 - 5
+        val rsy = (result.reference * 5) % 9 - 4
+        var err = 0.0; var n = 0
+        for (y in 100 until 350 step 3) for (x in 100 until 800 step 3) {
+            err += kotlin.math.abs(android.graphics.Color.green(b.getPixel(x, y)) - scene[(y + rsy) * w + (x + rs)]); n++
+        }
+        // Streak along the wave's path: brighter than the scene everywhere, without gaps.
+        val lift = (160 until 640 step 20).map { x -> android.graphics.Color.green(b.getPixel(x, 525)) - scene[(525 + rsy) * w + x + rs] }
+        Log.i(TAG, "silky: background error ${err / n}, streak lift $lift")
+        assertTrue("still scene stays sharp (${err / n})", err / n < 6)
+        assertTrue("smooth streak without gaps: $lift", lift.all { it >= 3 })
+    }
+
+    @Test
+    fun silkyCaptureSavesBlendedPhoto() {
+        waitForCamera()
+        setSimple(true)
+        onView(withId(R.id.intentSilky)).perform(click())
+        onView(withId(R.id.blurSoft)).perform(click()) // "Softer": 8 frames
+        assertEquals(0, Prefs(context).silkyStrength)
+        val before = count("image/jpeg")
+        onView(withId(R.id.shutter)).perform(click())
+        waitFor("silky photo saved", 90_000) { count("image/jpeg") > before }
+        waitFor("finished", 20_000) { !shutterBusy() }
+        SystemClock.sleep(1500)
+        assertEquals("exactly one photo", before + 1, count("image/jpeg"))
+        val silky = context.contentResolver.query(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI, arrayOf(MediaStore.Images.Media.DISPLAY_NAME),
+            "${MediaStore.Images.Media.DISPLAY_NAME} LIKE ?", arrayOf("%_SILKY%"), null,
+        )?.use { it.count } ?: 0
+        assertTrue("a _SILKY photo was saved", silky > 0)
+    }
+
+    @Test
     fun nightCaptureSavesMergedPhoto() {
         waitForCamera()
         setSimple(true)
