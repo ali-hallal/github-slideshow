@@ -122,6 +122,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private var extraCrop = 1f
     private val superZoom = SuperZoomProcessor()
     private var zoomProcessing = false
+    /** Super-zoom photos still being enhanced in the background. */
+    private var pendingEnhance = 0
+    private val enhancer = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private var lastLocation: android.location.Location? = null
     private var updatingZoomSlider = false
     private var cameraIndex = 0
 
@@ -201,7 +205,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         cameraIds = camera.primaryCameras()
         sensorManager = getSystemService(SensorManager::class.java)
         shake = ShakeMeter(this)
-        locationTracker = LocationTracker(this) { camera.setLocation(it) }
+        locationTracker = LocationTracker(this) {
+            lastLocation = it
+            camera.setLocation(it)
+        }
         sound.load(MediaActionSound.SHUTTER_CLICK)
         orientationListener = object : OrientationEventListener(this) {
             override fun onOrientationChanged(orientation: Int) {
@@ -869,6 +876,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             cancelGroup(); return
         }
         if (capturing || groupProcessing || portraitProcessing || nightProcessing || zoomProcessing || caps == null) return
+        if (extraCrop > 1.01f && pendingEnhance >= MAX_PENDING_ENHANCE) {
+            toast("Still enhancing the last zoom photos…")
+            return
+        }
         haptic(shutter, HapticFeedbackConstants.VIRTUAL_KEY)
         if (prefs.timerSeconds > 0) startCountdown() else afterCountdown()
     }
@@ -914,7 +925,12 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 SuperZoomProcessor.plan(liveIso!!, liveExposure!!, safeShutterNs() ?: liveExposure!!, isoR, expR)
             } else null
             exposure?.let { Log.i(TAG, "super zoom plan: ISO ${it.first} ${Stops.shutterLabel(it.second)}") }
-            camera.takeBurst(deviceOrientation, SUPER_ZOOM_FRAMES, toMemory = true, exposure = exposure, minimalProcessing = true)
+            if (camera.fastBurstAvailable()) {
+                // Fast: video-size frames, cropped as they arrive (~1/3 s for the whole burst).
+                camera.takeFastBurst(deviceOrientation, SUPER_ZOOM_FRAMES, extraCrop, exposure)
+            } else {
+                camera.takeBurst(deviceOrientation, SUPER_ZOOM_FRAMES, toMemory = true, exposure = exposure, minimalProcessing = true)
+            }
         } else {
             camera.takePicture(deviceOrientation)
         }
@@ -1157,11 +1173,33 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
 
     // ------------------------------------------------------------------ super zoom
 
+    /** Frames are in memory: free the shutter at once and enhance in the background. */
+    private fun releaseShutterForBackground() {
+        zoomProcessing = false
+        capturing = false
+        shutter.busy = false
+        pendingEnhance++
+        thumbnail.alpha = 0.5f
+        showGroupStatus("Enhancing zoom photo… you can keep shooting")
+    }
+
+    private fun enhanceDone(uri: Uri?, mime: String, message: String) {
+        pendingEnhance--
+        if (pendingEnhance <= 0) {
+            pendingEnhance = 0
+            thumbnail.alpha = 1f
+            if (groupStatus.text.startsWith("Enhancing")) groupStatus.visibility = View.GONE
+        }
+        if (uri != null) onPhotoSaved(uri, mime) else toast(getString(R.string.save_failed))
+        toast(message)
+    }
+
+    /** Super zoom from full-resolution JPEGs (phones without the fast stream). */
     private fun processSuperZoom(frames: List<ByteArray>, mimeType: String) {
-        showGroupStatus("Enhancing ${Stops.zoomLabel(displayZoom())} zoom…")
         val crop = extraCrop
         val quality = prefs.jpegQuality
-        Thread {
+        releaseShutterForBackground()
+        enhancer.execute {
             val result = try {
                 superZoom.process(frames, crop, quality)
             } catch (e: Throwable) {
@@ -1180,14 +1218,48 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 MediaSaver.save(this, "${MediaSaver.newBaseName()}.$ext", mimeType, writer = { it.write(frames.first()) })
             }
             runOnUiThread {
-                zoomProcessing = false
-                capturing = false
-                shutter.busy = false
-                groupStatus.visibility = View.GONE
-                if (uri != null) onPhotoSaved(uri, if (result != null) "image/jpeg" else mimeType) else toast(getString(R.string.save_failed))
-                toast(if (result != null) "Super zoom · sharpest ${result.merged} of $SUPER_ZOOM_FRAMES shots merged" else "Saved at the camera's maximum zoom")
+                enhanceDone(
+                    uri, if (result != null) "image/jpeg" else mimeType,
+                    if (result != null) "Super zoom · sharpest ${result.merged} of ${frames.size} shots merged" else "Saved at the camera's maximum zoom",
+                )
             }
-        }.start()
+        }
+    }
+
+    /** Super zoom from a fast burst: frames are already centre crops in pixels. */
+    override fun onFastBurst(frames: List<SuperRes.Frame>, rotationDegrees: Int) {
+        if (!zoomProcessing) return
+        if (frames.isEmpty()) {
+            zoomProcessing = false
+            capturing = false
+            shutter.busy = false
+            groupStatus.visibility = View.GONE
+            toast("Capture failed")
+            return
+        }
+        val quality = prefs.jpegQuality
+        val loc = lastLocation
+        releaseShutterForBackground()
+        enhancer.execute {
+            val t0 = SystemClock.uptimeMillis()
+            val result = try {
+                superZoom.processFrames(frames, rotationDegrees, quality)
+            } catch (e: Throwable) {
+                Log.e(TAG, "super zoom failed", e)
+                null
+            }
+            Log.i(TAG, "super zoom processed in ${SystemClock.uptimeMillis() - t0} ms")
+            val uri = result?.let { r ->
+                MediaSaver.save(
+                    this, "${MediaSaver.newBaseName()}_ZOOM.jpg", "image/jpeg",
+                    writer = { it.write(r.jpeg) },
+                    afterWrite = { u -> MediaSaver.writeBasicExif(this, u, loc) },
+                )
+            }
+            runOnUiThread {
+                enhanceDone(uri, "image/jpeg", if (result != null) "Super zoom · sharpest ${result.merged} of ${frames.size} shots merged" else "Super zoom failed")
+            }
+        }
     }
 
     // ------------------------------------------------------------------ night
@@ -1760,6 +1832,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         /** Shots taken for super zoom; the sharpest [SuperZoomProcessor.KEEP_FRAMES] are merged. */
         private const val SUPER_ZOOM_FRAMES = 10
         private const val ZOOM_BAR_HIDE_MS = 3500L
+        private const val MAX_PENDING_ENHANCE = 2
         private const val NIGHT_FALLBACK_FRAMES = 6
         private val SILKY_FRAMES = intArrayOf(8, 12, 16)
         private const val DARK_ISO = 1600

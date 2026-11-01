@@ -43,23 +43,29 @@ class SuperZoomProcessor {
             }
         }
         require(crops.isNotEmpty()) { "could not decode any frame" }
+        return processFrames(crops, rotation, quality, frames.size)
+    }
+
+    /**
+     * The merge itself, from frames already cropped and converted to pixels (fast bursts arrive
+     * like this). [rotation] = clockwise degrees to make the result upright.
+     */
+    fun processFrames(crops: List<SuperRes.Frame>, rotation: Int, quality: Int, taken: Int = crops.size): Result {
+        require(crops.isNotEmpty())
         val w0 = crops[0].w
         val h0 = crops[0].h
         val same = crops.filter { it.w == w0 && it.h == h0 }
-        // 2. Lucky frames: keep the sharpest (frames taken mid-tremor are dropped). Sharpest first = reference.
+        // Lucky frames: keep the sharpest (frames taken mid-tremor are dropped). Sharpest first = reference.
         val chosen = SuperRes.sharpest(same, KEEP_FRAMES).map { same[it] }
-        // 3. Sub-pixel offsets of every frame relative to the reference.
-        val grays = chosen.map { SuperRes.gray(it, GRAY_SCALE) }
-        val offsets = chosen.indices.map { k ->
-            if (k == 0) 0f to 0f else SuperRes.offset(chosen[0], chosen[k], grays[0], grays[k], GRAY_SCALE)
-        }
+        // Sub-pixel offsets of every frame relative to the reference (in parallel).
+        val offsets = SuperRes.offsets(chosen, GRAY_SCALE)
         val motion = IntArray(chosen.size) { k ->
             val (dx, dy) = offsets[k]
             if (k == 0) 255 else NightProcessor.motionThreshold(chosen[0].px, chosen[k].px, w0, h0, dx.roundToInt(), dy.roundToInt())
         }
-        Log.i(TAG, "kept ${chosen.size} of ${frames.size} frames; offsets ${offsets.map { "%.2f,%.2f".format(it.first, it.second) }}")
-        // 4. Shift-and-add onto a 2x finer grid (less if that would exceed ~3000 px), then sharpen.
-        val scale = (MAX_SIDE.toFloat() / max(w0, h0)).coerceIn(1f, 2f)
+        Log.i(TAG, "kept ${chosen.size} of $taken frames; offsets ${offsets.map { "%.2f,%.2f".format(it.first, it.second) }}")
+        // Shift-and-add onto a finer grid (2-3x, aiming for ~3000 px), then sharpen.
+        val scale = (MAX_SIDE.toFloat() / max(w0, h0)).coerceIn(1f, MAX_SCALE)
         val merged = SuperRes.merge(chosen, offsets, motion, scale)
         SuperRes.sharpen(merged)
 
@@ -74,13 +80,14 @@ class SuperZoomProcessor {
         out.compress(Bitmap.CompressFormat.JPEG, quality.coerceIn(50, 100), bytes)
         val result = Result(bytes.toByteArray(), chosen.size, out.width, out.height)
         out.recycle()
-        Log.i(TAG, "super zoom x$crop: ${result.width}x${result.height} from ${chosen.size} frames")
+        Log.i(TAG, "super zoom: ${result.width}x${result.height} from ${chosen.size} frames (x$scale)")
         return result
     }
 
     companion object {
         private const val TAG = "SuperZoom"
         private const val MAX_SIDE = 3000
+        private const val MAX_SCALE = 3f
         /** Frames merged out of the burst (the sharpest ones). */
         const val KEEP_FRAMES = 6
         private const val GRAY_SCALE = 2

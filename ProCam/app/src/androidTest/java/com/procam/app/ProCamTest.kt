@@ -568,9 +568,15 @@ class ProCamTest {
         SystemClock.sleep(500)
         Log.i(TAG, "after slider: ${readout().replace("\n", " | ")}")
         val before = count("image/jpeg")
+        val pressed = SystemClock.uptimeMillis()
         onView(withId(R.id.shutter)).perform(click())
+        SystemClock.sleep(100)
+        waitFor("shutter ready again", 20_000) { !shutterBusy() }
+        val ready = SystemClock.uptimeMillis() - pressed
         waitFor("super zoom photo saved", 60_000) { count("image/jpeg") > before }
-        waitFor("finished", 20_000) { !shutterBusy() }
+        val saved = SystemClock.uptimeMillis() - pressed
+        Log.i(TAG, "super zoom timing: shutter ready after $ready ms, photo saved after $saved ms")
+        assertTrue("shutter is freed before enhancement finishes ($ready vs $saved ms)", ready <= saved)
         SystemClock.sleep(1500)
         val zoomed = context.contentResolver.query(
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI, arrayOf(MediaStore.Images.Media.DISPLAY_NAME),

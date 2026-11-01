@@ -58,6 +58,11 @@ class CameraController(context: Context, private val listener: Listener) {
         fun onFaces(faces: List<RectF>)
         /** A burst taken with [takeBurst]: encoded photos, not yet saved. */
         fun onBurstCaptured(frames: List<ByteArray>, mimeType: String)
+        /**
+         * A fast burst taken with [takeFastBurst]: centre crops already converted to pixels, plus
+         * the clockwise rotation that makes them upright.
+         */
+        fun onFastBurst(frames: List<SuperRes.Frame>, rotationDegrees: Int)
         fun onCameraError(message: String)
     }
 
@@ -97,6 +102,13 @@ class CameraController(context: Context, private val listener: Listener) {
     private var stillToMemory = false
     private var burstExposure: Pair<Int, Long>? = null
     private var burstMinimal = false
+    // Fast bursts: a video-size YUV stream (no JPEG encode/decode), centre-cropped on arrival.
+    private var yuvReader: ImageReader? = null
+    @Volatile private var yuvInSession = false
+    private var burstToYuv = false
+    private var yuvCrop = 1f
+    private var yuvExpected = 0
+    private val yuvFrames = mutableListOf<SuperRes.Frame>()
     /** Last focus distance the camera reported (diopters), to lock focus for a burst. */
     @Volatile private var lastFocusDistance: Float? = null
     private var pendingStills = 0
@@ -141,6 +153,31 @@ class CameraController(context: Context, private val listener: Listener) {
         val front = all.firstOrNull { facing(it) == CameraCharacteristics.LENS_FACING_FRONT }
         val primary = listOfNotNull(back, front)
         return primary.ifEmpty { all }
+    }
+
+    /** True when fast (video-size) bursts are available in the current session. */
+    fun fastBurstAvailable() = yuvInSession
+
+    /**
+     * A fast burst for multi-frame merging: [count] frames from the video-size stream, each
+     * centre-cropped to 1/[crop] and converted to pixels as it arrives (no JPEG encode/decode).
+     * Delivered via [Listener.onFastBurst].
+     */
+    fun takeFastBurst(deviceOrientation: Int, count: Int, crop: Float, exposure: Pair<Int, Long>?) {
+        val h = handler
+        if (h == null) {
+            main.post { listener.onCaptureFinished(false) }
+            return
+        }
+        h.post {
+            stillCount = count.coerceIn(1, MAX_BURST)
+            stillToMemory = true
+            burstExposure = exposure
+            burstMinimal = true
+            burstToYuv = true
+            yuvCrop = crop.coerceAtLeast(1f)
+            takePictureInternal(deviceOrientation)
+        }
     }
 
     /**
@@ -261,6 +298,7 @@ class CameraController(context: Context, private val listener: Listener) {
         h.post {
             stillCount = count.coerceIn(1, MAX_BURST)
             stillToMemory = toMemory || stillCount > 1
+            burstToYuv = false
             burstExposure = exposure
             burstMinimal = minimalProcessing
             takePictureInternal(deviceOrientation)
@@ -301,6 +339,16 @@ class CameraController(context: Context, private val listener: Listener) {
                     }
             }
 
+            map.getOutputSizes(ImageFormat.YUV_420_888)
+                ?.filter { it.width <= FAST_MAX_W && it.height <= FAST_MAX_H }
+                ?.filter { abs(it.width.toFloat() / it.height - jpegSize.width.toFloat() / jpegSize.height) < 0.02f }
+                ?.maxByOrNull { it.width.toLong() * it.height }
+                ?.let { size ->
+                    yuvReader = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 4).apply {
+                        setOnImageAvailableListener({ onYuvAvailable(it) }, handler)
+                    }
+                }
+
             main.post { listener.onCameraOpened(cp, previewSize) }
 
             if (!openLock.tryAcquire(2500, TimeUnit.MILLISECONDS)) {
@@ -329,6 +377,11 @@ class CameraController(context: Context, private val listener: Listener) {
         device = null
         jpegReader?.close()
         jpegReader = null
+        yuvReader?.close()
+        yuvReader = null
+        yuvInSession = false
+        yuvExpected = 0
+        synchronized(yuvFrames) { yuvFrames.clear() }
         rawImages.values.forEach { it.close() }
         rawImages.clear()
         rawResults.clear()
@@ -356,7 +409,7 @@ class CameraController(context: Context, private val listener: Listener) {
         override fun onOpened(camera: CameraDevice) {
             releaseOpenLock()
             device = camera
-            createSession(withRaw = rawReader != null)
+            createSession(withRaw = rawReader != null, withYuv = yuvReader != null)
         }
 
         override fun onDisconnected(camera: CameraDevice) {
@@ -373,43 +426,49 @@ class CameraController(context: Context, private val listener: Listener) {
         }
     }
 
-    private fun createSession(withRaw: Boolean) {
+    /** Next, simpler configuration to try when one is refused: drop RAW first, then the fast stream. */
+    private fun fallback(withRaw: Boolean, withYuv: Boolean, e: String) {
+        when {
+            withRaw -> {
+                main.post { listener.onRawUnavailable() }
+                createSession(withRaw = false, withYuv = withYuv)
+            }
+            withYuv -> createSession(withRaw = false, withYuv = false)
+            else -> postError(e)
+        }
+    }
+
+    private fun createSession(withRaw: Boolean, withYuv: Boolean) {
         val d = device ?: return
         val preview = previewSurface ?: return
         val jpeg = jpegReader ?: return
         val outputs = mutableListOf(OutputConfiguration(preview), OutputConfiguration(jpeg.surface))
         val raw = rawReader
         if (withRaw && raw != null) outputs += OutputConfiguration(raw.surface)
+        val yuv = yuvReader
+        if (withYuv && yuv != null) outputs += OutputConfiguration(yuv.surface)
 
         val callback = object : CameraCaptureSession.StateCallback() {
             override fun onConfigured(s: CameraCaptureSession) {
                 if (device == null) return
                 session = s
                 rawInSession = withRaw && raw != null
+                yuvInSession = withYuv && yuv != null
+                Log.i(TAG, "session: raw=$rawInSession fast burst=$yuvInSession")
                 state = State.PREVIEW
                 updateRepeating()
             }
 
             override fun onConfigureFailed(s: CameraCaptureSession) {
-                if (withRaw) {
-                    // Some devices can't do preview + JPEG + RAW together; fall back to JPEG only.
-                    main.post { listener.onRawUnavailable() }
-                    createSession(withRaw = false)
-                } else {
-                    postError("Failed to configure the camera")
-                }
+                // Some devices can't run every stream together: drop RAW, then the fast stream.
+                fallback(withRaw, withYuv, "Failed to configure the camera")
             }
         }
         try {
             d.createCaptureSession(SessionConfiguration(SessionConfiguration.SESSION_REGULAR, outputs, sessionExecutor, callback))
         } catch (e: Exception) {
             Log.e(TAG, "createSession", e)
-            if (withRaw) {
-                main.post { listener.onRawUnavailable() }
-                createSession(withRaw = false)
-            } else {
-                postError("Failed to start the camera: ${e.message}")
-            }
+            fallback(withRaw, withYuv, "Failed to start the camera: ${e.message}")
         }
     }
 
@@ -717,7 +776,9 @@ class CameraController(context: Context, private val listener: Listener) {
         state = State.CAPTURING
         try {
             val b = d.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
-            b.addTarget(jpeg.surface)
+            val yuv = yuvReader
+            val toYuv = burstToYuv && yuvInSession && yuv != null
+            if (toYuv) b.addTarget(yuv!!.surface) else b.addTarget(jpeg.surface)
             val raw = rawReader
             val burst = stillToMemory
             if (!burst && settings.raw && rawInSession && raw != null) {
@@ -749,7 +810,13 @@ class CameraController(context: Context, private val listener: Listener) {
                 }
             }
             pendingStills = stillCount
-            if (burst) {
+            if (toYuv) {
+                synchronized(yuvFrames) { yuvFrames.clear() }
+                yuvExpected = stillCount
+                burstExpected = 0
+                if (stillCount == 1) s.capture(b.build(), stillCallback, handler)
+                else s.captureBurst(List(stillCount) { b.build() }, stillCallback, handler)
+            } else if (burst) {
                 burstFrames.clear()
                 burstExpected = stillCount
                 if (stillCount == 1) s.capture(b.build(), stillCallback, handler)
@@ -784,6 +851,10 @@ class CameraController(context: Context, private val listener: Listener) {
             if (burstExpected > 0) {
                 burstExpected--
                 if (burstExpected > 0 && burstFrames.size >= burstExpected) deliverBurst()
+            }
+            if (yuvExpected > 0) {
+                yuvExpected--
+                if (yuvExpected > 0 && yuvFrames.size >= yuvExpected) deliverYuv()
             }
             if (--pendingStills <= 0) finishCapture(burstFrames.isNotEmpty())
         }
@@ -849,6 +920,34 @@ class CameraController(context: Context, private val listener: Listener) {
             )
             if (uri != null) main.post { listener.onPhotoSaved(uri, mime) } else postError("Could not save photo")
         }
+    }
+
+    private fun onYuvAvailable(reader: ImageReader) {
+        val image = try {
+            reader.acquireNextImage()
+        } catch (e: Exception) {
+            null
+        } ?: return
+        try {
+            if (yuvExpected <= 0) return
+            val frame = yuvCentreToArgb(image, yuvCrop)
+            val ready = synchronized(yuvFrames) {
+                yuvFrames += frame
+                yuvFrames.size >= yuvExpected
+            }
+            if (ready) deliverYuv()
+        } catch (e: Exception) {
+            Log.w(TAG, "yuv frame", e)
+        } finally {
+            image.close()
+        }
+    }
+
+    private fun deliverYuv() {
+        val frames = synchronized(yuvFrames) { yuvFrames.toList().also { yuvFrames.clear() } }
+        yuvExpected = 0
+        val rotation = captureOrientation
+        main.post { listener.onFastBurst(frames, rotation) }
     }
 
     private fun onRawAvailable(reader: ImageReader) {
@@ -954,6 +1053,49 @@ class CameraController(context: Context, private val listener: Listener) {
         private const val STANDARD_PIXELS = 12_600_000L
         private const val AE_LOCK_DELAY_MS = 700L
         private const val MAX_BURST = 16
+        private const val FAST_MAX_W = 1920
+        private const val FAST_MAX_H = 1440
+
+        /**
+         * Centre 1/[crop] of a YUV_420_888 image as ARGB pixels (BT.601 full range, as used by
+         * JPEG), reading only the rows and columns of the crop.
+         */
+        fun yuvCentreToArgb(image: Image, crop: Float): SuperRes.Frame {
+            val fw = image.width
+            val fh = image.height
+            val cw = max(2, (fw / crop).toInt()) and 1.inv()
+            val ch = max(2, (fh / crop).toInt()) and 1.inv()
+            val left = ((fw - cw) / 2) and 1.inv()
+            val top = ((fh - ch) / 2) and 1.inv()
+            val yPlane = image.planes[0]
+            val uPlane = image.planes[1]
+            val vPlane = image.planes[2]
+            val yBuf = yPlane.buffer
+            val uBuf = uPlane.buffer
+            val vBuf = vPlane.buffer
+            val yRow = yPlane.rowStride
+            val yPix = yPlane.pixelStride
+            val uvRow = uPlane.rowStride
+            val uvPix = uPlane.pixelStride
+            val out = IntArray(cw * ch)
+            for (y in 0 until ch) {
+                val sy = top + y
+                val yBase = sy * yRow
+                val uvBase = (sy / 2) * uvRow
+                for (x in 0 until cw) {
+                    val sx = left + x
+                    val yy = yBuf.get(yBase + sx * yPix).toInt() and 0xFF
+                    val uvi = uvBase + (sx / 2) * uvPix
+                    val u = (uBuf.get(uvi).toInt() and 0xFF) - 128
+                    val v = (vBuf.get(uvi).toInt() and 0xFF) - 128
+                    val r = (yy + ((91881 * v) shr 16)).coerceIn(0, 255)
+                    val g = (yy - ((22554 * u + 46802 * v) shr 16)).coerceIn(0, 255)
+                    val b = (yy + ((116130 * u) shr 16)).coerceIn(0, 255)
+                    out[y * cw + x] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                }
+            }
+            return SuperRes.Frame(out, cw, ch)
+        }
         private const val FACE_UPDATE_MS = 500L
         private const val FACE_HOLD_MS = 1500L
         private const val MAX_PREVIEW_EXPOSURE_NS = 66_666_667L // 1/15 s

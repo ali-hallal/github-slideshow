@@ -61,6 +61,23 @@ object MediaSaver {
         ExifInterface.TAG_GPS_TIMESTAMP, ExifInterface.TAG_GPS_DATESTAMP,
     )
 
+    /** Date taken (and GPS position if known) for photos built from raw frames. */
+    fun writeBasicExif(context: Context, uri: Uri, location: android.location.Location?) {
+        try {
+            context.contentResolver.openFileDescriptor(uri, "rw")?.use { pfd ->
+                val exif = ExifInterface(pfd.fileDescriptor)
+                val now = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US).format(Date())
+                exif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, now)
+                exif.setAttribute(ExifInterface.TAG_DATETIME, now)
+                exif.setAttribute(ExifInterface.TAG_SOFTWARE, "ProCam super zoom")
+                if (location != null) exif.setGpsInfo(location)
+                exif.saveAttributes()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "exif write failed", e)
+        }
+    }
+
     fun newBaseName(): String =
         "PROCAM_" + SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
 
