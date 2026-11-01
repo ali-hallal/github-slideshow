@@ -92,6 +92,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private lateinit var intentPortrait: TextView
     private lateinit var intentNight: TextView
     private lateinit var intentSilky: TextView
+    private lateinit var intentFreeze: TextView
     private lateinit var portraitRow: View
     private lateinit var blurButtons: List<TextView>
 
@@ -182,6 +183,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private val portraitMode get() = simple && prefs.intent == "PORTRAIT"
     private val nightMode get() = simple && prefs.intent == "NIGHT"
     private val silkyMode get() = simple && prefs.intent == "SILKY"
+    private val freezeMode get() = simple && prefs.intent == "FREEZE"
+    private var freezeProcessing = false
+    /** Freeze's fast-shutter exposure is active (so it can be undone when leaving Freeze). */
+    private var freezeExposureOn = false
     /** The running merge is Silky (keep motion) rather than Night. */
     private var mergeSilky = false
 
@@ -251,6 +256,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         portraitProcessing = false
         nightProcessing = false
         zoomProcessing = false
+        freezeProcessing = false
         overlay.setFaces(emptyList())
         zoomAnimator?.cancel()
         camera.close()
@@ -395,6 +401,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         intentPortrait = findViewById(R.id.intentPortrait)
         intentNight = findViewById(R.id.intentNight)
         intentSilky = findViewById(R.id.intentSilky)
+        intentFreeze = findViewById(R.id.intentFreeze)
         portraitRow = findViewById(R.id.portraitRow)
         blurButtons = listOf(findViewById(R.id.blurSoft), findViewById(R.id.blurMedium), findViewById(R.id.blurStrong))
 
@@ -516,6 +523,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         intentPortrait.setOnClickListener { setIntent("PORTRAIT") }
         intentNight.setOnClickListener { setIntent("NIGHT") }
         intentSilky.setOnClickListener { setIntent("SILKY") }
+        intentFreeze.setOnClickListener { setIntent("FREEZE") }
         // The status pill doubles as a tappable tip ("Dark scene · tap for Night").
         groupStatus.setOnClickListener {
             if (it.tag == TIP_NIGHT) {
@@ -598,8 +606,13 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         if (!pro) {
             // Simple mode: the camera handles exposure and focus.
             settings = settings.copy(manualExposure = false, manualFocus = false)
+            freezeExposureOn = false
             selected = Param.EV
+        } else if (freezeExposureOn) {
+            settings = settings.copy(manualExposure = false, isoAuto = false)
+            freezeExposureOn = false
         }
+        syncFreeze()
         haptic(btnMode, HapticFeedbackConstants.VIRTUAL_KEY)
         pushSettings()
     }
@@ -618,6 +631,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         haptic(intentRowView(intent), HapticFeedbackConstants.VIRTUAL_KEY)
         if (intent == "PORTRAIT") toast("Blurs the background · step back and use 2× for natural-looking faces")
         if (intent == "SILKY") toast("Turns moving water, clouds and lights into silky streaks · hold still or rest the phone")
+        syncFreeze()
         refreshUi()
     }
 
@@ -626,6 +640,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         "PORTRAIT" -> intentPortrait
         "NIGHT" -> intentNight
         "SILKY" -> intentSilky
+        "FREEZE" -> intentFreeze
         else -> intentAuto
     }
 
@@ -650,11 +665,15 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         val intent = prefs.intent
         for ((v, on) in listOf(
             intentAuto to (intent == "AUTO"), intentPortrait to (intent == "PORTRAIT"),
-            intentNight to (intent == "NIGHT"), intentSilky to (intent == "SILKY"), intentGroup to (intent == "GROUP"),
+            intentNight to (intent == "NIGHT"), intentSilky to (intent == "SILKY"),
+            intentFreeze to (intent == "FREEZE"), intentGroup to (intent == "GROUP"),
         )) {
             v.setBackgroundResource(if (on) R.drawable.pill_selected_bg else R.drawable.pill_bg)
             v.setTextColor(getColor(if (on) R.color.black else R.color.white))
         }
+        // Keep the selected intent in view (the row scrolls on narrow screens).
+        val selectedPill = intentRowView(intent)
+        intentScroll.post { (intentScroll as android.widget.HorizontalScrollView).smoothScrollTo(maxOf(0, selectedPill.left - 60), 0) }
         // Portrait shows its blur selector in place of the hint line, keeping the panel short.
         val options = intent == "PORTRAIT" || intent == "SILKY"
         show(portraitRow, !pro && options)
@@ -671,6 +690,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             "GROUP" -> "Waits until everyone's eyes are open, then keeps the best of $GROUP_BURST"
             "PORTRAIT" -> ""
             "NIGHT" -> "Merges several shots for brighter, cleaner low-light photos · hold still about 1 s"
+            "FREEZE" -> "Sharp action: kids, pets, sports · catches the moment even if you press a little late"
             else -> "Finds faces and sets everything for you"
         }
     }
@@ -875,7 +895,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         if (groupWaiting) {
             cancelGroup(); return
         }
-        if (capturing || groupProcessing || portraitProcessing || nightProcessing || zoomProcessing || caps == null) return
+        if (capturing || groupProcessing || portraitProcessing || nightProcessing || zoomProcessing || freezeProcessing || caps == null) return
         if (extraCrop > 1.01f && pendingEnhance >= MAX_PENDING_ENHANCE) {
             toast("Still enhancing the last zoom photos…")
             return
@@ -892,7 +912,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private fun capture() {
         capturing = true
         shutter.busy = true
-        if (prefs.steadyShot && shakeRatio() < 1f) {
+        if (prefs.steadyShot && !freezeMode && shakeRatio() < 1f) {
             // Hands are shaking: wait a moment for a steadier instant instead of firing blurry.
             steadyWaitStart = SystemClock.uptimeMillis()
             showGroupStatus("Hold still…")
@@ -913,6 +933,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             startNight()
         } else if (silkyMode) {
             startSilky()
+        } else if (freezeMode) {
+            // Never miss the moment: the sharpest frame from around the press.
+            freezeProcessing = true
+            camera.takeMoment(deviceOrientation)
         } else if (extraCrop > 1.01f) {
             // Super zoom: a short burst, rebuilt into one detailed zoomed photo.
             zoomProcessing = true
@@ -1043,7 +1067,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         wbSteps = WhiteBalance.values().filter { caps.awbModes.contains(it.awbMode) }.ifEmpty { listOf(WhiteBalance.AUTO) }
 
         settings = settings.copy(
-            manualExposure = settings.manualExposure && caps.manualSensor && prefs.uiPro,
+            manualExposure = settings.manualExposure && caps.manualSensor && (prefs.uiPro || freezeExposureOn),
             iso = caps.isoRange?.let { settings.iso.coerceIn(it.lower, it.upper) } ?: settings.iso,
             exposureNs = caps.exposureRange?.let { settings.exposureNs.coerceIn(it.lower, it.upper) } ?: settings.exposureNs,
             evIndex = settings.evIndex.coerceIn(caps.evRange.lower, caps.evRange.upper),
@@ -1055,6 +1079,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         )
         camera.update(settings)
         if (settings.zoom < caps.zoomRange.upper - 0.001f) extraCrop = 1f
+        syncFreeze()
         buildLensRow()
         applyPreviewCrop()
         updateZoomSlider()
@@ -1068,7 +1093,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     override fun onCaptureFinished(success: Boolean) {
-        if ((groupProcessing || portraitProcessing || nightProcessing || zoomProcessing) && success) {
+        if ((groupProcessing || portraitProcessing || nightProcessing || zoomProcessing || freezeProcessing) && success) {
             // Wait for the photo(s) to be processed and saved.
             if (pressRatio < BLURRY_RATIO) toast("This one may be blurry: your hands moved. Brace your elbows and try again.")
             pressRatio = Float.MAX_VALUE
@@ -1079,6 +1104,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             portraitProcessing = false
             nightProcessing = false
             zoomProcessing = false
+            freezeProcessing = false
             groupStatus.visibility = View.GONE
         }
         if (success && pressRatio < BLURRY_RATIO) {
@@ -1223,6 +1249,71 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                     if (result != null) "Super zoom · sharpest ${result.merged} of ${frames.size} shots merged" else "Saved at the camera's maximum zoom",
                 )
             }
+        }
+    }
+
+    /** Freeze: the moment's frame (raw YUV) → upright, lightly sharpened JPEG, in the background. */
+    override fun onMoment(frame: MomentBuffer.Frame, rotationDegrees: Int) {
+        if (!freezeProcessing) return
+        freezeProcessing = false
+        capturing = false
+        shutter.busy = false
+        val quality = prefs.jpegQuality
+        val loc = lastLocation
+        enhancer.execute {
+            val jpeg = try {
+                val px = MomentBuffer.toArgb(frame)
+                SuperRes.sharpen(px, amount = 0.5f)
+                var bmp = Bitmap.createBitmap(px.px, px.w, px.h, Bitmap.Config.ARGB_8888)
+                if (rotationDegrees != 0) {
+                    val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, Matrix().apply { postRotate(rotationDegrees.toFloat()) }, true)
+                    bmp.recycle()
+                    bmp = rotated
+                }
+                val out = java.io.ByteArrayOutputStream()
+                bmp.compress(Bitmap.CompressFormat.JPEG, quality.coerceIn(50, 100), out)
+                bmp.recycle()
+                out.toByteArray()
+            } catch (e: Throwable) {
+                Log.e(TAG, "freeze frame failed", e)
+                null
+            }
+            val uri = jpeg?.let { bytes ->
+                MediaSaver.save(
+                    this, "${MediaSaver.newBaseName()}_ACTION.jpg", "image/jpeg",
+                    writer = { it.write(bytes) },
+                    afterWrite = { u -> MediaSaver.writeBasicExif(this, u, loc) },
+                )
+            }
+            runOnUiThread {
+                if (uri != null) onPhotoSaved(uri, "image/jpeg") else toast(getString(R.string.save_failed))
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ freeze exposure
+
+    /** Freeze: fast shutter (ISO automatic) and the moment buffer, while the Freeze intent is on. */
+    private fun syncFreeze() {
+        val c = caps ?: return
+        val want = freezeMode
+        camera.setMomentBuffer(want)
+        if (want && c.manualSensor && !freezeExposureOn) {
+            val isoR = c.isoRange
+            val expR = c.exposureRange
+            if (isoR != null && expR != null) {
+                val (iso, t) = MomentBuffer.freezePlan(
+                    liveIso ?: 400, liveExposure ?: 20_000_000L, FREEZE_SHUTTER_NS, FREEZE_LIMIT_NS, isoR, expR,
+                )
+                settings = settings.copy(manualExposure = true, isoAuto = true, shutterAuto = false, iso = iso, exposureNs = t)
+                freezeExposureOn = true
+                Log.i(TAG, "freeze: ISO $iso ${Stops.shutterLabel(t)}")
+                pushSettings()
+            }
+        } else if (!want && freezeExposureOn) {
+            settings = settings.copy(manualExposure = false, isoAuto = false)
+            freezeExposureOn = false
+            pushSettings()
         }
     }
 
@@ -1562,7 +1653,17 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         val old = settings
         settings = if (settings.isoAuto) {
             val r = c.isoRange ?: return
-            settings.copy(iso = (settings.iso * factor).roundToInt().coerceIn(r.lower, r.upper))
+            val iso = (settings.iso * factor).roundToInt()
+            val er = c.exposureRange
+            when {
+                // Freeze in bright light: ISO is already at its lowest, so shorten the shutter.
+                freezeExposureOn && iso < r.lower && er != null ->
+                    settings.copy(iso = r.lower, exposureNs = (settings.exposureNs * factor).toLong().coerceIn(er.lower, FREEZE_SHUTTER_NS))
+                // Freeze in dim light: ISO maxed out, lengthen the shutter a little (never past the limit).
+                freezeExposureOn && iso > r.upper && er != null ->
+                    settings.copy(iso = r.upper, exposureNs = (settings.exposureNs * factor).toLong().coerceIn(er.lower, FREEZE_LIMIT_NS))
+                else -> settings.copy(iso = iso.coerceIn(r.lower, r.upper))
+            }
         } else {
             val r = c.exposureRange ?: return
             val maxAuto = min(r.upper, MAX_AUTO_SHUTTER_NS)
@@ -1834,6 +1935,9 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         private const val SUPER_ZOOM_FRAMES = 11 // the first is skipped, the sharpest 6 of the other 10 merged
         private const val ZOOM_BAR_HIDE_MS = 3500L
         private const val MAX_PENDING_ENHANCE = 2
+        /** Freeze: shutter at most 1/500 s; in dim light it may lengthen to 1/250 s, never more. */
+        private const val FREEZE_SHUTTER_NS = 2_000_000L
+        private const val FREEZE_LIMIT_NS = 4_000_000L
         private const val NIGHT_FALLBACK_FRAMES = 6
         private val SILKY_FRAMES = intArrayOf(8, 12, 16)
         private const val DARK_ISO = 1600

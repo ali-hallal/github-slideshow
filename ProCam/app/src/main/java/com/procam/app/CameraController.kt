@@ -63,6 +63,8 @@ class CameraController(context: Context, private val listener: Listener) {
          * the clockwise rotation that makes them upright.
          */
         fun onFastBurst(frames: List<SuperRes.Frame>, rotationDegrees: Int)
+        /** "Never miss the moment": the frame picked from around the shutter press. */
+        fun onMoment(frame: MomentBuffer.Frame, rotationDegrees: Int)
         fun onCameraError(message: String)
     }
 
@@ -109,6 +111,11 @@ class CameraController(context: Context, private val listener: Listener) {
     private var yuvCrop = 1f
     private var yuvExpected = 0
     private val yuvFrames = mutableListOf<SuperRes.Frame>()
+    // Moment buffer (Freeze): the video-size stream runs continuously into a ring of recent frames.
+    private val moments = MomentBuffer(MOMENT_FRAMES)
+    @Volatile private var momentEnabled = false
+    private var momentAfter = 0
+    private var momentPressSeq = 0L
     /** Last focus distance the camera reported (diopters), to lock focus for a burst. */
     @Volatile private var lastFocusDistance: Float? = null
     private var pendingStills = 0
@@ -153,6 +160,43 @@ class CameraController(context: Context, private val listener: Listener) {
         val front = all.firstOrNull { facing(it) == CameraCharacteristics.LENS_FACING_FRONT }
         val primary = listOfNotNull(back, front)
         return primary.ifEmpty { all }
+    }
+
+    /** Keep recent frames in memory (Freeze) — only while enabled, it costs power. */
+    fun setMomentBuffer(enabled: Boolean) {
+        handler?.post {
+            if (momentEnabled == enabled) return@post
+            momentEnabled = enabled
+            moments.clear()
+            momentAfter = 0
+            if (state == State.PREVIEW) updateRepeating()
+        }
+    }
+
+    /**
+     * Takes the moment: the sharpest frame from just before to just after this call. Falls back
+     * to a normal photo when the moment buffer can't run on this camera.
+     */
+    fun takeMoment(deviceOrientation: Int) {
+        val h = handler
+        if (h == null) {
+            main.post { listener.onCaptureFinished(false) }
+            return
+        }
+        h.post {
+            val c = caps
+            if (c == null || !momentEnabled || !yuvInSession || moments.size == 0) {
+                stillCount = 1
+                stillToMemory = false
+                burstToYuv = false
+                burstExposure = null
+                takePictureInternal(deviceOrientation)
+                return@post
+            }
+            captureOrientation = jpegOrientation(c, deviceOrientation)
+            momentPressSeq = moments.latestSequence
+            momentAfter = MOMENT_AFTER
+        }
     }
 
     /** True when fast (video-size) bursts are available in the current session. */
@@ -382,6 +426,8 @@ class CameraController(context: Context, private val listener: Listener) {
         yuvInSession = false
         yuvExpected = 0
         synchronized(yuvFrames) { yuvFrames.clear() }
+        moments.clear()
+        momentAfter = 0
         rawImages.values.forEach { it.close() }
         rawImages.clear()
         rawResults.clear()
@@ -478,6 +524,8 @@ class CameraController(context: Context, private val listener: Listener) {
         val s = session ?: return
         try {
             val b = previewBuilder() ?: return
+            val yuv = yuvReader
+            if (momentEnabled && yuvInSession && yuv != null) b.addTarget(yuv.surface)
             s.setRepeatingRequest(b.build(), previewCallback, handler)
         } catch (e: Exception) {
             Log.w(TAG, "updateRepeating", e)
@@ -929,7 +977,10 @@ class CameraController(context: Context, private val listener: Listener) {
             null
         } ?: return
         try {
-            if (yuvExpected <= 0) return
+            if (yuvExpected <= 0) {
+                if (momentEnabled) onMomentFrame(image)
+                return
+            }
             val frame = yuvCentreToArgb(image, yuvCrop)
             val ready = synchronized(yuvFrames) {
                 yuvFrames += frame
@@ -940,6 +991,19 @@ class CameraController(context: Context, private val listener: Listener) {
             Log.w(TAG, "yuv frame", e)
         } finally {
             image.close()
+        }
+    }
+
+    private fun onMomentFrame(image: Image) {
+        moments.add(image)
+        if (momentAfter <= 0) return
+        if (--momentAfter > 0) return
+        // A little before the press (people press late) to a little after it.
+        val chosen = moments.sharpestBetween(momentPressSeq - MOMENT_BEFORE + 1, momentPressSeq + MOMENT_AFTER)
+        val rotation = captureOrientation
+        main.post {
+            listener.onShutter()
+            if (chosen != null) listener.onMoment(chosen, rotation) else listener.onCaptureFinished(false)
         }
     }
 
@@ -1053,6 +1117,10 @@ class CameraController(context: Context, private val listener: Listener) {
         private const val STANDARD_PIXELS = 12_600_000L
         private const val AE_LOCK_DELAY_MS = 700L
         private const val MAX_BURST = 16
+        /** Frames kept for Freeze (~1/3 s at 30 fps), of which the window around a press is searched. */
+        private const val MOMENT_FRAMES = 10
+        private const val MOMENT_BEFORE = 5 // ~165 ms before the press
+        private const val MOMENT_AFTER = 2 // ~65 ms after
         private const val FAST_MAX_W = 1920
         private const val FAST_MAX_H = 1440
 

@@ -94,6 +94,17 @@ class WalkthroughTest {
         tryClick("Zoom 1×")
         SystemClock.sleep(800)
 
+        // Freeze: fast shutter + moment buffer.
+        onView(withId(R.id.intentFreeze)).perform(click())
+        SystemClock.sleep(1500)
+        screenshot("simple_freeze")
+        onView(withId(R.id.shutter)).perform(click())
+        waitForIdleShutter(30_000)
+        SystemClock.sleep(2000)
+        savePhoto("photo_freeze")
+        onView(withId(R.id.intentAuto)).perform(click())
+        SystemClock.sleep(500)
+
         // Night: 6-8 shots merged into one.
         onView(withId(R.id.intentNight)).perform(click())
         SystemClock.sleep(1500)

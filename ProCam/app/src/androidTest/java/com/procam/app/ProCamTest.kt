@@ -586,6 +586,57 @@ class ProCamTest {
     }
 
     @Test
+    fun freezePlanStopsMotion() {
+        val isoR = android.util.Range(50, 6400)
+        val expR = android.util.Range(10_000L, 1_000_000_000L)
+        val max = 2_000_000L // 1/500 s
+        val limit = 4_000_000L // 1/250 s
+        // Daylight (auto: ISO 100, 1/220): 1/500 s with ISO raised to keep brightness.
+        val day = MomentBuffer.freezePlan(100, 4_545_454L, max, limit, isoR, expR)
+        Log.i(TAG, "freeze day: ISO ${day.first} ${Stops.shutterLabel(day.second)}")
+        assertEquals(max, day.second)
+        assertTrue(kotlin.math.abs(day.first * day.second / (100.0 * 4_545_454L) - 1) < 0.05)
+        // Bright sun (auto already 1/4000): keep the faster shutter, lowest ISO.
+        val sun = MomentBuffer.freezePlan(50, 250_000L, max, limit, isoR, expR)
+        assertTrue(sun.second <= 250_000L)
+        // Dim room (auto: ISO 1600, 1/30): ISO maxes out; shutter lengthens but never past 1/250.
+        val dim = MomentBuffer.freezePlan(1600, 33_333_333L, max, limit, isoR, expR)
+        Log.i(TAG, "freeze dim: ISO ${dim.first} ${Stops.shutterLabel(dim.second)}")
+        assertEquals(6400, dim.first)
+        assertTrue("never slower than 1/250", dim.second <= limit)
+    }
+
+    @Test
+    fun freezeCapturesTheMoment() {
+        waitForCamera()
+        setSimple(true)
+        onView(withId(R.id.intentFreeze)).perform(click())
+        if (backCameraHas(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)) {
+            waitFor("fast shutter") {
+                val label = text(R.id.chipShutter)
+                val denom = Regex("1/(\\d+)").find(label)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                denom >= 250
+            }
+            Log.i(TAG, "freeze shutter: ${text(R.id.chipShutter).replace("\n", " ")}")
+        }
+        SystemClock.sleep(1000) // let the moment buffer fill
+        val before = count("image/jpeg")
+        onView(withId(R.id.shutter)).perform(click())
+        waitFor("action photo saved", 30_000) { count("image/jpeg") > before }
+        SystemClock.sleep(1500)
+        assertEquals("exactly one photo", before + 1, count("image/jpeg"))
+        val action = context.contentResolver.query(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI, arrayOf(MediaStore.Images.Media.DISPLAY_NAME),
+            "${MediaStore.Images.Media.DISPLAY_NAME} LIKE ?", arrayOf("%_ACTION%"), null,
+        )?.use { it.count } ?: 0
+        assertTrue("an _ACTION photo from the moment buffer", action > 0)
+        // Leaving Freeze puts exposure back to automatic.
+        onView(withId(R.id.intentAuto)).perform(click())
+        SystemClock.sleep(500)
+        assertTrue(text(R.id.chipIso).contains("AUTO"))
+    }
+
+    @Test
     fun lensPlannerFindsAllLenses() {
         fun show(l: List<LensStop>) = l.joinToString { "${Stops.zoomLabel(it.zoom)}@${it.cameraId}" }
         // Phone exposing ultra-wide and 3x tele as separate cameras (Xiaomi/OnePlus style).
