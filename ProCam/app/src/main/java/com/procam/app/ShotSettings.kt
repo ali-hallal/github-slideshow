@@ -88,6 +88,8 @@ data class CameraCaps(
     val zoomRatioApi: Boolean,
     /** Zoom ratios of the phone's real lenses (e.g. 0.5, 1, 3, 5), shown as lens buttons. */
     val lensStops: List<Float>,
+    /** Logical multi-camera: its zoom moves across real lenses by itself. */
+    val multiCamera: Boolean,
     /** Best face-detection mode the camera offers (OFF if none). */
     val faceDetectMode: Int,
     /** Camera can prioritise faces for focus/exposure/white balance by itself. */
@@ -130,6 +132,7 @@ data class CameraCaps(
                 zoomRange = zoomRange,
                 zoomRatioApi = ratioRange != null,
                 lensStops = lensStops(c, manager, zoomRange),
+                multiCamera = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && c.physicalCameraIds.size > 1,
                 faceDetectMode = (c.get(CameraCharacteristics.STATISTICS_INFO_AVAILABLE_FACE_DETECT_MODES) ?: IntArray(0))
                     .maxOrNull() ?: CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF,
                 facePriorityScene = (c.get(CameraCharacteristics.CONTROL_AVAILABLE_SCENE_MODES) ?: IntArray(0))
@@ -161,14 +164,14 @@ data class CameraCaps(
         }
 
         /** Focal length relative to sensor diagonal: proportional to how "zoomed in" a lens is. */
-        private fun fieldOfViewScale(c: CameraCharacteristics): Float? {
+        fun fieldOfViewScale(c: CameraCharacteristics): Float? {
             val focal = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: return null
             val size: SizeF = c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE) ?: return null
             val diagonal = kotlin.math.sqrt(size.width * size.width + size.height * size.height)
             return if (diagonal > 0f) focal / diagonal else null
         }
 
-        private fun roundStop(r: Float): Float = when {
+        fun roundStop(r: Float): Float = when {
             r < 0.95f -> (r * 10).roundToInt() / 10f
             r < 1.15f -> 1f
             else -> (r * 2).roundToInt() / 2f
@@ -238,5 +241,53 @@ object Stops {
     fun <T : Comparable<T>> nearestIndex(list: List<T>, value: T, distance: (T, T) -> Double): Int {
         if (list.isEmpty()) return 0
         return list.indices.minByOrNull { distance(list[it], value) } ?: 0
+    }
+}
+
+/** One zoom button: what it shows, which camera it uses, and that camera's zoom. */
+data class LensStop(val zoom: Float, val cameraId: String, val cameraZoom: Float)
+
+/**
+ * Builds the zoom buttons for the back side from the main camera plus any extra lenses the phone
+ * exposes as separate cameras (common on Xiaomi, OnePlus, Motorola...).
+ */
+object LensPlanner {
+    private fun near(a: Float, b: Float) = kotlin.math.abs(a - b) / maxOf(a, b) < 0.25f
+
+    /**
+     * @param mainStops the main camera's own lens stops (real lenses, or 1x/2x if it has only one)
+     * @param mainRange the main camera's zoom ratio range
+     * @param mainMulti main camera already switches between real lenses by itself
+     * @param extras other back cameras: (camera id, zoom relative to the main camera)
+     */
+    fun plan(
+        mainId: String,
+        mainStops: List<Float>,
+        mainRange: Range<Float>,
+        mainMulti: Boolean,
+        extras: List<Pair<String, Float>>,
+    ): List<LensStop> {
+        val stops = mainStops.map { LensStop(it, mainId, it) }.toMutableList()
+        for ((id, r) in extras) {
+            val existing = stops.firstOrNull { near(it.zoom, r) }
+            when {
+                existing == null -> stops += LensStop(r, id, 1f)
+                // A real separate lens beats digital zoom on a single-lens main camera.
+                !mainMulti && existing.cameraId == mainId && existing.zoom != 1f -> {
+                    stops.remove(existing)
+                    stops += LensStop(r, id, 1f)
+                }
+            }
+        }
+        // Telephoto camera to zoom further from, if there is one.
+        val tele = extras.filter { it.second > 1.5f }.maxByOrNull { it.second }
+        val maxZoom = maxOf(mainRange.upper, tele?.let { it.second * 2f } ?: 0f)
+        for (z in floatArrayOf(5f, 10f)) {
+            if (z > maxZoom + 0.01f || stops.any { near(it.zoom, z) }) continue
+            stops += if (tele != null && z > tele.second && !mainMulti) LensStop(z, tele.first, z / tele.second)
+            else if (z <= mainRange.upper + 0.01f) LensStop(z, mainId, z)
+            else continue
+        }
+        return stops.sortedBy { it.zoom }
     }
 }

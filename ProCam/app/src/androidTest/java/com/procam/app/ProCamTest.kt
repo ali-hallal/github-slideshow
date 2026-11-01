@@ -499,6 +499,25 @@ class ProCamTest {
     }
 
     @Test
+    fun lensPlannerFindsAllLenses() {
+        fun show(l: List<LensStop>) = l.joinToString { "${Stops.zoomLabel(it.zoom)}@${it.cameraId}" }
+        // Phone exposing ultra-wide and 3x tele as separate cameras (Xiaomi/OnePlus style).
+        val split = LensPlanner.plan("0", listOf(1f, 2f), android.util.Range(1f, 10f), false, listOf("2" to 0.6f, "3" to 3f))
+        Log.i(TAG, "split lenses: ${show(split)}")
+        assertEquals(listOf(0.6f, 1f, 2f, 3f, 5f, 10f), split.map { it.zoom })
+        assertEquals("2", split.first { it.zoom == 0.6f }.cameraId)
+        assertEquals("3", split.first { it.zoom == 3f }.cameraId)
+        assertEquals("5x zooms from the tele lens", "3", split.first { it.zoom == 5f }.cameraId)
+        // Pixel style: one logical camera that already covers 0.5x..30x with real lenses.
+        val pixel = LensPlanner.plan("0", listOf(0.5f, 1f, 2f, 5f), android.util.Range(0.5f, 30f), true, emptyList())
+        Log.i(TAG, "logical camera: ${show(pixel)}")
+        assertEquals(listOf(0.5f, 1f, 2f, 5f, 10f), pixel.map { it.zoom })
+        // Single-lens phone with 8x digital zoom: 1x, 2x, 5x.
+        val single = LensPlanner.plan("0", listOf(1f, 2f), android.util.Range(1f, 8f), false, emptyList())
+        assertEquals(listOf(1f, 2f, 5f), single.map { it.zoom })
+    }
+
+    @Test
     fun stopTables() {
         val iso = Stops.isoSteps(Range(100, 3200))
         assertEquals(100, iso.first())

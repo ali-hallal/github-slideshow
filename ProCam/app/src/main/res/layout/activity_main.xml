@@ -47,6 +47,18 @@
     </FrameLayout>
 
     <TextView
+        android:id="@+id/zoomIndicator"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:shadowColor="#CC000000"
+        android:shadowRadius="10"
+        android:textColor="@color/white"
+        android:textSize="44sp"
+        android:textStyle="bold"
+        android:visibility="gone" />
+
+    <TextView
         android:id="@+id/countdown"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"

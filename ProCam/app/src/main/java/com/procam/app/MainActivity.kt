@@ -106,6 +106,13 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private var rawBlocked = false
     private var settings = ShotSettings()
     private var cameraIds = emptyList<String>()
+    // Lenses: extra back cameras (separate lens hardware), the zoom buttons, and which lens is open.
+    private var extraLenses: List<Pair<String, Float>> = emptyList()
+    private var mainBackCaps: CameraCaps? = null
+    private var lensCameraId: String? = null
+    private var lensBase = 1f
+    private var stops: List<LensStop> = emptyList()
+    private lateinit var zoomIndicator: TextView
     private var cameraIndex = 0
 
     private var isoSteps = listOf(100)
@@ -299,9 +306,11 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             toast("No camera found")
             return
         }
+        if (extraLenses.isEmpty()) extraLenses = camera.extraBackLenses(cameraIds[0])
         cameraIndex = cameraIndex.coerceIn(0, cameraIds.size - 1)
-        Log.i(TAG, "startCamera index=$cameraIndex ids=$cameraIds")
-        camera.open(cameraIds[cameraIndex], texture, settings, prefs.output())
+        val id = if (cameraIndex == 0) lensCameraId ?: cameraIds[0] else cameraIds[cameraIndex]
+        Log.i(TAG, "startCamera index=$cameraIndex id=$id ids=$cameraIds extra lenses=$extraLenses")
+        camera.open(id, texture, settings, prefs.output())
     }
 
     // ------------------------------------------------------------------ setup
@@ -350,6 +359,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         shutter = findViewById(R.id.shutter)
         btnSwitch = findViewById(R.id.btnSwitch)
         countdownText = findViewById(R.id.countdown)
+        zoomIndicator = findViewById(R.id.zoomIndicator)
         infoRow = findViewById(R.id.infoRow)
         groupStatus = findViewById(R.id.groupStatus)
         intentScroll = findViewById(R.id.intentScroll)
@@ -526,6 +536,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         btnSwitch.setOnClickListener {
             if (cameraIds.size < 2) return@setOnClickListener
             cameraIndex = (cameraIndex + 1) % cameraIds.size
+            lensCameraId = null
+            lensBase = 1f
             settings = settings.copy(manualFocus = false, raw = false, zoom = 1f)
             rawBlocked = false
             lockBadge.visibility = View.GONE
@@ -675,6 +687,37 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         camera.update(settings)
         updateLensRow()
         updateReadout()
+        showZoomIndicator()
+    }
+
+    /** Zoom as the user sees it (relative to the main back camera). */
+    private fun displayZoom() = lensBase * settings.zoom
+
+    private val hideZoomIndicator = Runnable { zoomIndicator.animate().alpha(0f).setDuration(200).withEndAction { zoomIndicator.visibility = View.GONE }.start() }
+
+    private fun showZoomIndicator() {
+        zoomIndicator.text = Stops.zoomLabel(displayZoom())
+        zoomIndicator.animate().cancel()
+        zoomIndicator.alpha = 1f
+        zoomIndicator.visibility = View.VISIBLE
+        mainHandler.removeCallbacks(hideZoomIndicator)
+        mainHandler.postDelayed(hideZoomIndicator, 900)
+    }
+
+    /** Zoom button tapped: zoom on this camera, or open the camera that has that lens. */
+    private fun selectStop(stop: LensStop) {
+        val current = caps?.id
+        if (stop.cameraId == current) {
+            animateZoom(stop.cameraZoom)
+            return
+        }
+        val main = cameraIds.getOrNull(0) ?: return
+        lensCameraId = if (stop.cameraId == main) null else stop.cameraId
+        lensBase = if (stop.cameraId == main) 1f else stop.zoom / stop.cameraZoom
+        settings = settings.copy(zoom = stop.cameraZoom, manualFocus = false)
+        zoomIndicator.text = Stops.zoomLabel(stop.zoom)
+        showZoomIndicator()
+        startCamera()
     }
 
     private fun animateZoom(target: Float) {
@@ -833,8 +876,12 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     // ------------------------------------------------------------------ CameraController.Listener
 
     override fun onCameraOpened(caps: CameraCaps, previewSize: Size) {
-        Log.i(TAG, "camera opened id=${caps.id} front=${caps.isFront} faces=${caps.faceDetectMode} facePriority=${caps.facePriorityScene}")
+        Log.i(TAG, "camera opened id=${caps.id} front=${caps.isFront} faces=${caps.faceDetectMode} facePriority=${caps.facePriorityScene} zoom=${caps.zoomRange} stops=${caps.lensStops}")
         this.caps = caps
+        if (caps.id == cameraIds.getOrNull(0)) {
+            mainBackCaps = caps
+            lensBase = 1f
+        }
         if (caps.sensorOrientation % 180 == 90) {
             textureView.setAspectRatio(previewSize.height, previewSize.width)
         } else {
@@ -1315,40 +1362,50 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private fun buildLensRow() {
         lensRow.removeAllViews()
         val c = caps ?: return
+        val main = mainBackCaps
+        stops = if (!c.isFront && main != null) {
+            LensPlanner.plan(main.id, main.lensStops, main.zoomRange, main.multiCamera, extraLenses)
+        } else {
+            c.lensStops.map { LensStop(it, c.id, it) }
+        }
+        Log.i(TAG, "zoom buttons: ${stops.joinToString { "${Stops.zoomLabel(it.zoom)}@${it.cameraId}" }}")
         val size = (38 * resources.displayMetrics.density).toInt()
         val margin = (3 * resources.displayMetrics.density).toInt()
-        for (stop in c.lensStops) {
+        for (stop in stops) {
             val tv = TextView(this).apply {
                 gravity = Gravity.CENTER
                 textSize = 12f
                 setBackgroundResource(R.drawable.circle_bg)
                 tag = stop
-                contentDescription = "Zoom ${Stops.zoomLabel(stop)}"
+                contentDescription = "Zoom ${Stops.zoomLabel(stop.zoom)}"
                 rotation = uiRotation.toFloat()
                 setOnClickListener {
                     haptic(this, HapticFeedbackConstants.VIRTUAL_KEY)
-                    animateZoom(stop)
+                    selectStop(stop)
                 }
             }
             lensRow.addView(tv, LinearLayout.LayoutParams(size, size).apply { setMargins(margin, 0, margin, 0) })
         }
-        lensRow.visibility = if (c.lensStops.size > 1 || c.zoomRange.upper > 1.01f) View.VISIBLE else View.GONE
+        lensRow.visibility = if (stops.size > 1 || c.zoomRange.upper > 1.01f) View.VISIBLE else View.GONE
         updateLensRow()
         positionLensRow()
     }
 
     private fun updateLensRow() {
-        val stops = caps?.lensStops ?: return
-        // The active lens is the largest stop at or below the current zoom.
-        val active = stops.lastOrNull { it <= settings.zoom + 0.01f } ?: stops.first()
+        val id = caps?.id ?: return
+        if (stops.isEmpty()) return
+        // The active button is the largest stop on the open camera at or below the current zoom.
+        val z = displayZoom()
+        val mine = stops.filter { it.cameraId == id }
+        val active = mine.lastOrNull { it.zoom <= z + 0.01f } ?: mine.firstOrNull()
         for (i in 0 until lensRow.childCount) {
             val tv = lensRow.getChildAt(i) as TextView
-            val stop = tv.tag as Float
+            val stop = tv.tag as LensStop
             if (stop == active) {
-                tv.text = Stops.zoomLabel(settings.zoom)
+                tv.text = Stops.zoomLabel(z)
                 tv.setTextColor(getColor(R.color.accent))
             } else {
-                tv.text = Stops.zoomLabel(stop).removeSuffix("×")
+                tv.text = Stops.zoomLabel(stop.zoom).removeSuffix("×")
                 tv.setTextColor(getColor(R.color.white))
             }
         }
@@ -1463,7 +1520,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         liveIso?.let { parts += "ISO $it" }
         liveExposure?.let { parts += Stops.shutterLabel(it) }
         c?.aperture?.let { parts += String.format(Locale.US, "f/%.1f", it) }
-        if (c != null) parts += Stops.zoomLabel(settings.zoom)
+        if (c != null) parts += Stops.zoomLabel(displayZoom())
         val line1 = parts.joinToString("  ")
         val line2 = buildString {
             append(

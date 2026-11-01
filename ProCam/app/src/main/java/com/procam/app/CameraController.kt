@@ -140,6 +140,25 @@ class CameraController(context: Context, private val listener: Listener) {
         return primary.ifEmpty { all }
     }
 
+    /**
+     * Other back cameras (separate lenses on phones that don't merge them into one camera), with
+     * their zoom relative to [mainId].
+     */
+    fun extraBackLenses(mainId: String): List<Pair<String, Float>> = try {
+        val main = CameraCaps.fieldOfViewScale(manager.getCameraCharacteristics(mainId))
+        if (main == null) emptyList() else listCameras()
+            .filter { it != mainId }
+            .filter { manager.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK }
+            .mapNotNull { id ->
+                CameraCaps.fieldOfViewScale(manager.getCameraCharacteristics(id))?.let { id to CameraCaps.roundStop(it / main) }
+            }
+            .filter { kotlin.math.abs(it.second - 1f) > 0.15f }
+            .distinctBy { it.second }
+    } catch (e: Exception) {
+        Log.w(TAG, "extraBackLenses", e)
+        emptyList()
+    }
+
     fun open(cameraId: String, texture: SurfaceTexture, initial: ShotSettings, outputPrefs: OutputPrefs) {
         Log.i(TAG, "open camera $cameraId")
         close()
