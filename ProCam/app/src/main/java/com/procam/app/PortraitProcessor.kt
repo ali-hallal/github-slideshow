@@ -175,7 +175,9 @@ class PortraitProcessor {
          */
         fun shrink(src: Bitmap, w: Int, h: Int): Bitmap {
             var cur = src
-            while (cur.width / 2 >= w * 2 && cur.height / 2 >= h * 2) {
+            // Halve while that doesn't undershoot the target, so the final step is at most 2×
+            // (a 2× bilinear step is a true 2×2 average; larger single steps alias).
+            while (cur.width / 2 >= w && cur.height / 2 >= h) {
                 val next = Bitmap.createScaledBitmap(cur, cur.width / 2, cur.height / 2, true)
                 if (cur !== src) cur.recycle()
                 cur = next
@@ -186,7 +188,7 @@ class PortraitProcessor {
         }
 
         /** In-place box blur (horizontal then vertical), O(n) per pass. */
-        private fun boxBlur(a: FloatArray, w: Int, h: Int, radius: Int) {
+        fun boxBlur(a: FloatArray, w: Int, h: Int, radius: Int) {
             val tmp = FloatArray(max(w, h))
             val norm = 1f / (2 * radius + 1)
             for (y in 0 until h) {

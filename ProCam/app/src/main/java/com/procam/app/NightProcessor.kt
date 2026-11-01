@@ -288,8 +288,24 @@ class NightProcessor {
             val w = img.width
             val h = img.height
             val small = PortraitProcessor.shrink(img, max(1, w / MOTION_BLUR_SCALE), max(1, h / MOTION_BLUR_SCALE))
-            val blurred = Bitmap.createScaledBitmap(small, w, h, true)
+            // Soften the small copy further (≈3 small pixels): enough to merge the steps of fast
+            // motion into one even streak; only used where things moved.
+            val sw = small.width
+            val sh = small.height
+            val spx = IntArray(sw * sh)
+            small.getPixels(spx, 0, sw, 0, 0, sw, sh)
             small.recycle()
+            val chans = Array(3) { c -> FloatArray(sw * sh) { i -> ((spx[i] shr (16 - 8 * c)) and 0xFF).toFloat() } }
+            for (ch in chans) repeat(3) { PortraitProcessor.boxBlur(ch, sw, sh, 1) }
+            for (i in spx.indices) {
+                spx[i] = (0xFF shl 24) or
+                    (chans[0][i].roundToInt().coerceIn(0, 255) shl 16) or
+                    (chans[1][i].roundToInt().coerceIn(0, 255) shl 8) or
+                    chans[2][i].roundToInt().coerceIn(0, 255)
+            }
+            val soft = Bitmap.createBitmap(spx, sw, sh, Bitmap.Config.ARGB_8888)
+            val blurred = Bitmap.createScaledBitmap(soft, w, h, true)
+            soft.recycle()
             // Where did things move? Decided per coarse cell (and spread to neighbours), so the
             // still gaps between the "steps" of a moving object get smoothed too.
             val cw = max(1, w / MOTION_BLUR_SCALE)
@@ -347,7 +363,7 @@ class NightProcessor {
         }
 
         /** Motion smoothing: blur scale, and the variance range (levels²) that fades it in. */
-        private const val MOTION_BLUR_SCALE = 12
+        private const val MOTION_BLUR_SCALE = 16
         /** Mean variance per cell: a cell with a moving object averages a few hundred levels². */
         private const val CELL_VAR_LOW = 40f
         private const val CELL_VAR_HIGH = 250f
