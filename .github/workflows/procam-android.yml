@@ -26,13 +26,20 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Build debug APK
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+      - name: Build debug and release APKs
+        run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace
 
       - uses: actions/upload-artifact@v4
         with:
           name: ProCam-debug-apk
           path: ProCam/app/build/outputs/apk/debug/*.apk
+
+      # Optimised build (much faster image processing). Signed with the debug key so it installs
+      # directly; use your own key before publishing to the Play Store.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ProCam-release-apk
+          path: ProCam/app/build/outputs/apk/release/*.apk
 
   emulator-test:
     # Runs the app on an Android emulator with a virtual camera and takes real photos.
@@ -75,7 +82,7 @@ jobs:
             adb shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS || true
             adb logcat -c
             ./gradlew connectedDebugAndroidTest --no-daemon || touch tests-failed
-            adb logcat -d -v time ProCam:V ProCamTest:V AndroidRuntime:E CameraService:W '*:S' | tail -300
+            adb logcat -d -v time ProCam:V ProCamTest:V SuperZoom:V Night:V Portrait:V GroupShutter:V AndroidRuntime:E CameraService:W '*:S' | tail -300
             adb pull /sdcard/Download/procam-screens screens || true
             for f in screens/*.jpg; do echo "=== SCREEN $(basename $f)"; base64 -w 2000 "$f"; echo "=== END"; done
             test ! -f tests-failed

@@ -19,7 +19,7 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = true
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             // Signed with the debug key so the release APK is installable out of the box.
             // Replace with your own signing config before publishing.
             signingConfig = signingConfigs.getByName("debug")
