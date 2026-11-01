@@ -101,6 +101,8 @@ class SettingsActivity : Activity() {
             listOf("Off", "On"), { if (prefs.grid) 1 else 0 }, { prefs.grid = it == 1 }))
         row(Option("Level", "Horizon indicator, turns green when straight",
             listOf("Off", "On"), { if (prefs.level) 1 else 0 }, { prefs.level = it == 1 }))
+        row(Option("Auto HDR", "In Auto, balance bright skies and dark subjects automatically (shows an HDR badge)",
+            listOf("Off", "On"), { if (prefs.autoHdr) 1 else 0 }, { prefs.autoHdr = it == 1 }))
         row(Option("Focus peaking", "Highlights sharp edges in red",
             listOf("Manual focus only", "Always", "Off"), { prefs.peaking }, { prefs.peaking = it }))
         row(Option("Zebra stripes", "Stripes over areas that are too bright",
@@ -116,7 +118,20 @@ class SettingsActivity : Activity() {
         row(Option("Haptics", "Vibrate on shutter and dial steps",
             listOf("Off", "On"), { if (prefs.haptics) 1 else 0 }, { prefs.haptics = it == 1 }))
 
-        section("")
+        section("Help")
+        list.addView(TextView(this).apply {
+            text = "Send diagnostics"
+            textSize = 16f
+            setTextColor(getColor(R.color.white))
+            setPadding(dp(24), dp(16), dp(24), dp(4))
+            setOnClickListener { sendDiagnostics() }
+        })
+        list.addView(TextView(this).apply {
+            text = "A text report about your phone's cameras and what ProCam did recently. No photos or location."
+            textSize = 12f
+            setTextColor(getColor(R.color.dim))
+            setPadding(dp(24), 0, dp(24), dp(12))
+        })
         list.addView(TextView(this).apply {
             text = "Show the welcome guide"
             textSize = 16f
@@ -211,6 +226,26 @@ class SettingsActivity : Activity() {
             pendingLocationRow?.let { o -> valueViews[o]?.text = o.labels[o.get()] }
             Toast.makeText(this, "Location permission denied", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun sendDiagnostics() {
+        Toast.makeText(this, "Preparing diagnostics…", Toast.LENGTH_SHORT).show()
+        Thread {
+            val report = Diagnostics.build(this)
+            val uri = Diagnostics.save(this, report)
+            runOnUiThread {
+                val send = android.content.Intent(android.content.Intent.ACTION_SEND)
+                    .setType("text/plain")
+                    .putExtra(android.content.Intent.EXTRA_SUBJECT, "ProCam diagnostics")
+                if (uri != null) {
+                    send.putExtra(android.content.Intent.EXTRA_STREAM, uri).addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    Toast.makeText(this, "Saved in Downloads/ProCam", Toast.LENGTH_SHORT).show()
+                } else {
+                    send.putExtra(android.content.Intent.EXTRA_TEXT, report.take(90_000))
+                }
+                startActivity(android.content.Intent.createChooser(send, "Send diagnostics"))
+            }
+        }.start()
     }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()

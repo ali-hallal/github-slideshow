@@ -18,6 +18,7 @@ import androidx.test.espresso.action.Press
 import androidx.test.espresso.action.Tap
 import androidx.test.espresso.action.ViewActions.click
 import androidx.test.espresso.matcher.ViewMatchers.withId
+import androidx.test.espresso.matcher.ViewMatchers.withText
 import androidx.test.ext.junit.rules.ActivityScenarioRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -136,6 +137,23 @@ class WalkthroughTest {
         screenshot("silky_done")
         onView(withId(R.id.intentAuto)).perform(click())
 
+        // Auto HDR (forced on here, as the emulator scene isn't backlit): badge, capture, review.
+        context.getSharedPreferences("procam", android.content.Context.MODE_PRIVATE).edit().putBoolean("forceHdr", true).commit()
+        SystemClock.sleep(2000)
+        screenshot("hdr_badge")
+        onView(withId(R.id.shutter)).perform(click())
+        SystemClock.sleep(500)
+        screenshot("hdr_hold_still")
+        waitForIdleShutter(60_000)
+        SystemClock.sleep(1500)
+        savePhoto("photo_hdr")
+        onView(withId(R.id.thumbnail)).perform(click())
+        SystemClock.sleep(2500)
+        screenshot("review_hdr")
+        androidx.test.espresso.Espresso.pressBack()
+        SystemClock.sleep(1500)
+        context.getSharedPreferences("procam", android.content.Context.MODE_PRIVATE).edit().putBoolean("forceHdr", false).commit()
+
         // On to the Pro controls.
         onView(withId(R.id.btnMode)).perform(click())
         SystemClock.sleep(1000)
@@ -224,6 +242,9 @@ class WalkthroughTest {
         onView(withId(R.id.btnSettings)).perform(click())
         SystemClock.sleep(1000)
         screenshot("settings_screen")
+        onView(withText("Send diagnostics")).perform(androidx.test.espresso.action.ViewActions.scrollTo())
+        SystemClock.sleep(600)
+        screenshot("settings_help")
         androidx.test.espresso.Espresso.pressBack()
         waitUntil(15_000) { readout().contains("ISO") }
 

@@ -11,6 +11,14 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("onboarded", false)
         set(v) = sp.edit().putBoolean("onboarded", v).apply()
 
+    /** Auto mode uses HDR automatically for backlit, high-contrast scenes. */
+    var autoHdr: Boolean
+        get() = sp.getBoolean("autoHdr", true)
+        set(v) = sp.edit().putBoolean("autoHdr", v).apply()
+
+    /** Test hook: treat every Auto scene as needing HDR (used by automated tests only). */
+    val forceHdr: Boolean get() = sp.getBoolean("forceHdr", false)
+
     // ---- mode
     /** false = Simple (beginner) screen, true = Pro controls. Simple is the default. */
     var uiPro: Boolean

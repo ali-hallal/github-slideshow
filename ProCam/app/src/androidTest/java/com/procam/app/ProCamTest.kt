@@ -675,6 +675,7 @@ class ProCamTest {
         assertEquals("Freeze", ReviewActivity.describe("PROCAM_1_ACTION.jpg").first)
         assertEquals("RAW", ReviewActivity.describe("PROCAM_1.dng").first)
         assertEquals("Photo", ReviewActivity.describe("PROCAM_1.jpg").first)
+        assertEquals("HDR", ReviewActivity.describe("PROCAM_1_HDR.jpg").first)
     }
 
     @Test
@@ -711,6 +712,89 @@ class ProCamTest {
         assertEquals("+1.0", Stops.evLabel(3, Rational(1, 3)))
         assertEquals("∞", Stops.focusLabel(0f))
         assertEquals("50cm", Stops.focusLabel(2f))
+    }
+
+    @Test
+    fun hdrDecidesOnlyForBacklitScenes() {
+        assertEquals("evenly lit", 0f, Hdr.stopsDarker(Hdr.Scene(clipped = 0.005f, dark = 0.3f)), 0f)
+        assertEquals("bright but no shadows", 0f, Hdr.stopsDarker(Hdr.Scene(clipped = 0.2f, dark = 0.02f)), 0f)
+        assertTrue("sky blown out over dark ground", Hdr.stopsDarker(Hdr.Scene(clipped = 0.08f, dark = 0.3f)) >= 1.5f)
+        assertTrue("dark face against a window", Hdr.stopsDarker(Hdr.Scene(clipped = 0.02f, dark = 0.05f, faceVsFrame = 0.4f)) > 0f)
+        assertEquals("well-lit face", 0f, Hdr.stopsDarker(Hdr.Scene(clipped = 0.02f, dark = 0.05f, faceVsFrame = 1.0f)), 0f)
+        // The burst is shot darker by the requested stops, never with a shutter longer than auto's.
+        val (iso, t) = Hdr.plan(400, 20_000_000L, 30_000_000L, 2f, Range(50, 3200), Range(100_000L, 1_000_000_000L))
+        assertEquals(4.0, 400.0 * 20_000_000L / (iso.toDouble() * t), 0.1)
+        assertTrue(t <= 20_000_000L)
+    }
+
+    @Test
+    fun hdrToneMapKeepsSkyAndLiftsSubject() {
+        // Backlit scene shot 2 stops dark: bright sky on top, a dark person in the middle.
+        val w = 600
+        val h = 450
+        fun enc(v: Float): Int {
+            val c = v.coerceIn(0f, 1f)
+            val s = if (c <= 0.0031308f) c * 12.92f else 1.055f * Math.pow(c.toDouble(), 1 / 2.4).toFloat() - 0.055f
+            return (s * 255).toInt().coerceIn(0, 255)
+        }
+        fun scene(x: Int, y: Int) = when {
+            x in 225 until 375 && y >= 150 -> 0.03f
+            y < 180 -> 0.92f
+            else -> 0.12f
+        }
+        val dark = IntArray(w * h) { i -> val v = enc(scene(i % w, i / w) / 4f); (0xFF shl 24) or (v shl 16) or (v shl 8) or v }
+        val normal = IntArray(w * h) { i -> val v = enc(scene(i % w, i / w)); (0xFF shl 24) or (v shl 16) or (v shl 8) or v }
+        val hdr = dark.copyOf()
+        Hdr.toneMap(hdr, w, h, 2f)
+        fun mean(a: IntArray, x0: Int, x1: Int, y0: Int, y1: Int): Double {
+            var s = 0.0
+            for (y in y0 until y1) for (x in x0 until x1) s += a[y * w + x] and 0xFF
+            return s / ((x1 - x0) * (y1 - y0))
+        }
+        val person = mean(hdr, 240, 360, 230, 430)
+        Log.i(TAG, "hdr: person dark=${mean(dark, 240, 360, 230, 430)} hdr=$person normal=${mean(normal, 240, 360, 230, 430)}; " +
+            "sky hdr=${mean(hdr, 0, 600, 0, 160)}")
+        assertTrue("person brightened close to a normal exposure", person > mean(normal, 240, 360, 230, 430) * 0.85)
+        assertTrue("sky not blown out", mean(hdr, 0, 600, 0, 160) < 248)
+        val near = mean(hdr, 385, 400, 250, 420) / mean(normal, 385, 400, 250, 420)
+        val far = mean(hdr, 500, 590, 250, 420) / mean(normal, 500, 590, 250, 420)
+        assertEquals("no halo around the person", far, near, 0.05)
+    }
+
+    @Test
+    fun diagnosticsReportDescribesPhone() {
+        waitForCamera()
+        val report = Diagnostics.build(context)
+        Log.i(TAG, "diagnostics: ${report.length} chars\n${report.take(1500)}")
+        assertTrue(report.contains(android.os.Build.MODEL))
+        assertTrue(report.contains("Camera 0"))
+        assertTrue("includes recent app log", report.contains("ProCam"))
+        val uri = Diagnostics.save(context, report)
+        assertTrue("saved to Downloads", uri != null)
+        context.contentResolver.delete(uri!!, null, null)
+    }
+
+    @Test
+    fun hdrCaptureSavesBalancedPhoto() {
+        waitForCamera()
+        setSimple(true)
+        assumeTrue("needs manual exposure", backCameraHas(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR))
+        context.getSharedPreferences("procam", android.content.Context.MODE_PRIVATE).edit().putBoolean("forceHdr", true).commit()
+        waitFor("HDR badge") { visible(R.id.hdrBadge) }
+        val before = count("image/jpeg")
+        onView(withId(R.id.shutter)).perform(click())
+        waitFor("HDR photo saved", 60_000) { count("image/jpeg") > before }
+        waitFor("finished", 20_000) { !shutterBusy() }
+        SystemClock.sleep(1500)
+        assertEquals("exactly one photo", before + 1, count("image/jpeg"))
+        val names = context.contentResolver.query(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI, arrayOf(MediaStore.Images.Media.DISPLAY_NAME),
+            "${MediaStore.Images.Media.DISPLAY_NAME} LIKE ?", arrayOf("%_HDR%"), null,
+        )?.use { it.count } ?: 0
+        assertTrue("an _HDR photo was saved", names > 0)
+        // Other intents turn HDR off.
+        onView(withId(R.id.intentNight)).perform(click())
+        waitFor("HDR badge hidden") { !visible(R.id.hdrBadge) }
     }
 
     // ------------------------------------------------------------------ helpers
@@ -761,6 +845,12 @@ class ProCamTest {
     }
 
     private fun readout() = text(R.id.readout)
+
+    private fun visible(id: Int): Boolean {
+        var v = false
+        activityRule.scenario.onActivity { v = it.findViewById<View>(id).visibility == View.VISIBLE }
+        return v
+    }
 
     private fun text(id: Int): String {
         var t = ""

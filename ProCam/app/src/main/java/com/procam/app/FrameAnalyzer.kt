@@ -16,6 +16,34 @@ class FrameAnalyzer {
     val blue = IntArray(bins)
     val luma = IntArray(bins)
 
+    /** Share of the frame that is blown out (near white) and very dark: for HDR decisions. */
+    var clippedFraction = 0f
+        private set
+    var darkFraction = 0f
+        private set
+    private var frameW = 0
+    private var frameH = 0
+
+    /** Mean 8-bit brightness inside a 0..1 rectangle of the last analysed frame. */
+    fun meanLuma(r: android.graphics.RectF): Float {
+        if (frameW == 0 || lumaPx.isEmpty()) return 0f
+        val x0 = (r.left * frameW).toInt().coerceIn(0, frameW - 1)
+        val x1 = (r.right * frameW).toInt().coerceIn(x0 + 1, frameW)
+        val y0 = (r.top * frameH).toInt().coerceIn(0, frameH - 1)
+        val y1 = (r.bottom * frameH).toInt().coerceIn(y0 + 1, frameH)
+        var s = 0L
+        var n = 0
+        for (y in y0 until y1) for (x in x0 until x1) {
+            s += lumaPx[y * frameW + x]
+            n++
+        }
+        return if (n == 0) 0f else s.toFloat() / n
+    }
+
+    /** Mean 8-bit brightness of the whole last analysed frame. */
+    var meanLuma8 = 0f
+        private set
+
     /** Mean scene brightness in linear light (0..1). */
     var meanLinear = 0f
         private set
@@ -59,6 +87,11 @@ class FrameAnalyzer {
             sum += LINEAR[l]
         }
         meanLinear = (sum / n).toFloat()
+        frameW = w
+        frameH = h
+        clippedFraction = luma[bins - 1].toFloat() / n
+        darkFraction = (0 until 8).sumOf { luma[it] }.toFloat() / n
+        meanLuma8 = (0 until n).sumOf { lumaPx[it].toLong() }.toFloat() / n
 
         if (zebraThreshold <= 0 && !peaking) return false
 

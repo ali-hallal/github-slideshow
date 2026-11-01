@@ -20,14 +20,17 @@ import kotlin.math.roundToInt
  */
 class NightProcessor {
 
-    class Result(val jpeg: ByteArray, val merged: Int, val reference: Int)
+    /** [before]: for HDR, what a normal photo would have looked like (for the review screen). */
+    class Result(val jpeg: ByteArray, val merged: Int, val reference: Int, val before: ByteArray? = null)
 
-    /** Blocking: call off the main thread. [iso] is the per-frame ISO (sets the motion threshold). */
     /**
+     * Blocking: call off the main thread. [iso] is the per-frame ISO (sets the motion threshold).
+     * @param hdrStops HDR: the frames were shot this many stops darker; brighten the dark areas back.
      * @param silky Silky (long-exposure look): keep motion instead of rejecting it, so moving water,
      *   clouds and lights blur into streaks while the aligned still parts stay sharp; no shadow lift.
      */
-    fun process(frames: List<ByteArray>, iso: Int, quality: Int, silky: Boolean = false): Result {
+    fun process(frames: List<ByteArray>, iso: Int, quality: Int, silky: Boolean = false, hdrStops: Float = 0f): Result {
+        val hdr = hdrStops > 0f
         require(frames.isNotEmpty())
         // Small grey copies for choosing the reference and aligning.
         val smalls = frames.map { bytes ->
@@ -43,6 +46,7 @@ class NightProcessor {
         val n = w * h
         val refPx = IntArray(n)
         ref.getPixels(refPx, 0, w, 0, 0, w, h)
+        val beforePx = if (hdr) Hdr.naiveBrighten(refPx, hdrStops) else null
 
         // Accumulators: weights are 0..256 per frame, so Int sums can't overflow for <= 16 frames.
         val sumR = IntArray(n)
@@ -78,7 +82,7 @@ class NightProcessor {
         }
 
         // Average (+ shadow lift for Night).
-        val curve = if (silky) IDENTITY else LIFT
+        val curve = if (silky || hdr) IDENTITY else LIFT
         for (i in 0 until n) {
             val wt = sumW[i]
             val r = curve[(sumR[i] / wt).coerceIn(0, 255)]
@@ -86,13 +90,21 @@ class NightProcessor {
             val b = curve[(sumB[i] / wt).coerceIn(0, 255)]
             refPx[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
         }
+        if (hdr) {
+            // Brighten the dark areas back up; keep the protected highlights.
+            Hdr.toneMap(refPx, w, h, hdrStops)
+        }
         ref.setPixels(refPx, 0, w, 0, 0, w, h)
         if (silky && sumL != null && sumSq != null) smoothMotion(ref, sumL, sumSq, sumW)
         val out = ByteArrayOutputStream(frames[refIndex].size)
         ref.compress(Bitmap.CompressFormat.JPEG, quality.coerceIn(50, 100), out)
         ref.recycle()
         Log.i(TAG, "merged $merged of ${frames.size} frames at ISO $iso, reference $refIndex")
-        return Result(out.toByteArray(), merged, refIndex)
+        val before = beforePx?.let { px ->
+            val b = Bitmap.createBitmap(px, w, h, Bitmap.Config.ARGB_8888)
+            ByteArrayOutputStream().also { o -> b.compress(Bitmap.CompressFormat.JPEG, 90, o); b.recycle() }.toByteArray()
+        }
+        return Result(out.toByteArray(), merged, refIndex, before)
     }
 
     /** A small greyscale image used for alignment. */

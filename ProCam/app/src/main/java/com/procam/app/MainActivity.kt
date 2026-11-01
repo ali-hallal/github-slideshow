@@ -188,6 +188,14 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private var freezeExposureOn = false
     /** The running merge is Silky (keep motion) rather than Night. */
     private var mergeSilky = false
+    /** The running merge is HDR, shot this many stops darker (0 = not HDR). */
+    private var mergeHdrStops = 0f
+    // Auto HDR: how many stops darker to shoot right now (0 = off), with hysteresis.
+    private var hdrStops = 0f
+    private var hdrOnTicks = 0
+    private var hdrOffTicks = 0
+    private var lastFaces: List<RectF> = emptyList()
+    private lateinit var hdrBadge: TextView
 
     // Night
     private val night = NightProcessor()
@@ -400,6 +408,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         modeRow = findViewById(R.id.modeRow)
         btnMode = findViewById(R.id.btnMode)
         shakeView = findViewById(R.id.shakeView)
+        hdrBadge = findViewById(R.id.hdrBadge)
         intentPortrait = findViewById(R.id.intentPortrait)
         intentNight = findViewById(R.id.intentNight)
         intentSilky = findViewById(R.id.intentSilky)
@@ -939,6 +948,9 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             // Never miss the moment: the sharpest frame from around the press.
             freezeProcessing = true
             camera.takeMoment(deviceOrientation)
+        } else if (hdrStops > 0f && hdrApplies()) {
+            // Backlit / high-contrast scene: a darker burst, merged and brightened where needed.
+            startHdr()
         } else if (extraCrop > 1.01f) {
             // Super zoom: a short burst, rebuilt into one detailed zoomed photo.
             zoomProcessing = true
@@ -1152,6 +1164,57 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         // zoom the camera's face positions no longer match the enlarged preview.
         if (!groupMode && extraCrop <= 1.001f) overlay.setFaces(faces)
         if (faces.isNotEmpty()) lastFaceSeen = SystemClock.uptimeMillis()
+        lastFaces = faces
+    }
+
+    // ------------------------------------------------------------------ auto HDR
+
+    /** Auto HDR applies to Auto in Simple mode (the other intents process photos their own way). */
+    private fun hdrApplies() = simple && prefs.intent == "AUTO" && prefs.autoHdr && extraCrop <= 1.001f &&
+        caps?.manualSensor == true
+
+    /** Each analysis tick: does the scene need HDR? Needs a few agreeing ticks to switch (no flicker). */
+    private fun updateHdr() {
+        if (!hdrApplies()) {
+            if (hdrStops != 0f) setHdr(0f)
+            return
+        }
+        val face = lastFaces.maxByOrNull { it.width() * it.height() }
+        val faceRatio = face?.let { f ->
+            val whole = analyzer.meanLuma8
+            if (whole > 1f) analyzer.meanLuma(f) / whole else null
+        }
+        val wanted = if (prefs.forceHdr) 1.5f
+        else Hdr.stopsDarker(Hdr.Scene(analyzer.clippedFraction, analyzer.darkFraction, faceRatio))
+        if (wanted > 0f) {
+            hdrOffTicks = 0
+            if (++hdrOnTicks >= HDR_ON_TICKS || hdrStops > 0f) setHdr(wanted)
+        } else {
+            hdrOnTicks = 0
+            if (hdrStops > 0f && ++hdrOffTicks >= HDR_OFF_TICKS) setHdr(0f)
+        }
+    }
+
+    private fun setHdr(stops: Float) {
+        if (stops == hdrStops) return
+        hdrStops = stops
+        hdrBadge.visibility = if (stops > 0f) View.VISIBLE else View.GONE
+    }
+
+    private fun startHdr() {
+        val c = caps ?: return
+        val isoR = c.isoRange ?: return
+        val expR = c.exposureRange ?: return
+        nightProcessing = true
+        mergeSilky = false
+        mergeHdrStops = hdrStops
+        val (iso, t) = Hdr.plan(
+            liveIso ?: 100, liveExposure ?: 10_000_000L, safeShutterNs() ?: 33_000_000L, hdrStops, isoR, expR,
+        )
+        nightIso = iso
+        Log.i(TAG, "hdr plan: $HDR_FRAMES x ISO $iso ${Stops.shutterLabel(t)} (${hdrStops} stops darker)")
+        showGroupStatus("Hold still… HDR")
+        camera.takeBurst(deviceOrientation, HDR_FRAMES, toMemory = true, exposure = iso to t)
     }
 
     override fun onBurstCaptured(frames: List<ByteArray>, mimeType: String) {
@@ -1358,6 +1421,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         val c = caps ?: return
         nightProcessing = true
         mergeSilky = true
+        mergeHdrStops = 0f
         val frames = SILKY_FRAMES[prefs.silkyStrength.coerceIn(0, 2)]
         val isoRange = c.isoRange
         val expRange = c.exposureRange
@@ -1377,6 +1441,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         val c = caps ?: return
         nightProcessing = true
         mergeSilky = false
+        mergeHdrStops = 0f
         val isoRange = c.isoRange
         val expRange = c.exposureRange
         if (c.manualSensor && isoRange != null && expRange != null) {
@@ -1401,12 +1466,19 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
 
     private fun processNight(frames: List<ByteArray>, mimeType: String) {
         val silky = mergeSilky
-        showGroupStatus(if (silky) "Blending ${frames.size} shots…" else "Merging ${frames.size} shots…")
+        val hdr = mergeHdrStops
+        showGroupStatus(
+            when {
+                hdr > 0f -> "Balancing light…"
+                silky -> "Blending ${frames.size} shots…"
+                else -> "Merging ${frames.size} shots…"
+            },
+        )
         val iso = nightIso
         val quality = prefs.jpegQuality
         Thread {
             val result = try {
-                night.process(frames, iso, quality, silky)
+                night.process(frames, iso, quality, silky, hdrStops = hdr)
             } catch (e: Throwable) {
                 Log.e(TAG, "night merge failed", e)
                 null
@@ -1415,8 +1487,15 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             val mime = if (result != null) "image/jpeg" else mimeType
             val ext = if (mime == "image/heic") "heic" else "jpg"
             val source = frames[result?.reference ?: 0]
-            val name = "${MediaSaver.newBaseName()}${if (result == null) "" else if (silky) "_SILKY" else "_NIGHT"}.$ext"
-            if (result != null) OriginalStore.save(this, name, source)
+            val suffix = when {
+                result == null -> ""
+                hdr > 0f -> "_HDR"
+                silky -> "_SILKY"
+                else -> "_NIGHT"
+            }
+            val name = "${MediaSaver.newBaseName()}$suffix.$ext"
+            // HDR's "before" is what a normal photo would have looked like (bright parts blown out).
+            if (result != null) OriginalStore.save(this, name, result.before ?: source)
             val uri = MediaSaver.save(
                 this, name, mime,
                 writer = { it.write(bytes) },
@@ -1431,6 +1510,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 toast(
                     when {
                         result == null -> "Saved a single shot"
+                        hdr > 0f -> "HDR photo · bright and dark areas balanced"
                         silky -> "Silky photo · blended ${result.merged} shots"
                         else -> "Night photo · merged ${result.merged} shots"
                     },
@@ -1608,6 +1688,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             if (groupMode) analyzeGroup()
             updatePortraitHint()
             updateNightTip()
+            updateHdr()
         }
     }
 
@@ -1937,6 +2018,9 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         private const val SUPER_ZOOM_FRAMES = 11 // the first is skipped, the sharpest 6 of the other 10 merged
         private const val ZOOM_BAR_HIDE_MS = 3500L
         private const val MAX_PENDING_ENHANCE = 2
+        private const val HDR_FRAMES = 6
+        private const val HDR_ON_TICKS = 3 // ~0.45 s of a backlit scene before HDR switches on
+        private const val HDR_OFF_TICKS = 8
         /** Freeze: shutter at most 1/500 s; in dim light it may lengthen to 1/250 s, never more. */
         private const val FREEZE_SHUTTER_NS = 2_000_000L
         private const val FREEZE_LIMIT_NS = 4_000_000L

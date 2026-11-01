@@ -143,13 +143,37 @@
                 android:textSize="18sp" />
         </LinearLayout>
 
-        <com.procam.app.ShakeView
-            android:id="@+id/shakeView"
+        <LinearLayout
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_gravity="center_horizontal"
             android:layout_marginTop="8dp"
-            android:visibility="gone" />
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <com.procam.app.ShakeView
+                android:id="@+id/shakeView"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:visibility="gone" />
+
+            <!-- Shown when Auto will use HDR for a backlit scene. -->
+            <TextView
+                android:id="@+id/hdrBadge"
+                android:layout_width="wrap_content"
+                android:layout_height="30dp"
+                android:layout_marginStart="6dp"
+                android:background="@drawable/badge_bg"
+                android:contentDescription="HDR on for this bright scene"
+                android:fontFamily="sans-serif-medium"
+                android:gravity="center"
+                android:paddingStart="10dp"
+                android:paddingEnd="10dp"
+                android:text="HDR"
+                android:textColor="@color/black"
+                android:textSize="12sp"
+                android:visibility="gone" />
+        </LinearLayout>
 
         <LinearLayout
             android:id="@+id/infoRow"
