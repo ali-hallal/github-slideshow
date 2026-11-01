@@ -90,8 +90,9 @@ class WalkthroughTest {
         waitForIdleShutter(60_000)
         SystemClock.sleep(800)
         savePhoto("photo_super_zoom")
-        onView(withId(R.id.zoomSlider)).perform(tapAt(0.02f, 0.5f))
-        SystemClock.sleep(500)
+        // Back to 1x with the lens button (the slider hides itself after a few seconds).
+        tryClick("Zoom 1×")
+        SystemClock.sleep(800)
 
         // Night: 6-8 shots merged into one.
         onView(withId(R.id.intentNight)).perform(click())
