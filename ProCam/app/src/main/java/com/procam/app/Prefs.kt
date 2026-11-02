@@ -11,6 +11,11 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("onboarded", false)
         set(v) = sp.edit().putBoolean("onboarded", v).apply()
 
+    /** Space for the originals behind enhanced photos (before/after), in MB. */
+    var originalsMb: Int
+        get() = sp.getInt("originalsMb", 300)
+        set(v) = sp.edit().putInt("originalsMb", v).apply()
+
     /** The microphone permission was asked for once already. */
     var audioAsked: Boolean
         get() = sp.getBoolean("audioAsked", false)

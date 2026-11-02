@@ -96,6 +96,19 @@ class SettingsActivity : Activity() {
         row(locationRow)
         pendingLocationRow = locationRow
 
+        val limits = listOf(100, 300, 1000)
+        row(Option("Before/after storage", "ProCam keeps the unenhanced shot of Night, HDR, Portrait… photos so you can compare. Oldest are removed past this size.",
+            listOf("100 MB", "300 MB", "1 GB"), { limits.indexOf(prefs.originalsMb).coerceAtLeast(0) },
+            { prefs.originalsMb = limits[it]; Thread { OriginalStore.trim(this); runOnUiThread { updateStorageLine() } }.start() }))
+        storageLine = TextView(this).apply {
+            textSize = 14f
+            setTextColor(getColor(R.color.accent))
+            setPadding(dp(24), dp(12), dp(24), dp(12))
+            setOnClickListener { confirmClearOriginals() }
+        }
+        list.addView(storageLine)
+        updateStorageLine()
+
         section("Video")
         row(Option("Video quality", "4K is sharper but uses about 3× the space (1080p if your phone can't)",
             listOf("1080p", "4K"), { if (prefs.video4k) 1 else 0 }, { prefs.video4k = it == 1 }))
@@ -232,6 +245,32 @@ class SettingsActivity : Activity() {
             pendingLocationRow?.let { o -> valueViews[o]?.text = o.labels[o.get()] }
             Toast.makeText(this, "Location permission denied", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private var storageLine: TextView? = null
+
+    private fun updateStorageLine() {
+        val line = storageLine ?: return
+        Thread {
+            val bytes = OriginalStore.usedBytes(this)
+            val n = OriginalStore.count(this)
+            runOnUiThread {
+                line.text = if (n == 0) "No originals kept right now"
+                else "Originals use ${(bytes + 500_000) / 1_000_000} MB ($n photos) · tap to free up"
+            }
+        }.start()
+    }
+
+    private fun confirmClearOriginals() {
+        if (OriginalStore.count(this) == 0) return
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Free up space?")
+            .setMessage("Your photos stay in the gallery. Only the before/after comparison and changing a portrait's blur afterwards go away.")
+            .setPositiveButton("Free up") { _, _ ->
+                Thread { OriginalStore.clear(this); runOnUiThread { updateStorageLine() } }.start()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun sendDiagnostics() {

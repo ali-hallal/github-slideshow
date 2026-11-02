@@ -30,81 +30,108 @@ class NightProcessor {
      *   clouds and lights blur into streaks while the aligned still parts stay sharp; no shadow lift.
      */
     fun process(frames: List<ByteArray>, iso: Int, quality: Int, silky: Boolean = false, hdrStops: Float = 0f): Result {
-        val hdr = hdrStops > 0f
         require(frames.isNotEmpty())
+        val perPixel = if (silky) BYTES_PER_PIXEL_SILKY else BYTES_PER_PIXEL
+        val side = Budget.sideFor(frames[0], perPixel)
+        return try {
+            merge(frames, iso, quality, silky, hdrStops, side)
+        } catch (e: OutOfMemoryError) {
+            if (side <= Budget.FLOOR) throw e
+            // Memory was tighter than it looked: try again at the safe size.
+            Log.w(TAG, "out of memory at $side px, retrying at ${Budget.FLOOR}")
+            System.gc()
+            merge(frames, iso, quality, silky, hdrStops, Budget.FLOOR)
+        }
+    }
+
+    private fun merge(frames: List<ByteArray>, iso: Int, quality: Int, silky: Boolean, hdrStops: Float, side: Int): Result {
+        val hdr = hdrStops > 0f
         // Small grey copies for choosing the reference and aligning.
         val smalls = frames.map { bytes ->
-            val bmp = PortraitProcessor.decode(bytes)
+            val bmp = PortraitProcessor.decode(bytes, side)
             val s = Gray.of(bmp, ALIGN_SCALE)
             bmp.recycle()
             s
         }
         val refIndex = smalls.indices.maxByOrNull { smalls[it].sharpness() } ?: 0
-        val ref = PortraitProcessor.decode(frames[refIndex])
-        val w = ref.width
-        val h = ref.height
+        val refBmp = PortraitProcessor.decode(frames[refIndex], side)
+        val w = refBmp.width
+        val h = refBmp.height
         val n = w * h
         val refPx = IntArray(n)
-        ref.getPixels(refPx, 0, w, 0, 0, w, h)
-        val beforePx = if (hdr) Hdr.naiveBrighten(refPx, hdrStops) else null
+        refBmp.getPixels(refPx, 0, w, 0, 0, w, h)
+        refBmp.recycle() // memory: only the pixel array is kept while merging
+        // HDR "before" (what a normal photo would have looked like), encoded now so it isn't held.
+        val before = if (hdr) encode(Hdr.naiveBrighten(refPx, hdrStops), w, h, 90) else null
 
-        // Accumulators: weights are 0..256 per frame, so Int sums can't overflow for <= 16 frames.
-        val sumR = IntArray(n)
-        val sumG = IntArray(n)
-        val sumB = IntArray(n)
-        val sumW = IntArray(n)
+        // Accumulators, 16 bits each to halve memory: weights are 0..16 per frame, so sums stay
+        // below 255 × 16 × 16 = 65280 for up to 16 frames (read back as unsigned).
+        var sumR: ShortArray? = ShortArray(n)
+        var sumG: ShortArray? = ShortArray(n)
+        var sumB: ShortArray? = ShortArray(n)
+        val sumW = ShortArray(n)
         // Silky: also track per-pixel brightness variance to find the moving areas.
         val sumL = if (silky) IntArray(n) else null
         val sumSq = if (silky) IntArray(n) else null
-        accumulate(refPx, refPx, w, h, 0, 0, 0, sumR, sumG, sumB, sumW, isReference = true, sumL = sumL, sumSq = sumSq)
+        accumulate(refPx, refPx, w, h, 0, 0, 0, sumR!!, sumG!!, sumB!!, sumW, isReference = true, sumL = sumL, sumSq = sumSq)
 
         var merged = 1
-        val framePx = IntArray(n)
+        var framePx: IntArray? = IntArray(n)
         for (i in frames.indices) {
             if (i == refIndex) continue
             try {
                 val coarse = align(smalls[refIndex], smalls[i])
-                val bmp = PortraitProcessor.decode(frames[i])
+                val bmp = PortraitProcessor.decode(frames[i], side)
                 if (bmp.width != w || bmp.height != h) {
                     bmp.recycle()
                     continue
                 }
-                bmp.getPixels(framePx, 0, w, 0, 0, w, h)
+                val fp = framePx!!
+                bmp.getPixels(fp, 0, w, 0, 0, w, h)
                 bmp.recycle()
-                val (dx, dy) = refine(refPx, framePx, w, h, coarse.first, coarse.second)
-                val t = if (silky) 255 else motionThreshold(refPx, framePx, w, h, dx, dy)
+                val (dx, dy) = refine(refPx, fp, w, h, coarse.first, coarse.second)
+                val t = if (silky) 255 else motionThreshold(refPx, fp, w, h, dx, dy)
                 Log.i(TAG, "frame $i offset ($dx, $dy), motion threshold $t")
-                accumulate(refPx, framePx, w, h, dx, dy, t, sumR, sumG, sumB, sumW, isReference = false, sumL = sumL, sumSq = sumSq)
+                accumulate(refPx, fp, w, h, dx, dy, t, sumR!!, sumG!!, sumB!!, sumW, isReference = false, sumL = sumL, sumSq = sumSq)
                 merged++
             } catch (e: Exception) {
                 Log.w(TAG, "frame $i skipped", e)
             }
         }
+        framePx = null
 
         // Average (+ shadow lift for Night).
         val curve = if (silky || hdr) IDENTITY else LIFT
+        val sr = sumR!!
+        val sg = sumG!!
+        val sb = sumB!!
         for (i in 0 until n) {
-            val wt = sumW[i]
-            val r = curve[(sumR[i] / wt).coerceIn(0, 255)]
-            val g = curve[(sumG[i] / wt).coerceIn(0, 255)]
-            val b = curve[(sumB[i] / wt).coerceIn(0, 255)]
+            val wt = sumW[i].toInt() and 0xFFFF
+            val r = curve[((sr[i].toInt() and 0xFFFF) / wt).coerceIn(0, 255)]
+            val g = curve[((sg[i].toInt() and 0xFFFF) / wt).coerceIn(0, 255)]
+            val b = curve[((sb[i].toInt() and 0xFFFF) / wt).coerceIn(0, 255)]
             refPx[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
         }
+        sumR = null
+        sumG = null
+        sumB = null
         if (hdr) {
             // Brighten the dark areas back up; keep the protected highlights.
             Hdr.toneMap(refPx, w, h, hdrStops)
         }
+        val ref = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         ref.setPixels(refPx, 0, w, 0, 0, w, h)
         if (silky && sumL != null && sumSq != null) smoothMotion(ref, sumL, sumSq, sumW)
         val out = ByteArrayOutputStream(frames[refIndex].size)
         ref.compress(Bitmap.CompressFormat.JPEG, quality.coerceIn(50, 100), out)
         ref.recycle()
-        Log.i(TAG, "merged $merged of ${frames.size} frames at ISO $iso, reference $refIndex")
-        val before = beforePx?.let { px ->
-            val b = Bitmap.createBitmap(px, w, h, Bitmap.Config.ARGB_8888)
-            ByteArrayOutputStream().also { o -> b.compress(Bitmap.CompressFormat.JPEG, 90, o); b.recycle() }.toByteArray()
-        }
+        Log.i(TAG, "merged $merged of ${frames.size} frames at ISO $iso, reference $refIndex, ${w}x$h")
         return Result(out.toByteArray(), merged, refIndex, before)
+    }
+
+    private fun encode(px: IntArray, w: Int, h: Int, quality: Int): ByteArray {
+        val b = Bitmap.createBitmap(px, w, h, Bitmap.Config.ARGB_8888)
+        return ByteArrayOutputStream().also { o -> b.compress(Bitmap.CompressFormat.JPEG, quality, o); b.recycle() }.toByteArray()
     }
 
     /** A small greyscale image used for alignment. */
@@ -246,7 +273,7 @@ class NightProcessor {
          */
         fun accumulate(
             refPx: IntArray, framePx: IntArray, w: Int, h: Int, dx: Int, dy: Int, t: Int,
-            sumR: IntArray, sumG: IntArray, sumB: IntArray, sumW: IntArray, isReference: Boolean,
+            sumR: ShortArray, sumG: ShortArray, sumB: ShortArray, sumW: ShortArray, isReference: Boolean,
             sumL: IntArray? = null, sumSq: IntArray? = null,
         ) {
             for (y in 0 until h) {
@@ -256,10 +283,10 @@ class NightProcessor {
                     val i = y * w + x
                     if (isReference) {
                         val p = refPx[i]
-                        sumR[i] += ((p shr 16) and 0xFF) * 256
-                        sumG[i] += ((p shr 8) and 0xFF) * 256
-                        sumB[i] += (p and 0xFF) * 256
-                        sumW[i] += 256
+                        sumR[i] = (sumR[i] + ((p shr 16) and 0xFF) * FULL).toShort()
+                        sumG[i] = (sumG[i] + ((p shr 8) and 0xFF) * FULL).toShort()
+                        sumB[i] = (sumB[i] + (p and 0xFF) * FULL).toShort()
+                        sumW[i] = (sumW[i] + FULL).toShort()
                         if (sumL != null && sumSq != null) {
                             val l = luma(p)
                             sumL[i] += l
@@ -273,15 +300,16 @@ class NightProcessor {
                     val p = framePx[fy * w + fx]
                     val d = abs(luma(p) - luma(refPx[i]))
                     val wt = when {
-                        d <= t -> 256
+                        d <= t -> FULL
                         d >= 3 * t -> 0
-                        else -> 256 * (3 * t - d) / (2 * t)
+                        else -> FULL * (3 * t - d) / (2 * t)
                     }
                     if (wt == 0) continue
-                    sumR[i] += ((p shr 16) and 0xFF) * wt
-                    sumG[i] += ((p shr 8) and 0xFF) * wt
-                    sumB[i] += (p and 0xFF) * wt
-                    sumW[i] += wt
+                    // Unsigned 16-bit sums: add to the unsigned value, store the low 16 bits.
+                    sumR[i] = ((sumR[i].toInt() and 0xFFFF) + ((p shr 16) and 0xFF) * wt).toShort()
+                    sumG[i] = ((sumG[i].toInt() and 0xFFFF) + ((p shr 8) and 0xFF) * wt).toShort()
+                    sumB[i] = ((sumB[i].toInt() and 0xFFFF) + (p and 0xFF) * wt).toShort()
+                    sumW[i] = (sumW[i] + wt).toShort()
                     if (sumL != null && sumSq != null) {
                         val l = luma(p)
                         sumL[i] += l
@@ -296,10 +324,12 @@ class NightProcessor {
          * frames disagreed (high variance = motion), blend in a softly blurred copy so the streaks
          * become smooth like a real long exposure; still areas stay untouched and sharp.
          */
-        fun smoothMotion(img: Bitmap, sumL: IntArray, sumSq: IntArray, sumW: IntArray) {
+        fun smoothMotion(img: Bitmap, sumL: IntArray, sumSq: IntArray, sumW: ShortArray) {
             val w = img.width
             val h = img.height
-            val small = PortraitProcessor.shrink(img, max(1, w / MOTION_BLUR_SCALE), max(1, h / MOTION_BLUR_SCALE))
+            // Same look at any resolution: the soft copy and motion cells are ~190 px across.
+            val scale = max(MOTION_BLUR_SCALE, (max(w, h) + 95) / 190)
+            val small = PortraitProcessor.shrink(img, max(1, w / scale), max(1, h / scale))
             // Soften the small copy further (≈3 small pixels): enough to merge the steps of fast
             // motion into one even streak; only used where things moved.
             val sw = small.width
@@ -320,15 +350,15 @@ class NightProcessor {
             soft.recycle()
             // Where did things move? Decided per coarse cell (and spread to neighbours), so the
             // still gaps between the "steps" of a moving object get smoothed too.
-            val cw = max(1, w / MOTION_BLUR_SCALE)
-            val ch = max(1, h / MOTION_BLUR_SCALE)
+            val cw = max(1, w / scale)
+            val ch = max(1, h / scale)
             val cellVar = FloatArray(cw * ch)
             val cellN = IntArray(cw * ch)
             for (y in 0 until h) {
                 val cy = min(ch - 1, y * ch / h)
                 for (x in 0 until w) {
                     val i = y * w + x
-                    val count = sumW[i] / 256
+                    val count = sumW[i] / FULL
                     if (count < 2) continue
                     val mean = sumL[i].toFloat() / count
                     val c = cy * cw + min(cw - 1, x * cw / w)
@@ -376,6 +406,12 @@ class NightProcessor {
 
         /** Motion smoothing: blur scale, and the variance range (levels²) that fades it in. */
         private const val MOTION_BLUR_SCALE = 16
+        /** A frame's full weight in the sums (so 16 frames still fit in 16 bits). */
+        private const val FULL = 16
+        /** Working memory per pixel: reference + frame + decoded frame (4 B each) + 16-bit sums (8 B). */
+        private const val BYTES_PER_PIXEL = 22
+        /** Silky: + brightness and variance sums (8 B). */
+        private const val BYTES_PER_PIXEL_SILKY = 30
         /** Mean variance per cell: a cell with a moving object averages a few hundred levels². */
         private const val CELL_VAR_LOW = 40f
         private const val CELL_VAR_HIGH = 250f

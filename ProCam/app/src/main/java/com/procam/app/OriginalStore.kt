@@ -4,13 +4,12 @@ import android.content.Context
 import java.io.File
 
 /**
- * Keeps the original (unprocessed) photo behind each enhanced one — Portrait, Night, Silky,
+ * Keeps the original (unprocessed) photo behind each enhanced one — Portrait, Night, Silky, HDR,
  * Super zoom — privately inside the app, so the review screen can show before/after and redo a
- * portrait's blur. Only the most recent ones are kept, to bound storage.
+ * portrait's blur. The oldest are removed once they take more than the space chosen in Settings.
  */
 object OriginalStore {
     private const val DIR = "originals"
-    private const val KEEP = 30
 
     private fun dir(context: Context) = File(context.filesDir, DIR).apply { mkdirs() }
 
@@ -18,7 +17,7 @@ object OriginalStore {
     fun save(context: Context, displayName: String, jpeg: ByteArray) {
         try {
             File(dir(context), displayName).writeBytes(jpeg)
-            prune(context)
+            prune(dir(context), Prefs(context).originalsMb * 1_000_000L)
         } catch (_: Exception) {
         }
     }
@@ -30,8 +29,26 @@ object OriginalStore {
         File(dir(context), displayName).delete()
     }
 
-    private fun prune(context: Context) {
-        val files = dir(context).listFiles()?.sortedByDescending { it.lastModified() } ?: return
-        files.drop(KEEP).forEach { it.delete() }
+    /** Bytes used by the kept originals. */
+    fun usedBytes(context: Context): Long = dir(context).listFiles()?.sumOf { it.length() } ?: 0L
+
+    fun count(context: Context): Int = dir(context).listFiles()?.size ?: 0
+
+    /** Removes all kept originals (the enhanced photos stay; they just lose before/after). */
+    fun clear(context: Context) {
+        dir(context).listFiles()?.forEach { it.delete() }
+    }
+
+    /** Applies a new limit right away (e.g. after it was lowered in Settings). */
+    fun trim(context: Context) = prune(dir(context), Prefs(context).originalsMb * 1_000_000L)
+
+    /** Deletes the oldest files until the rest fit in [maxBytes] (the newest is always kept). */
+    fun prune(dir: File, maxBytes: Long) {
+        val files = dir.listFiles()?.sortedByDescending { it.lastModified() } ?: return
+        var total = 0L
+        files.forEachIndexed { i, f ->
+            total += f.length()
+            if (i > 0 && total > maxBytes) f.delete()
+        }
     }
 }

@@ -32,8 +32,18 @@ class PortraitProcessor {
      * Turns a captured JPEG into a portrait. Blocking: call off the main thread.
      * @param strength 0 = soft, 1 = medium, 2 = strong.
      */
-    fun process(jpeg: ByteArray, strength: Int, quality: Int): Result {
-        val full = decode(jpeg)
+    fun process(jpeg: ByteArray, strength: Int, quality: Int): Result = try {
+        render(jpeg, strength, quality, Budget.sideFor(jpeg, BYTES_PER_PIXEL))
+    } catch (e: OutOfMemoryError) {
+        // Memory was tighter than it looked: try again at the safe size.
+        Log.w(TAG, "out of memory at full size, retrying at ${Budget.FLOOR}")
+        System.gc()
+        render(jpeg, strength, quality, Budget.FLOOR)
+    }
+
+    private fun render(jpeg: ByteArray, strength: Int, quality: Int, maxSide: Int): Result {
+        val full = decode(jpeg, maxSide)
+        Log.i(TAG, "portrait at ${full.width}x${full.height}")
         try {
             val mask = segment(full) ?: return Result(null, false)
             renderPortrait(full, mask, strength)
@@ -87,7 +97,8 @@ class PortraitProcessor {
 
     companion object {
         private const val TAG = "Portrait"
-        private const val MAX_SIDE = 3000
+        /** Working memory per pixel: the photo, its blurred copy and the JPEG being written. */
+        private const val BYTES_PER_PIXEL = 12
         private const val SEGMENT_SIDE = 512
         private const val BLUR_SCALE = 8
         private const val MIN_PERSON_FRACTION = 0.03f
@@ -101,8 +112,11 @@ class PortraitProcessor {
         fun renderPortrait(full: Bitmap, mask: Mask, strength: Int) {
             val w = full.width
             val h = full.height
-            val sw = max(1, w / BLUR_SCALE)
-            val sh = max(1, h / BLUR_SCALE)
+            // The blur is computed on a small copy ~375 px across, whatever the photo's resolution,
+            // so it looks the same at 12 MP and 50 MP.
+            val scale = max(BLUR_SCALE, (max(w, h) + 187) / 375)
+            val sw = max(1, w / scale)
+            val sh = max(1, h / scale)
             val small = shrink(full, sw, sh)
             val px = IntArray(sw * sh)
             small.getPixels(px, 0, sw, 0, 0, sw, sh)
@@ -217,14 +231,14 @@ class PortraitProcessor {
             return t * t * (3 - 2 * t)
         }
 
-        /** Decodes with EXIF rotation applied (so the result is upright), capped at ~3000 px. */
-        fun decode(jpeg: ByteArray): Bitmap =
+        /** Decodes with EXIF rotation applied (so the result is upright), at most [maxSide] px. */
+        fun decode(jpeg: ByteArray, maxSide: Int = Budget.FLOOR): Bitmap =
             ImageDecoder.decodeBitmap(ImageDecoder.createSource(ByteBuffer.wrap(jpeg))) { decoder, info, _ ->
                 decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
                 decoder.isMutableRequired = true
                 val longest = max(info.size.width, info.size.height)
-                if (longest > MAX_SIDE) {
-                    val s = MAX_SIDE.toFloat() / longest
+                if (longest > maxSide) {
+                    val s = maxSide.toFloat() / longest
                     decoder.setTargetSize((info.size.width * s).roundToInt(), (info.size.height * s).roundToInt())
                 }
             }

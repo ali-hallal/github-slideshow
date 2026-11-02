@@ -874,6 +874,55 @@ class ProCamTest {
         latestVideo()?.let { context.contentResolver.delete(it, null, null) }
     }
 
+    @Test
+    fun memoryBudgetPicksProcessingSize() {
+        val gb = 1_000_000_000L
+        assertEquals("12 MP fits with 1 GB", 4000, Budget.maxSide(4000, 3000, 32, available = gb))
+        val big = Budget.maxSide(8160, 6120, 32, available = gb)
+        assertTrue("50 MP scaled to fit: $big", big in 5000..5800)
+        assertEquals("never below the old size", 3000, Budget.maxSide(4000, 3000, 32, available = 200_000_000L))
+        assertEquals("small photos untouched", 2000, Budget.maxSide(2000, 1500, 32, available = 100_000_000L))
+    }
+
+    @Test
+    fun originalsStayWithinTheirSpace() {
+        val dir = java.io.File(context.cacheDir, "prune-test").apply { deleteRecursively(); mkdirs() }
+        val now = System.currentTimeMillis()
+        for (k in 0 until 5) java.io.File(dir, "p$k.jpg").apply { writeBytes(ByteArray(1_000_000)); setLastModified(now - (5 - k) * 60_000L) }
+        OriginalStore.prune(dir, 2_500_000L)
+        assertEquals("newest two kept", listOf("p3.jpg", "p4.jpg"), dir.list()!!.sorted())
+        OriginalStore.prune(dir, 10L)
+        assertEquals("the newest is always kept", listOf("p4.jpg"), dir.list()!!.toList())
+        dir.deleteRecursively()
+    }
+
+    @Test
+    fun nightMergesAtFullResolution() {
+        // A 12 MP burst (4000x3000) is merged at full size when the phone has the memory.
+        val w = 4000
+        val h = 3000
+        val frames = (0 until 3).map { k ->
+            val rnd = java.util.Random(k.toLong())
+            val px = IntArray(w * h) { i ->
+                val x = i % w
+                val y = i / w
+                val v = ((if ((x / 40 + y / 40) % 2 == 0) 70 else 170) + rnd.nextGaussian() * 12).toInt().coerceIn(0, 255)
+                (0xFF shl 24) or (v shl 16) or (v shl 8) or v
+            }
+            val bmp = android.graphics.Bitmap.createBitmap(px, w, h, android.graphics.Bitmap.Config.ARGB_8888)
+            java.io.ByteArrayOutputStream().also { bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, it); bmp.recycle() }.toByteArray()
+        }
+        val expected = Budget.sideFor(frames[0], 32)
+        val t0 = SystemClock.uptimeMillis()
+        val result = NightProcessor().process(frames, iso = 800, quality = 90)
+        val (ow, oh) = Budget.size(result.jpeg)
+        Log.i(TAG, "full-res night: ${ow}x$oh (budget side $expected, heap ${Runtime.getRuntime().maxMemory() / 1_000_000} MB) " +
+            "in ${SystemClock.uptimeMillis() - t0} ms, merged ${result.merged}")
+        assertEquals(3, result.merged)
+        assertTrue("at least the old size", maxOf(ow, oh) >= 3000)
+        if (Runtime.getRuntime().maxMemory() >= 500_000_000L) assertEquals("full 12 MP", 4000, maxOf(ow, oh))
+    }
+
     // ------------------------------------------------------------------ helpers
 
     /** Switches between Simple and Pro with the top-bar button. */
