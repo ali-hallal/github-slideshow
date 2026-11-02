@@ -445,6 +445,7 @@ class CameraController(context: Context, private val listener: Listener) {
         texture.setDefaultBufferSize(previewSize.width, previewSize.height)
         previewSurface = Surface(texture)
         videoRecorder = VideoRecorder(appContext, size, fps)
+        videoSize = size
         Log.i(TAG, "video: ${size.width}x${size.height} @$fps preview=$previewSize stabilization=$videoStabMode ois=${cp.ois}")
         main.post { listener.onCameraOpened(cp, previewSize) }
         if (!openLock.tryAcquire(2500, TimeUnit.MILLISECONDS)) throw IllegalStateException("Timed out waiting to open camera")
@@ -504,7 +505,9 @@ class CameraController(context: Context, private val listener: Listener) {
         handler?.post { finishRecording() }
     }
 
-    val isVideo get() = output.video
+    /** Size the open camera records video at (null when open for photos). */
+    @Volatile var videoSize: Size? = null
+        private set
 
     private fun finishRecording() {
         val rec = videoRecorder ?: return
@@ -542,6 +545,7 @@ class CameraController(context: Context, private val listener: Listener) {
         rawReader = null
         videoRecorder?.release()
         videoRecorder = null
+        videoSize = null
         previewSurface?.release()
         previewSurface = null
         state = State.PREVIEW

@@ -727,7 +727,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             "PORTRAIT" -> ""
             "NIGHT" -> "Merges several shots for brighter, cleaner low-light photos · hold still about 1 s"
             "FREEZE" -> "Sharp action: kids, pets, sports · catches the moment even if you press a little late"
-            "VIDEO" -> "Tap the red button to start and stop · " + (if (prefs.video4k) "4K" else "1080p") +
+            "VIDEO" -> "Tap the red button to start and stop · " + videoLabel() +
                 (if (prefs.stabilize) ", stabilized" else "")
             else -> "Finds faces and sets everything for you"
         }
@@ -1218,6 +1218,13 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         caps = null
         readout.text = ""
         startCamera()
+    }
+
+    /** "4K", "1080p", "720p": what this camera actually records (the setting is a maximum). */
+    private fun videoLabel(): String {
+        val size = camera.videoSize ?: return if (prefs.video4k) "up to 4K" else "1080p"
+        val lines = minOf(size.width, size.height)
+        return if (lines >= 2160) "4K" else "${lines}p"
     }
 
     private fun hasAudioPermission() =

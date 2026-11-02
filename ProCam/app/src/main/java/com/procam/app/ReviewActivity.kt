@@ -316,7 +316,10 @@ class ReviewActivity : Activity() {
             if (w != null && h != null) parts += "${w}×${h}"
             release()
         }
-        contentResolver.openFileDescriptor(p.uri, "r")?.use { parts += "${(it.statSize + 500_000) / 1_000_000} MB" }
+        contentResolver.openFileDescriptor(p.uri, "r")?.use {
+            val mb = it.statSize / 1e6
+            parts += if (mb < 10) String.format(Locale.US, "%.1f MB", mb) else "${mb.toInt()} MB"
+        }
         parts.joinToString(" · ")
     } catch (e: Exception) {
         VideoRecorder.durationLabel(p.durationMs)
