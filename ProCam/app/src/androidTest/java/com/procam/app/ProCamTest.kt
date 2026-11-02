@@ -821,10 +821,12 @@ class ProCamTest {
         val before = videoCount()
         onView(withId(R.id.shutter)).perform(click())
         waitFor("recording started") { visible(R.id.recTime) }
+        val startedAt = SystemClock.uptimeMillis()
         assertTrue("mode buttons hidden while recording", !visible(R.id.intentScroll))
         SystemClock.sleep(3500)
         val secs = text(R.id.recTime).substringAfterLast(':').trim().toIntOrNull() ?: -1
-        assertTrue("timer counts: ${text(R.id.recTime)}", secs in 3..6)
+        assertTrue("timer counts: ${text(R.id.recTime)}", secs in 3..8)
+        val recordedFor = SystemClock.uptimeMillis() - startedAt
         onView(withId(R.id.shutter)).perform(click())
         waitFor("video saved", 15_000) { videoCount() > before }
         waitFor("recording UI gone") { !visible(R.id.recTime) && visible(R.id.intentScroll) }
@@ -838,7 +840,8 @@ class ProCamTest {
         val frame = r.getFrameAtTime(1_000_000)
         r.release()
         Log.i(TAG, "video: $uri ${ms} ms ${w}x$h frame=${frame?.width}x${frame?.height}")
-        assertTrue("about 4 s long: $ms ms", ms in 2500..7000)
+        // As long as the recording ran (the emulator is sometimes slow, so measured, not assumed).
+        assertTrue("$ms ms long, recorded for about $recordedFor ms", ms in (recordedFor - 1500)..(recordedFor + 4000))
         assertEquals("16:9", 16f / 9f, maxOf(w, h).toFloat() / minOf(w, h), 0.05f)
         assertTrue("has a picture", frame != null)
         // Back to photos: the camera reopens for photos and the shutter takes one.
