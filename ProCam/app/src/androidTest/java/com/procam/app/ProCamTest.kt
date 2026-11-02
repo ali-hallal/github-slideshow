@@ -211,7 +211,7 @@ class ProCamTest {
         waitForCamera()
         onView(withId(R.id.btnSettings)).perform(click())
         onView(withText("Settings")).check(matches(isDisplayed()))
-        onView(withText("Grid")).perform(click())
+        onView(withText("Grid")).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
         assertTrue("grid saved as off", !Prefs(context).grid)
         Espresso.pressBack()
         waitForCamera()
