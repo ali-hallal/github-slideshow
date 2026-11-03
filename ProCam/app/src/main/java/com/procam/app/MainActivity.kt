@@ -634,7 +634,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     mainHandler.removeCallbacks(holdForVideo)
-                    if (!videoMode) mainHandler.postDelayed(holdForVideo, QUICK_VIDEO_HOLD_MS)
+                    if (!videoMode && prefs.holdForVideo) mainHandler.postDelayed(holdForVideo, QUICK_VIDEO_HOLD_MS)
                     false
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {

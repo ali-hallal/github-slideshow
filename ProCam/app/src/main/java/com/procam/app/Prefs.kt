@@ -21,6 +21,11 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("video", false)
         set(v) = sp.edit().putBoolean("video", v).apply()
 
+    /** Holding the shutter in photo mode records a quick video. */
+    var holdForVideo: Boolean
+        get() = sp.getBoolean("holdForVideo", true)
+        set(v) = sp.edit().putBoolean("holdForVideo", v).apply()
+
     /** Chosen look (filter) id, see [Looks]. */
     var look: String
         get() = sp.getString("look", Looks.NATURAL) ?: Looks.NATURAL

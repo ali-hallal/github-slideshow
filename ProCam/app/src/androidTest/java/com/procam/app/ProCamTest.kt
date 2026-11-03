@@ -953,6 +953,7 @@ class ProCamTest {
     fun holdShutterRecordsQuickVideo() {
         waitForCamera()
         setSimple(true)
+        Prefs(context).holdForVideo = true
         val before = videoCount()
         val r = screenRect(R.id.shutter)
         val inst = InstrumentationRegistry.getInstrumentation()
