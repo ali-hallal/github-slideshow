@@ -959,7 +959,7 @@ class ProCamTest {
         val t = SystemClock.uptimeMillis()
         inst.sendPointerSync(MotionEvent.obtain(t, t, MotionEvent.ACTION_DOWN, r.exactCenterX(), r.exactCenterY(), 0))
         try {
-            waitFor("quick video recording", 15_000) { visible(R.id.recTime) }
+            waitFor("quick video recording", 25_000) { visible(R.id.recTime) }
             SystemClock.sleep(2500)
         } finally {
             val u = SystemClock.uptimeMillis()

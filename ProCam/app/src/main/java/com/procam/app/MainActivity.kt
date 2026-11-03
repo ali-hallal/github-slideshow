@@ -628,17 +628,27 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         })
 
         shutter.setOnClickListener { onShutterPressed() }
-        // Hold the shutter in photo mode to record a quick video; let go to stop.
-        shutter.setOnLongClickListener {
-            if (videoMode || recording || capturing || caps == null || groupWaiting || countdownRemaining > 0) return@setOnLongClickListener false
-            startQuickVideo()
-            true
-        }
-        shutter.setOnTouchListener { _, e ->
-            if ((e.actionMasked == MotionEvent.ACTION_UP || e.actionMasked == MotionEvent.ACTION_CANCEL) && quickVideo) {
-                endQuickVideo()
+        // Hold the shutter in photo mode (a deliberate 0.8 s, so a slow tap stays a photo) to record
+        // a quick video; let go to stop.
+        shutter.setOnTouchListener { v, e ->
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    mainHandler.removeCallbacks(holdForVideo)
+                    if (!videoMode) mainHandler.postDelayed(holdForVideo, QUICK_VIDEO_HOLD_MS)
+                    false
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    mainHandler.removeCallbacks(holdForVideo)
+                    if (quickVideo) {
+                        v.isPressed = false
+                        endQuickVideo()
+                        true // not a photo tap
+                    } else {
+                        false
+                    }
+                }
+                else -> quickVideo
             }
-            false
         }
         thumbnail.setOnClickListener { openLastPhoto() }
         btnSwitch.setOnClickListener {
@@ -718,7 +728,11 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         show(sliderLabel, pro)
         show(slider, pro)
         show(chipScroll, pro)
-        show(modeRow, pro)
+        // The mode row holds AUTO | MANUAL (Pro only) and the PHOTO | VIDEO switch (always).
+        show(modeRow, true)
+        show(modeAuto, pro)
+        show(modePro, pro)
+        (captureSwitch.layoutParams as LinearLayout.LayoutParams).marginStart = if (pro) (12 * resources.displayMetrics.density).toInt() else 0
         show(infoRow, pro)
         show(btnRaw, pro)
         show(btnZebra, pro)
@@ -1326,6 +1340,11 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     /** Shutter held in photo mode: switch to video, record while held, come back to photos. */
+    private val holdForVideo = Runnable {
+        if (videoMode || recording || capturing || caps == null || groupWaiting || countdownRemaining > 0 || !shutter.isPressed) return@Runnable
+        startQuickVideo()
+    }
+
     private fun startQuickVideo() {
         quickVideo = true
         quickVideoReleased = false
@@ -2383,6 +2402,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         private const val TAG = "ProCam"
         private const val REQUEST_CAMERA = 1
         private const val REQUEST_AUDIO = 3
+        private const val QUICK_VIDEO_HOLD_MS = 800L
         private const val GROUP_BURST = 3
         private const val GROUP_ANALYSIS_WIDTH = 480
         private const val READY_FRAMES = 2

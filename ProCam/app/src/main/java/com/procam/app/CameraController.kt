@@ -270,6 +270,7 @@ class CameraController(context: Context, private val listener: Listener) {
         val t = thread ?: return
         val h = handler
         val locked = try {
+            // On the main thread: never wait long (an unresponsive app would be closed by Android).
             openLock.tryAcquire(2500, TimeUnit.MILLISECONDS)
         } catch (e: InterruptedException) {
             false
@@ -408,7 +409,7 @@ class CameraController(context: Context, private val listener: Listener) {
 
             main.post { listener.onCameraOpened(cp, previewSize) }
 
-            if (!openLock.tryAcquire(2500, TimeUnit.MILLISECONDS)) {
+            if (!openLock.tryAcquire(OPEN_WAIT_MS, TimeUnit.MILLISECONDS)) {
                 throw IllegalStateException("Timed out waiting to open camera")
             }
             opening = true
@@ -448,7 +449,7 @@ class CameraController(context: Context, private val listener: Listener) {
         videoSize = size
         Log.i(TAG, "video: ${size.width}x${size.height} @$fps preview=$previewSize stabilization=$videoStabMode ois=${cp.ois}")
         main.post { listener.onCameraOpened(cp, previewSize) }
-        if (!openLock.tryAcquire(2500, TimeUnit.MILLISECONDS)) throw IllegalStateException("Timed out waiting to open camera")
+        if (!openLock.tryAcquire(OPEN_WAIT_MS, TimeUnit.MILLISECONDS)) throw IllegalStateException("Timed out waiting to open camera")
         opening = true
         try {
             manager.openCamera(cameraId, deviceCallback, handler)
@@ -1254,6 +1255,8 @@ class CameraController(context: Context, private val listener: Listener) {
         private const val FAST_MAX_W = 1920
         private const val FAST_MAX_H = 1440
         private const val VIDEO_FPS = 30
+        /** How long to wait for a previous open/close (slow phones take a few seconds). */
+        private const val OPEN_WAIT_MS = 6000L
 
         /**
          * Centre 1/[crop] of a YUV_420_888 image as ARGB pixels (BT.601 full range, as used by
