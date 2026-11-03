@@ -470,6 +470,10 @@ class CameraController(context: Context, private val listener: Listener) {
                 Log.i(TAG, "session: video")
                 state = State.PREVIEW
                 updateRepeating()
+                pendingRecording?.let { (orientation, audio) ->
+                    pendingRecording = null
+                    startRecording(orientation, audio)
+                }
             }
 
             override fun onConfigureFailed(s: CameraCaptureSession) = postError("This camera can't record video here")
@@ -490,7 +494,15 @@ class CameraController(context: Context, private val listener: Listener) {
         handler?.post {
             val rec = videoRecorder
             val c = caps
-            if (rec == null || c == null || session == null || rec.recording) return@post
+            if (rec != null && c != null && session == null) {
+                // The camera is still setting up (e.g. just switched to video): start once it's ready.
+                pendingRecording = deviceOrientation to audio
+                return@post
+            }
+            if (rec == null || c == null || rec.recording) {
+                main.post { listener.onRecordingStopped(null) }
+                return@post
+            }
             val ok = rec.start(jpegOrientation(c, deviceOrientation), audio, location)
             if (!ok) {
                 postError("Couldn't start recording")
@@ -503,8 +515,17 @@ class CameraController(context: Context, private val listener: Listener) {
     }
 
     fun stopRecording() {
-        handler?.post { finishRecording() }
+        handler?.post {
+            if (pendingRecording != null) {
+                // Stopped before it could start.
+                pendingRecording = null
+                main.post { listener.onRecordingStopped(null) }
+            }
+            finishRecording()
+        }
     }
+
+    private var pendingRecording: Pair<Int, Boolean>? = null
 
     /** Size the open camera records video at (null when open for photos). */
     @Volatile var videoSize: Size? = null
@@ -521,6 +542,10 @@ class CameraController(context: Context, private val listener: Listener) {
 
     private fun closeInternal() {
         // Leaving the app while recording keeps what was recorded so far.
+        if (pendingRecording != null) {
+            pendingRecording = null
+            main.post { listener.onRecordingStopped(null) }
+        }
         finishRecording()
         try {
             session?.close()

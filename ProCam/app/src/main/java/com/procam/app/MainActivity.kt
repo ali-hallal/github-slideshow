@@ -1355,8 +1355,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
 
     private fun endQuickVideo() {
         quickVideoReleased = true
-        if (recording) camera.stopRecording()
-        else if (!videoStarting) finishQuickVideo() // released before recording began
+        when {
+            recording || videoStarting -> camera.stopRecording() // also cancels a start still waiting for the camera
+            else -> finishQuickVideo() // released before the camera even switched
+        }
     }
 
     private fun finishQuickVideo() {
