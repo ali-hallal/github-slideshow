@@ -264,6 +264,9 @@ class ReviewActivity : Activity() {
             val details = exifLine(p.uri)
             main.post {
                 if (token != loadToken) return@post
+                if (after != null && before != null &&
+                    kotlin.math.abs(after.width.toFloat() / after.height - before.width.toFloat() / before.height) > 0.01f
+                ) Log.w(TAG, "before/after shapes differ for ${p.name}: ${after.width}x${after.height} vs ${before.width}x${before.height}")
                 view.after = after
                 view.before = before
                 info.text = listOfNotNull(what.ifEmpty { null }, details.ifEmpty { null }).joinToString("\n")
@@ -299,11 +302,11 @@ class ReviewActivity : Activity() {
 
     private fun sizeDecoder(d: ImageDecoder, info: ImageDecoder.ImageInfo, target: Int) {
         d.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+        // Shrink by a whole factor (same for width and height): the shape can't change, whatever
+        // the photo's orientation tag says.
         val longest = max(info.size.width, info.size.height)
-        if (longest > target) {
-            val s = target.toFloat() / longest
-            d.setTargetSize((info.size.width * s).toInt().coerceAtLeast(1), (info.size.height * s).toInt().coerceAtLeast(1))
-        }
+        val sample = (longest + target - 1) / target
+        if (sample > 1) d.setTargetSampleSize(sample)
     }
 
     /** "1:05 · 1920×1080 · 24 MB" */
@@ -330,6 +333,7 @@ class ReviewActivity : Activity() {
         contentResolver.openInputStream(uri)?.use { input ->
             val e = ExifInterface(input)
             val parts = mutableListOf<String>()
+            e.getAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION)?.takeIf { it.startsWith("Look: ") }?.let { parts += it }
             e.getAttributeInt(ExifInterface.TAG_PHOTOGRAPHIC_SENSITIVITY, 0).takeIf { it > 0 }?.let { parts += "ISO $it" }
             e.getAttributeDouble(ExifInterface.TAG_EXPOSURE_TIME, 0.0).takeIf { it > 0 }?.let { parts += "${Stops.shutterLabel((it * 1e9).toLong())} s" }
             e.getAttributeDouble(ExifInterface.TAG_F_NUMBER, 0.0).takeIf { it > 0 }?.let { parts += String.format(Locale.US, "f/%.1f", it) }

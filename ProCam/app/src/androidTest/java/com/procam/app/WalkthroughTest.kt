@@ -81,8 +81,10 @@ class WalkthroughTest {
         SystemClock.sleep(500)
         tryClick("Zoom 1×")
         SystemClock.sleep(300)
-        // Slide straight away (the slider hides itself after a few seconds; screenshots are slow).
-        onView(withId(R.id.zoomSlider)).perform(tapAt(0.8f, 0.5f))
+        // Drag the zoom dial (it hides itself after a few seconds; screenshots are slow).
+        onView(withId(R.id.zoomDial)).perform(dragAcross(0.9f, 0.1f))
+        SystemClock.sleep(200)
+        screenshot("zoom_dial")
         SystemClock.sleep(300)
         screenshot("super_zoom_preview")
         onView(withId(R.id.shutter)).perform(click())
@@ -138,7 +140,7 @@ class WalkthroughTest {
         onView(withId(R.id.intentAuto)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
 
         // Video: record a few seconds, then the review screen.
-        onView(withId(R.id.intentVideo)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
+        onView(withId(R.id.switchVideo)).perform(click())
         SystemClock.sleep(3000)
         screenshot("simple_video")
         onView(withId(R.id.shutter)).perform(click())
@@ -152,8 +154,35 @@ class WalkthroughTest {
         screenshot("review_video")
         androidx.test.espresso.Espresso.pressBack()
         SystemClock.sleep(1500)
-        onView(withId(R.id.intentAuto)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
+        onView(withId(R.id.switchPhoto)).perform(click())
         SystemClock.sleep(2500)
+
+        // Looks: the strip, a live look, the photo it gives, and the review before/after.
+        onView(withId(R.id.btnLook)).perform(click())
+        SystemClock.sleep(1200)
+        screenshot("looks_strip")
+        tryPick("Look Film")
+        SystemClock.sleep(1200)
+        screenshot("look_film_live")
+        onView(withId(R.id.shutter)).perform(click())
+        waitForIdleShutter()
+        SystemClock.sleep(4000)
+        savePhoto("photo_film")
+        tryPick("Look Retro 98")
+        SystemClock.sleep(1200)
+        screenshot("look_retro_live")
+        onView(withId(R.id.shutter)).perform(click())
+        waitForIdleShutter()
+        SystemClock.sleep(4000)
+        savePhoto("photo_retro")
+        onView(withId(R.id.thumbnail)).perform(click())
+        SystemClock.sleep(2500)
+        screenshot("review_look")
+        androidx.test.espresso.Espresso.pressBack()
+        SystemClock.sleep(1500)
+        tryPick("Look Natural")
+        onView(withId(R.id.btnLook)).perform(click())
+        SystemClock.sleep(1000)
 
         // Auto HDR (forced on here, as the emulator scene isn't backlit): badge, capture, review.
         context.getSharedPreferences("procam", android.content.Context.MODE_PRIVATE).edit().putBoolean("forceHdr", true).commit()
@@ -287,6 +316,15 @@ class WalkthroughTest {
 
     // ------------------------------------------------------------------ helpers
 
+    /** Taps a view by description, scrolling it into view first (looks strip). */
+    private fun tryPick(description: String) {
+        try {
+            onView(androidx.test.espresso.matcher.ViewMatchers.withContentDescription(description))
+                .perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
+        } catch (_: Throwable) {
+        }
+    }
+
     private fun tryClick(description: String) {
         try {
             onView(androidx.test.espresso.matcher.ViewMatchers.withContentDescription(description)).perform(click())
@@ -351,6 +389,22 @@ class WalkthroughTest {
         val end = SystemClock.uptimeMillis() + timeoutMs
         while (SystemClock.uptimeMillis() < end && !condition()) SystemClock.sleep(200)
     }
+
+    /** Drag across [v] from fraction (fx0, fy) to (fx1, fy) of its size; dxDp adds an extra offset in dp to the end point. */
+    private fun dragAcross(fx0: Float, fx1: Float, fy: Float = 0.5f, dxDp: Float = 0f) = androidx.test.espresso.action.GeneralSwipeAction(
+        androidx.test.espresso.action.Swipe.SLOW,
+        CoordinatesProvider { v: View ->
+            val xy = IntArray(2)
+            v.getLocationOnScreen(xy)
+            floatArrayOf(xy[0] + v.width * fx0, xy[1] + v.height * fy)
+        },
+        CoordinatesProvider { v: View ->
+            val xy = IntArray(2)
+            v.getLocationOnScreen(xy)
+            floatArrayOf(xy[0] + v.width * fx1 + dxDp * v.resources.displayMetrics.density, xy[1] + v.height * fy)
+        },
+        Press.FINGER,
+    )
 
     private fun tapAt(fx: Float, fy: Float) = GeneralClickAction(
         Tap.SINGLE,

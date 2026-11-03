@@ -51,6 +51,23 @@ class BeforeAfterView @JvmOverloads constructor(
         isFakeBoldText = true
     }
 
+    private val srcRect = android.graphics.Rect()
+
+    /** The centre region of [b] with the given width/height ratio. */
+    private fun cropToAspect(b: Bitmap, aspect: Float): android.graphics.Rect {
+        val ba = b.width.toFloat() / b.height
+        if (kotlin.math.abs(ba - aspect) < 0.01f) {
+            srcRect.set(0, 0, b.width, b.height)
+        } else if (ba > aspect) {
+            val w = (b.height * aspect).toInt()
+            srcRect.set((b.width - w) / 2, 0, (b.width + w) / 2, b.height)
+        } else {
+            val h = (b.width / aspect).toInt()
+            srcRect.set(0, (b.height - h) / 2, b.width, (b.height + h) / 2)
+        }
+        return srcRect
+    }
+
     override fun onDraw(canvas: Canvas) {
         val a = after ?: return
         val scale = min(width.toFloat() / a.width, height.toFloat() / a.height)
@@ -63,7 +80,8 @@ class BeforeAfterView @JvmOverloads constructor(
         val x = dst.left + split * dst.width()
         canvas.save()
         canvas.clipRect(dst.left, dst.top, x, dst.bottom)
-        canvas.drawBitmap(b, null, dst, bitmapPaint)
+        // Never stretch "before": if its shape differs from "after", show the matching centre part.
+        canvas.drawBitmap(b, cropToAspect(b, dst.width() / dst.height()), dst, bitmapPaint)
         canvas.restore()
 
         canvas.drawLine(x, dst.top, x, dst.bottom, linePaint)

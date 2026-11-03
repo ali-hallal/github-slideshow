@@ -24,6 +24,7 @@ import android.util.Log
 import android.util.Rational
 import android.util.Size
 import android.view.GestureDetector
+import android.provider.MediaStore
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
@@ -83,7 +84,12 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private lateinit var intentScroll: View
     private lateinit var intentAuto: TextView
     private lateinit var intentGroup: TextView
-    private lateinit var intentVideo: TextView
+    private lateinit var switchPhoto: TextView
+    private lateinit var switchVideo: TextView
+    private lateinit var captureSwitch: View
+    private lateinit var btnLook: TextView
+    private lateinit var lookScroll: View
+    private lateinit var lookRow: LinearLayout
     private lateinit var recTime: TextView
     private lateinit var intentHint: TextView
     private lateinit var chipScroll: View
@@ -117,9 +123,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private var stops: List<LensStop> = emptyList()
     private lateinit var zoomIndicator: TextView
     private lateinit var zoomBar: View
-    private lateinit var zoomSlider: SeekBar
-    private lateinit var zoomMin: TextView
-    private lateinit var zoomMax: TextView
+    private lateinit var zoomDial: ZoomDial
     /** Super zoom: extra crop beyond the camera's own maximum zoom (1 = none). */
     private var extraCrop = 1f
     private val superZoom = SuperZoomProcessor()
@@ -128,7 +132,16 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private var pendingEnhance = 0
     private val enhancer = java.util.concurrent.Executors.newSingleThreadExecutor()
     private var lastLocation: android.location.Location? = null
-    private var updatingZoomSlider = false
+    // Sliding on the lens buttons zooms (with the dial shown).
+    private var scrubbing = false
+    private var scrubDownX = 0f
+    // Looks (filters)
+    private var looksOpen = false
+    private val lookExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private var pendingLooks = 0
+    // Hold the shutter in photo mode = quick video.
+    private var quickVideo = false
+    private var quickVideoReleased = false
     private var cameraIndex = 0
 
     private var isoSteps = listOf(100)
@@ -180,12 +193,14 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private var lastFaceSeen = 0L
 
     private val simple get() = !prefs.uiPro
-    private val groupMode get() = simple && prefs.intent == "GROUP"
-    private val portraitMode get() = simple && prefs.intent == "PORTRAIT"
-    private val nightMode get() = simple && prefs.intent == "NIGHT"
-    private val silkyMode get() = simple && prefs.intent == "SILKY"
-    private val freezeMode get() = simple && prefs.intent == "FREEZE"
-    private val videoMode get() = simple && prefs.intent == "VIDEO"
+    /** Photo intent in effect (none while in video). */
+    private fun photoIntent(i: String) = simple && !prefs.video && prefs.intent == i
+    private val groupMode get() = photoIntent("GROUP")
+    private val portraitMode get() = photoIntent("PORTRAIT")
+    private val nightMode get() = photoIntent("NIGHT")
+    private val silkyMode get() = photoIntent("SILKY")
+    private val freezeMode get() = photoIntent("FREEZE")
+    private val videoMode get() = prefs.video
 
     // Video
     /** The camera is currently open for video (it reopens when switching between photo and video). */
@@ -222,6 +237,11 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         bindViews()
 
         prefs = Prefs(this)
+        if (prefs.intent == "VIDEO") {
+            // Video used to be one of the modes; it's now the PHOTO | VIDEO switch.
+            prefs.intent = "AUTO"
+            prefs.video = true
+        }
         settings = prefs.loadShot()
         camera = CameraController(this, this)
         cameraIds = camera.primaryCameras()
@@ -301,6 +321,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     override fun onDestroy() {
+        lookExecutor.shutdown()
         sound.release()
         groupShutter.close()
         portrait.close()
@@ -413,15 +434,18 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         countdownText = findViewById(R.id.countdown)
         zoomIndicator = findViewById(R.id.zoomIndicator)
         zoomBar = findViewById(R.id.zoomBar)
-        zoomSlider = findViewById(R.id.zoomSlider)
-        zoomMin = findViewById(R.id.zoomMin)
-        zoomMax = findViewById(R.id.zoomMax)
+        zoomDial = findViewById(R.id.zoomDial)
         infoRow = findViewById(R.id.infoRow)
         groupStatus = findViewById(R.id.groupStatus)
         intentScroll = findViewById(R.id.intentScroll)
         intentAuto = findViewById(R.id.intentAuto)
         intentGroup = findViewById(R.id.intentGroup)
-        intentVideo = findViewById(R.id.intentVideo)
+        switchPhoto = findViewById(R.id.switchPhoto)
+        switchVideo = findViewById(R.id.switchVideo)
+        captureSwitch = findViewById(R.id.captureSwitch)
+        btnLook = findViewById(R.id.btnLook)
+        lookScroll = findViewById(R.id.lookScroll)
+        lookRow = findViewById(R.id.lookRow)
         recTime = findViewById(R.id.recTime)
         intentHint = findViewById(R.id.intentHint)
         chipScroll = findViewById(R.id.chipScroll)
@@ -551,7 +575,9 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         btnMode.setOnClickListener { setUiPro(!prefs.uiPro) }
         intentAuto.setOnClickListener { setIntent("AUTO") }
         intentGroup.setOnClickListener { setIntent("GROUP") }
-        intentVideo.setOnClickListener { setIntent("VIDEO") }
+        switchPhoto.setOnClickListener { setVideo(false) }
+        switchVideo.setOnClickListener { setVideo(true) }
+        btnLook.setOnClickListener { toggleLooks() }
         intentPortrait.setOnClickListener { setIntent("PORTRAIT") }
         intentNight.setOnClickListener { setIntent("NIGHT") }
         intentSilky.setOnClickListener { setIntent("SILKY") }
@@ -583,21 +609,12 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             }
         }
 
-        zoomSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
-                if (!fromUser || updatingZoomSlider) return
-                val c = caps ?: return
-                val lo = c.zoomRange.lower
-                val hi = maxCameraZoom()
-                zoomAnimator?.cancel()
-                setZoom(lo * (hi / lo).pow(progress / 1000f))
-                if (progress % 50 == 0) haptic(seekBar, HapticFeedbackConstants.CLOCK_TICK)
-                mainHandler.removeCallbacks(hideZoomBar)
-                mainHandler.postDelayed(hideZoomBar, ZOOM_BAR_HIDE_MS)
-            }
-            override fun onStartTrackingTouch(seekBar: SeekBar) = Unit
-            override fun onStopTrackingTouch(seekBar: SeekBar) = Unit
-        })
+        zoomDial.onChange = { z ->
+            zoomAnimator?.cancel()
+            setZoom(z)
+            mainHandler.removeCallbacks(hideZoomBar)
+            mainHandler.postDelayed(hideZoomBar, ZOOM_BAR_HIDE_MS)
+        }
 
         slider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
@@ -611,6 +628,18 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         })
 
         shutter.setOnClickListener { onShutterPressed() }
+        // Hold the shutter in photo mode to record a quick video; let go to stop.
+        shutter.setOnLongClickListener {
+            if (videoMode || recording || capturing || caps == null || groupWaiting || countdownRemaining > 0) return@setOnLongClickListener false
+            startQuickVideo()
+            true
+        }
+        shutter.setOnTouchListener { _, e ->
+            if ((e.actionMasked == MotionEvent.ACTION_UP || e.actionMasked == MotionEvent.ACTION_CANCEL) && quickVideo) {
+                endQuickVideo()
+            }
+            false
+        }
         thumbnail.setOnClickListener { openLastPhoto() }
         btnSwitch.setOnClickListener {
             if (cameraIds.size < 2) return@setOnClickListener
@@ -675,7 +704,6 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         "NIGHT" -> intentNight
         "SILKY" -> intentSilky
         "FREEZE" -> intentFreeze
-        "VIDEO" -> intentVideo
         else -> intentAuto
     }
 
@@ -702,7 +730,6 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             intentAuto to (intent == "AUTO"), intentPortrait to (intent == "PORTRAIT"),
             intentNight to (intent == "NIGHT"), intentSilky to (intent == "SILKY"),
             intentFreeze to (intent == "FREEZE"), intentGroup to (intent == "GROUP"),
-            intentVideo to (intent == "VIDEO"),
         )) {
             v.setBackgroundResource(if (on) R.drawable.pill_selected_bg else R.drawable.pill_bg)
             v.setTextColor(getColor(if (on) R.color.black else R.color.white))
@@ -727,9 +754,24 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             "PORTRAIT" -> ""
             "NIGHT" -> "Merges several shots for brighter, cleaner low-light photos · hold still about 1 s"
             "FREEZE" -> "Sharp action: kids, pets, sports · catches the moment even if you press a little late"
-            "VIDEO" -> "Tap the red button to start and stop · " + videoLabel() +
-                (if (prefs.stabilize) ", stabilized" else "")
             else -> "Finds faces and sets everything for you"
+        }
+        // Video: the photo modes make way for a video tip; the looks strip replaces the modes.
+        captureSelector(videoMode)
+        if (videoMode) {
+            show(intentScroll, false)
+            show(portraitRow, false)
+            show(intentHint, !pro)
+            intentHint.text = "Tap the red button to start and stop · " + videoLabel() +
+                (if (prefs.stabilize) ", stabilized" else "")
+        }
+        show(btnLook, !videoMode)
+        setActive(btnLook, looksOpen || !Looks.byId(prefs.look).isNatural)
+        show(lookScroll, looksOpen && !videoMode && !recording)
+        if (looksOpen && !videoMode) {
+            show(intentScroll, false)
+            show(portraitRow, false)
+            show(intentHint, false)
         }
         shutter.video = videoMode
         shutter.recording = recording
@@ -739,7 +781,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             show(portraitRow, false)
         }
         // While recording: nothing that would stop or reopen the camera.
-        for (v in listOf(thumbnail, btnSwitch, btnMode, btnSettings, btnTimer)) {
+        for (v in listOf(thumbnail, btnSwitch, btnMode, btnSettings, btnTimer, captureSwitch)) {
             v.visibility = if (recording) View.INVISIBLE else View.VISIBLE
         }
     }
@@ -820,7 +862,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private fun displayZoom() = lensBase * cameraZoom()
 
     /** Super zoom is offered in Auto and Pro (the other intents already process the photo). */
-    private fun superZoomAllowed() = !simple || prefs.intent == "AUTO"
+    private fun superZoomAllowed() = !videoMode && (!simple || prefs.intent == "AUTO")
 
     private fun maxCameraZoom(): Float {
         val c = caps ?: return 1f
@@ -868,14 +910,12 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
 
     private fun updateZoomSlider() {
         val c = caps ?: return
-        val lo = c.zoomRange.lower
-        val hi = maxCameraZoom()
-        zoomMin.text = Stops.zoomLabel(lo * lensBase)
-        zoomMax.text = if (hi > c.zoomRange.upper + 0.01f) "✦ ${Stops.zoomLabel(hi * lensBase)}" else Stops.zoomLabel(hi * lensBase)
-        updatingZoomSlider = true
-        val p = if (hi > lo) ln(cameraZoom() / lo) / ln(hi / lo) else 0f
-        zoomSlider.progress = (p * 1000).roundToInt().coerceIn(0, 1000)
-        updatingZoomSlider = false
+        zoomDial.lo = c.zoomRange.lower
+        zoomDial.hi = maxCameraZoom()
+        zoomDial.hardwareMax = c.zoomRange.upper
+        zoomDial.base = lensBase
+        zoomDial.labels = stops.filter { it.cameraId == c.id }.map { it.zoom }
+        zoomDial.setValue(cameraZoom())
     }
 
     private fun zoomIndicatorText(): String =
@@ -1131,7 +1171,12 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         buildLensRow()
         applyPreviewCrop()
         updateZoomSlider()
+        applyLiveLook()
         refreshUi()
+        // Quick video: the camera has reopened for video while the shutter is held.
+        if (quickVideo && openedForVideo && !recording) {
+            if (quickVideoReleased) finishQuickVideo() else toggleRecording()
+        }
     }
 
     override fun onShutter() {
@@ -1167,6 +1212,12 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     override fun onPhotoSaved(uri: Uri, mimeType: String) {
         if (mimeType == "image/x-adobe-dng" && lastPhoto != null) return
         lastPhoto = uri
+        val look = Looks.byId(prefs.look)
+        if (mimeType == "image/jpeg" && !look.isNatural) applyLookToSaved(uri, look)
+        loadThumbnail(uri)
+    }
+
+    private fun loadThumbnail(uri: Uri) {
         Thread {
             val bmp = try {
                 contentResolver.loadThumbnail(uri, Size(200, 200), null)
@@ -1207,6 +1258,209 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         if (!groupMode && extraCrop <= 1.001f) overlay.setFaces(faces)
         if (faces.isNotEmpty()) lastFaceSeen = SystemClock.uptimeMillis()
         lastFaces = faces
+    }
+
+    // ------------------------------------------------------------------ zoom by sliding on the lens buttons
+
+    /** Slide sideways on any lens button to zoom smoothly (the dial shows); a tap still picks the lens. */
+    private val lensScrub = View.OnTouchListener { v, e ->
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                scrubDownX = e.rawX
+                scrubbing = false
+                false
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val dx = e.rawX - scrubDownX
+                if (!scrubbing && abs(dx) > android.view.ViewConfiguration.get(this).scaledTouchSlop && caps != null) {
+                    scrubbing = true
+                    v.isPressed = false
+                    v.cancelLongPress()
+                    v.parent?.requestDisallowInterceptTouchEvent(true)
+                    zoomAnimator?.cancel()
+                    showZoomBar()
+                    zoomDial.beginDrag()
+                }
+                if (scrubbing) zoomDial.dragBy(dx)
+                scrubbing
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                val was = scrubbing
+                scrubbing = false
+                if (was) {
+                    mainHandler.removeCallbacks(hideZoomBar)
+                    mainHandler.postDelayed(hideZoomBar, ZOOM_BAR_HIDE_MS)
+                }
+                was
+            }
+            else -> scrubbing
+        }
+    }
+
+    // ------------------------------------------------------------------ photo / video switch
+
+    private fun captureSelector(video: Boolean) {
+        for ((v, on) in listOf(switchPhoto to !video, switchVideo to video)) {
+            v.setBackgroundResource(if (on) R.drawable.segment_selected_bg else 0)
+            v.setTextColor(getColor(if (on) R.color.white else R.color.dim))
+        }
+    }
+
+    private fun setVideo(video: Boolean) {
+        if (video == prefs.video || recording) return
+        prefs.video = video
+        cancelGroup()
+        groupStatus.visibility = View.GONE
+        overlay.setFaces(emptyList())
+        if (video) looksOpen = false
+        if (!superZoomAllowed() && extraCrop > 1f) {
+            extraCrop = 1f
+            applyPreviewCrop()
+        }
+        updateZoomSlider()
+        haptic(if (video) switchVideo else switchPhoto, HapticFeedbackConstants.VIRTUAL_KEY)
+        applyLiveLook()
+        syncFreeze()
+        syncVideo()
+        refreshUi()
+    }
+
+    /** Shutter held in photo mode: switch to video, record while held, come back to photos. */
+    private fun startQuickVideo() {
+        quickVideo = true
+        quickVideoReleased = false
+        haptic(shutter, HapticFeedbackConstants.LONG_PRESS)
+        showGroupStatus("Recording while you hold…")
+        setVideo(true) // reopens the camera; recording starts in onCameraOpened
+    }
+
+    private fun endQuickVideo() {
+        quickVideoReleased = true
+        if (recording) camera.stopRecording()
+        else if (!videoStarting) finishQuickVideo() // released before recording began
+    }
+
+    private fun finishQuickVideo() {
+        quickVideo = false
+        quickVideoReleased = false
+        groupStatus.visibility = View.GONE
+        setVideo(false)
+    }
+
+    // ------------------------------------------------------------------ looks (filters)
+
+    private fun toggleLooks() {
+        looksOpen = !looksOpen
+        haptic(btnLook, HapticFeedbackConstants.VIRTUAL_KEY)
+        if (looksOpen) buildLookRow()
+        refreshUi()
+    }
+
+    /** The looks strip: each look previewed on the current view. */
+    private fun buildLookRow() {
+        lookRow.removeAllViews()
+        val d = resources.displayMetrics.density
+        val tw = (64 * d).toInt()
+        val th = if (textureView.width > 0) tw * textureView.height / textureView.width else tw * 4 / 3
+        val frame = try {
+            textureView.getBitmap(tw, th.coerceAtLeast(1))
+        } catch (e: Exception) {
+            null
+        }
+        val current = prefs.look
+        for (look in Looks.all) {
+            val cell = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                setPadding((5 * d).toInt(), (4 * d).toInt(), (5 * d).toInt(), (2 * d).toInt())
+                contentDescription = "Look ${look.name}"
+                setOnClickListener { selectLook(look.id) }
+            }
+            val img = ImageView(this).apply {
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                setBackgroundResource(R.drawable.thumb_bg)
+                clipToOutline = true
+                frame?.let { setImageBitmap(Looks.preview(it, look)) }
+                if (look.id == current) {
+                    foreground = android.graphics.drawable.GradientDrawable().apply {
+                        cornerRadius = 12 * d
+                        setStroke((2.5f * d).toInt(), getColor(R.color.accent))
+                    }
+                }
+            }
+            cell.addView(img, LinearLayout.LayoutParams(tw, (tw * 1.15f).toInt()))
+            cell.addView(TextView(this).apply {
+                text = look.name
+                textSize = 11f
+                gravity = Gravity.CENTER
+                setTextColor(getColor(if (look.id == current) R.color.accent else R.color.white))
+                setPadding(0, (3 * d).toInt(), 0, 0)
+            })
+            lookRow.addView(cell)
+        }
+        frame?.recycle()
+    }
+
+    private fun selectLook(id: String) {
+        prefs.look = id
+        haptic(lookRow, HapticFeedbackConstants.VIRTUAL_KEY)
+        applyLiveLook()
+        buildLookRow()
+        zoomIndicator.text = Looks.byId(id).name
+        zoomIndicator.setTextColor(getColor(R.color.white))
+        zoomIndicator.animate().cancel()
+        zoomIndicator.alpha = 1f
+        zoomIndicator.visibility = View.VISIBLE
+        mainHandler.removeCallbacks(hideZoomIndicator)
+        mainHandler.postDelayed(hideZoomIndicator, 900)
+        refreshUi()
+    }
+
+    /** Shows the look live: colours as a filter on the preview layer, vignette/date on the overlay. */
+    private fun applyLiveLook() {
+        val look = Looks.byId(prefs.look)
+        if (videoMode || look.isNatural) {
+            textureView.setLayerPaint(null)
+            overlay.look = null
+        } else {
+            textureView.setLayerPaint(android.graphics.Paint().apply { colorFilter = look.colorFilter() })
+            overlay.look = look
+        }
+    }
+
+    /** Applies the chosen look to a just-saved photo (the unfiltered shot is kept for before/after). */
+    private fun applyLookToSaved(uri: Uri, look: Looks.Look) {
+        pendingLooks++
+        thumbnail.alpha = 0.5f
+        val quality = prefs.jpegQuality
+        lookExecutor.execute {
+            try {
+                val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: throw IllegalStateException("can't read $uri")
+                val name = contentResolver.query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)
+                    ?.use { if (it.moveToFirst()) it.getString(0) else null } ?: "photo.jpg"
+                val bmp = PortraitProcessor.decode(bytes, Budget.sideFor(bytes, 10))
+                Looks.apply(bmp, look, seed = name.hashCode().toLong())
+                val out = java.io.ByteArrayOutputStream(bytes.size)
+                bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality.coerceIn(50, 100), out)
+                bmp.recycle()
+                // Enhanced photos already have their original kept; plain photos keep this one.
+                if (OriginalStore.get(this, name) == null) OriginalStore.save(this, name, bytes)
+                contentResolver.openOutputStream(uri, "wt")?.use { it.write(out.toByteArray()) }
+                MediaSaver.copyExif(this, uri, bytes)
+                MediaSaver.setDescription(this, uri, "Look: ${look.name}")
+                Log.i(TAG, "look ${look.id} applied to $name")
+            } catch (e: Throwable) {
+                Log.e(TAG, "look failed", e)
+            }
+            runOnUiThread {
+                pendingLooks--
+                if (pendingLooks <= 0) {
+                    pendingLooks = 0
+                    if (pendingEnhance == 0) thumbnail.alpha = 1f
+                }
+                if (lastPhoto == uri) loadThumbnail(uri)
+            }
+        }
     }
 
     // ------------------------------------------------------------------ video
@@ -1251,6 +1505,9 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
 
     override fun onRecordingStarted(withSound: Boolean) {
         videoStarting = false
+        if (quickVideo && quickVideoReleased) {
+            camera.stopRecording() // let go while it was starting
+        }
         recording = true
         recordingStartedAt = SystemClock.uptimeMillis()
         shutter.busy = false
@@ -1274,6 +1531,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             toast("Video not saved (too short?)")
         }
         refreshUi()
+        if (quickVideo) finishQuickVideo()
     }
 
     private val recTick = object : Runnable {
@@ -1287,7 +1545,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     // ------------------------------------------------------------------ auto HDR
 
     /** Auto HDR applies to Auto in Simple mode (the other intents process photos their own way). */
-    private fun hdrApplies() = simple && prefs.intent == "AUTO" && prefs.autoHdr && extraCrop <= 1.001f &&
+    private fun hdrApplies() = photoIntent("AUTO") && prefs.autoHdr && extraCrop <= 1.001f &&
         caps?.manualSensor == true
 
     /** Each analysis tick: does the scene need HDR? Needs a few agreeing ticks to switch (no flicker). */
@@ -1638,7 +1896,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
 
     /** In Auto, suggest Night when the scene is dark. */
     private fun updateNightTip() {
-        if (!simple || prefs.intent != "AUTO" || capturing) return
+        if (!photoIntent("AUTO") || capturing) return
         val dark = (liveIso ?: 0) >= DARK_ISO || (liveExposure ?: 0L) >= DARK_EXPOSURE_NS
         if (dark) {
             showGroupStatus("Dark scene · tap for Night")
@@ -1940,6 +2198,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                     haptic(this, HapticFeedbackConstants.VIRTUAL_KEY)
                     selectStop(stop)
                 }
+                setOnTouchListener(lensScrub)
             }
             lensRow.addView(tv, LinearLayout.LayoutParams(size, size).apply { setMargins(margin, 0, margin, 0) })
         }

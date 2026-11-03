@@ -49,6 +49,19 @@ object MediaSaver {
         }
     }
 
+    /** Short note on how the photo was made (shown on the review screen). */
+    fun setDescription(context: Context, uri: Uri, text: String) {
+        try {
+            context.contentResolver.openFileDescriptor(uri, "rw")?.use { pfd ->
+                val exif = ExifInterface(pfd.fileDescriptor)
+                exif.setAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION, text)
+                exif.saveAttributes()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "description failed", e)
+        }
+    }
+
     private val COPIED_TAGS = arrayOf(
         ExifInterface.TAG_DATETIME, ExifInterface.TAG_DATETIME_ORIGINAL, ExifInterface.TAG_DATETIME_DIGITIZED,
         ExifInterface.TAG_OFFSET_TIME, ExifInterface.TAG_OFFSET_TIME_ORIGINAL,

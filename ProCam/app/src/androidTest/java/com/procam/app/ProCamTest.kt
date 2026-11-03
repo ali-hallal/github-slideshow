@@ -561,10 +561,17 @@ class ProCamTest {
         // Tapping the highlighted lens button opens the zoom slider.
         onView(withContentDescription("Zoom 1×")).perform(click())
         onView(withId(R.id.zoomBar)).check(matches(isDisplayed()))
-        val maxLabel = text(R.id.zoomMax)
-        Log.i(TAG, "zoom slider max: $maxLabel")
-        assertTrue("slider reaches past the camera's own zoom: $maxLabel", maxLabel.startsWith("✦"))
-        onView(withId(R.id.zoomSlider)).perform(tapAt(0.98f, 0.5f))
+        var hi = 0f
+        var hw = 0f
+        activityRule.scenario.onActivity { val d = it.findViewById<ZoomDial>(R.id.zoomDial); hi = d.hi; hw = d.hardwareMax }
+        Log.i(TAG, "zoom dial: up to $hi (camera $hw)")
+        assertTrue("dial reaches past the camera's own zoom: $hi vs $hw", hi > hw * 1.01f)
+        // Drag the dial to the left (zoom in) all the way.
+        onView(withId(R.id.zoomDial)).perform(dragAcross(0.95f, 0.05f))
+        onView(withId(R.id.zoomDial)).perform(dragAcross(0.95f, 0.05f))
+        var v = 0f
+        activityRule.scenario.onActivity { v = it.findViewById<ZoomDial>(R.id.zoomDial).value }
+        assertTrue("dragged to super zoom: $v", v > hw * 1.01f)
         SystemClock.sleep(500)
         Log.i(TAG, "after slider: ${readout().replace("\n", " | ")}")
         val before = count("image/jpeg")
@@ -814,22 +821,23 @@ class ProCamTest {
     fun videoRecordsAndSaves() {
         waitForCamera()
         setSimple(true)
-        onView(withId(R.id.intentVideo)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
+        onView(withId(R.id.switchVideo)).perform(click())
         SystemClock.sleep(1500)
         waitForCamera()
+        assertTrue("photo modes make way for video", !visible(R.id.intentScroll))
         assertTrue("hint explains recording", text(R.id.intentHint).contains("red button"))
         val before = videoCount()
         onView(withId(R.id.shutter)).perform(click())
         waitFor("recording started") { visible(R.id.recTime) }
         val startedAt = SystemClock.uptimeMillis()
-        assertTrue("mode buttons hidden while recording", !visible(R.id.intentScroll))
+        assertTrue("photo/video switch hidden while recording", !visible(R.id.captureSwitch))
         SystemClock.sleep(3500)
         val secs = text(R.id.recTime).substringAfterLast(':').trim().toIntOrNull() ?: -1
         assertTrue("timer counts: ${text(R.id.recTime)}", secs in 3..8)
         val recordedFor = SystemClock.uptimeMillis() - startedAt
         onView(withId(R.id.shutter)).perform(click())
         waitFor("video saved", 15_000) { videoCount() > before }
-        waitFor("recording UI gone") { !visible(R.id.recTime) && visible(R.id.intentScroll) }
+        waitFor("recording UI gone") { !visible(R.id.recTime) && visible(R.id.captureSwitch) }
         // The saved file is a real, playable video of about the recorded length.
         val uri = latestVideo()!!
         val r = android.media.MediaMetadataRetriever()
@@ -845,9 +853,10 @@ class ProCamTest {
         assertEquals("16:9", 16f / 9f, maxOf(w, h).toFloat() / minOf(w, h), 0.05f)
         assertTrue("has a picture", frame != null)
         // Back to photos: the camera reopens for photos and the shutter takes one.
-        onView(withId(R.id.intentAuto)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
+        onView(withId(R.id.switchPhoto)).perform(click())
         SystemClock.sleep(1500)
         waitForCamera()
+        assertTrue("photo modes back", visible(R.id.intentScroll))
         shootAndExpect("image/jpeg") { onView(withId(R.id.shutter)).perform(click()) }
         context.contentResolver.delete(uri, null, null)
     }
@@ -856,7 +865,7 @@ class ProCamTest {
     fun reviewPlaysVideo() {
         waitForCamera()
         setSimple(true)
-        onView(withId(R.id.intentVideo)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
+        onView(withId(R.id.switchVideo)).perform(click())
         SystemClock.sleep(1500)
         waitForCamera()
         val before = videoCount()
@@ -923,6 +932,95 @@ class ProCamTest {
         if (Runtime.getRuntime().maxMemory() >= 500_000_000L) assertEquals("full 12 MP", 4000, maxOf(ow, oh))
     }
 
+    @Test
+    fun slidingOnLensButtonsZooms() {
+        waitForCamera()
+        setSimple(true)
+        // Slide left from the 1× button: zooms in smoothly and shows the dial.
+        onView(withContentDescription("Zoom 1×")).perform(dragAcross(0.5f, 0.5f, dxDp = -180f))
+        assertTrue("dial shown", visible(R.id.zoomBar))
+        var shown = 0f
+        activityRule.scenario.onActivity { val d = it.findViewById<ZoomDial>(R.id.zoomDial); shown = d.value * d.base }
+        Log.i(TAG, "slid to ${shown}x")
+        assertTrue("zoomed in by sliding: $shown", shown > 1.6f)
+        // And back out to the right.
+        onView(withId(R.id.zoomDial)).perform(dragAcross(0.2f, 0.95f))
+        activityRule.scenario.onActivity { val d = it.findViewById<ZoomDial>(R.id.zoomDial); shown = d.value * d.base }
+        assertTrue("zoomed back out: $shown", shown < 1.3f)
+    }
+
+    @Test
+    fun holdShutterRecordsQuickVideo() {
+        waitForCamera()
+        setSimple(true)
+        val before = videoCount()
+        val r = screenRect(R.id.shutter)
+        val inst = InstrumentationRegistry.getInstrumentation()
+        val t = SystemClock.uptimeMillis()
+        inst.sendPointerSync(MotionEvent.obtain(t, t, MotionEvent.ACTION_DOWN, r.exactCenterX(), r.exactCenterY(), 0))
+        try {
+            waitFor("quick video recording", 15_000) { visible(R.id.recTime) }
+            SystemClock.sleep(2500)
+        } finally {
+            val u = SystemClock.uptimeMillis()
+            inst.sendPointerSync(MotionEvent.obtain(t, u, MotionEvent.ACTION_UP, r.exactCenterX(), r.exactCenterY(), 0))
+        }
+        waitFor("quick video saved", 15_000) { videoCount() > before }
+        waitFor("back to photos", 15_000) { !Prefs(context).video && visible(R.id.intentScroll) }
+        waitForCamera()
+        latestVideo()?.let { context.contentResolver.delete(it, null, null) }
+    }
+
+    @Test
+    fun lookShowsLiveAndIsAppliedToThePhoto() {
+        waitForCamera()
+        setSimple(true)
+        onView(withId(R.id.btnLook)).perform(click())
+        onView(withId(R.id.lookScroll)).check(matches(isDisplayed()))
+        onView(withContentDescription("Look Mono")).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
+        assertEquals("mono", Prefs(context).look)
+        var live: String? = null
+        activityRule.scenario.onActivity { live = it.findViewById<OverlayView>(R.id.overlay).look?.id }
+        assertEquals("look shown live", "mono", live)
+        shootAndExpect("image/jpeg") { onView(withId(R.id.shutter)).perform(click()) }
+        // The look is applied in the background: wait for the photo to be marked.
+        val uri = latestImage()!!
+        waitFor("look applied", 20_000) { description(uri) == "Look: Mono" }
+        val bmp = android.graphics.ImageDecoder.decodeBitmap(android.graphics.ImageDecoder.createSource(context.contentResolver, uri)) { d, _, _ ->
+            d.allocator = android.graphics.ImageDecoder.ALLOCATOR_SOFTWARE
+            d.setTargetSampleSize(8)
+        }
+        var colour = 0L
+        var n = 0
+        for (y in 0 until bmp.height step 4) for (x in 0 until bmp.width step 4) {
+            val p = bmp.getPixel(x, y)
+            colour += abs(((p shr 16) and 0xFF) - ((p shr 8) and 0xFF)) + abs(((p shr 8) and 0xFF) - (p and 0xFF))
+            n++
+        }
+        Log.i(TAG, "mono photo colourfulness ${colour.toDouble() / n}")
+        assertTrue("photo is black and white", colour.toDouble() / n < 6.0)
+        var name = ""
+        context.contentResolver.query(uri, arrayOf(MediaStore.Images.Media.DISPLAY_NAME), null, null, null)?.use { if (it.moveToFirst()) name = it.getString(0) }
+        assertTrue("unfiltered shot kept for before/after", OriginalStore.get(context, name) != null)
+        assertTrue(ReviewActivity.describe(name).first.isNotEmpty())
+    }
+
+    @Test
+    fun looksMath() {
+        val natural = Looks.byId(Looks.NATURAL)
+        assertTrue(natural.isNatural)
+        assertEquals("unknown id falls back to Natural", Looks.NATURAL, Looks.byId("nope").id)
+        val mono = Looks.byId("mono").matrix
+        val r = mono[0] * 200 + mono[1] * 100 + mono[2] * 50 + mono[4]
+        val g = mono[5] * 200 + mono[6] * 100 + mono[7] * 50 + mono[9]
+        assertEquals("mono: equal channels", r, g, 0.01f)
+        val film = Looks.byId("film").matrix
+        assertTrue("film lifts blacks", film[4] > 10f)
+        val noir = Looks.byId("noir")
+        assertEquals("no darkening in the centre", 1f, Looks.vignetteFactor(noir, 0f), 0.001f)
+        assertTrue("darker corners", Looks.vignetteFactor(noir, 1f) < 0.7f)
+    }
+
     // ------------------------------------------------------------------ helpers
 
     /** Switches between Simple and Pro with the top-bar button. */
@@ -971,6 +1069,34 @@ class ProCamTest {
     }
 
     private fun readout() = text(R.id.readout)
+
+    private fun latestImage(): android.net.Uri? = context.contentResolver.query(
+        MediaStore.Images.Media.EXTERNAL_CONTENT_URI, arrayOf(MediaStore.Images.Media._ID),
+        "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ? AND ${MediaStore.Images.Media.MIME_TYPE} = ?", arrayOf("Pictures/ProCam%", "image/jpeg"),
+        "${MediaStore.Images.Media._ID} DESC",
+    )?.use { c -> if (c.moveToFirst()) android.content.ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, c.getLong(0)) else null }
+
+    private fun description(uri: android.net.Uri): String? = try {
+        context.contentResolver.openInputStream(uri)?.use { androidx.exifinterface.media.ExifInterface(it).getAttribute(androidx.exifinterface.media.ExifInterface.TAG_IMAGE_DESCRIPTION) }
+    } catch (e: Exception) {
+        null
+    }
+
+    /** Drag across [v] from fraction (fx0, fy) to (fx1, fy) of its size; dxDp adds an extra offset in dp to the end point. */
+    private fun dragAcross(fx0: Float, fx1: Float, fy: Float = 0.5f, dxDp: Float = 0f) = androidx.test.espresso.action.GeneralSwipeAction(
+        androidx.test.espresso.action.Swipe.SLOW,
+        CoordinatesProvider { v: View ->
+            val xy = IntArray(2)
+            v.getLocationOnScreen(xy)
+            floatArrayOf(xy[0] + v.width * fx0, xy[1] + v.height * fy)
+        },
+        CoordinatesProvider { v: View ->
+            val xy = IntArray(2)
+            v.getLocationOnScreen(xy)
+            floatArrayOf(xy[0] + v.width * fx1 + dxDp * v.resources.displayMetrics.density, xy[1] + v.height * fy)
+        },
+        Press.FINGER,
+    )
 
     private fun videoCount(): Int = context.contentResolver.query(
         MediaStore.Video.Media.EXTERNAL_CONTENT_URI, arrayOf(MediaStore.Video.Media._ID),

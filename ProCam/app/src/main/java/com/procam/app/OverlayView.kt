@@ -109,9 +109,32 @@ class OverlayView @JvmOverloads constructor(
         }
     }
 
+    /** Live look: its vignette and date stamp are drawn here (colours are a layer filter on the preview). */
+    var look: Looks.Look? = null
+        set(value) {
+            field = value
+            lookShaderSize = 0f
+            invalidate()
+        }
+    private val lookPaint = Paint()
+    private var lookShaderSize = 0f
+
+    private fun drawLook(canvas: Canvas, w: Float, h: Float) {
+        val l = look ?: return
+        if (l.vignette > 0f) {
+            if (lookShaderSize != w * h) {
+                lookPaint.shader = Looks.vignetteShader(l, w, h)
+                lookShaderSize = w * h
+            }
+            canvas.drawRect(0f, 0f, w, h, lookPaint)
+        }
+        if (l.dateStamp) Looks.drawDateStamp(canvas, w.toInt(), h.toInt())
+    }
+
     override fun onDraw(canvas: Canvas) {
         val w = width.toFloat()
         val h = height.toFloat()
+        drawLook(canvas, w, h)
 
         analysis?.let {
             analysisDst.set(0, 0, width, height)

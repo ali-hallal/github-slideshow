@@ -16,6 +16,16 @@ class Prefs(context: Context) {
         get() = sp.getInt("originalsMb", 300)
         set(v) = sp.edit().putInt("originalsMb", v).apply()
 
+    /** Video (true) or photos (false): the PHOTO | VIDEO switch. */
+    var video: Boolean
+        get() = sp.getBoolean("video", false)
+        set(v) = sp.edit().putBoolean("video", v).apply()
+
+    /** Chosen look (filter) id, see [Looks]. */
+    var look: String
+        get() = sp.getString("look", Looks.NATURAL) ?: Looks.NATURAL
+        set(v) = sp.edit().putString("look", v).apply()
+
     /** The microphone permission was asked for once already. */
     var audioAsked: Boolean
         get() = sp.getBoolean("audioAsked", false)

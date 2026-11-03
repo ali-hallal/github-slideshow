@@ -37,43 +37,23 @@
             android:padding="3dp"
             android:visibility="gone" />
 
-        <!-- Zoom slider: shown by tapping the highlighted lens button (positioned in code). -->
-        <LinearLayout
+        <!-- Zoom dial: appears when you slide on (or tap) the lens buttons (positioned in code). -->
+        <FrameLayout
             android:id="@+id/zoomBar"
-            android:layout_width="320dp"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_gravity="top|center_horizontal"
+            android:layout_marginStart="20dp"
+            android:layout_marginEnd="20dp"
             android:background="@drawable/lens_row_bg"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:paddingStart="14dp"
-            android:paddingEnd="14dp"
             android:visibility="gone">
 
-            <TextView
-                android:id="@+id/zoomMin"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:textColor="@color/white"
-                android:textSize="12sp" />
-
-            <SeekBar
-                android:id="@+id/zoomSlider"
-                android:layout_width="0dp"
-                android:layout_height="40dp"
-                android:layout_weight="1"
-                android:contentDescription="Zoom"
-                android:max="1000"
-                android:progressTint="@color/accent"
-                android:thumbTint="@color/accent" />
-
-            <TextView
-                android:id="@+id/zoomMax"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:textColor="@color/accent"
-                android:textSize="12sp" />
-        </LinearLayout>
+            <com.procam.app.ZoomDial
+                android:id="@+id/zoomDial"
+                android:layout_width="match_parent"
+                android:layout_height="64dp"
+                android:contentDescription="Zoom dial: slide left to zoom in, right to zoom out" />
+        </FrameLayout>
 
         <View
             android:id="@+id/shutterFlash"
@@ -129,6 +109,11 @@
             <TextView android:id="@+id/btnTimer" style="@style/TopButton" />
             <TextView android:id="@+id/btnRaw" style="@style/TopButton" android:text="RAW" />
             <TextView android:id="@+id/btnZebra" style="@style/TopButton" android:text="ZEBRA" />
+            <TextView
+                android:id="@+id/btnLook"
+                style="@style/TopButton"
+                android:contentDescription="Looks (filters)"
+                android:text="LOOK" />
             <TextView
                 android:id="@+id/btnMode"
                 style="@style/TopButton"
@@ -300,8 +285,24 @@
                 <TextView android:id="@+id/intentSilky" style="@style/IntentPill" android:text="Silky" />
                 <TextView android:id="@+id/intentFreeze" style="@style/IntentPill" android:text="Freeze" />
                 <TextView android:id="@+id/intentGroup" style="@style/IntentPill" android:text="Group" />
-                <TextView android:id="@+id/intentVideo" style="@style/IntentPill" android:text="Video" />
             </LinearLayout>
+        </HorizontalScrollView>
+
+        <!-- Looks (filters): live in the viewfinder, opened with LOOK in the top bar. -->
+        <HorizontalScrollView
+            android:id="@+id/lookScroll"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:scrollbars="none"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:id="@+id/lookRow"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp" />
         </HorizontalScrollView>
 
         <LinearLayout
@@ -384,6 +385,42 @@
 
             <TextView android:id="@+id/modeAuto" style="@style/ModeButton" android:text="AUTO" />
             <TextView android:id="@+id/modePro" style="@style/ModeButton" android:text="MANUAL" />
+        </LinearLayout>
+
+        <!-- Photo / video: always one tap away, just above the shutter. -->
+        <LinearLayout
+            android:id="@+id/captureSwitch"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/segment_bg"
+            android:orientation="horizontal"
+            android:padding="3dp">
+
+            <TextView
+                android:id="@+id/switchPhoto"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:fontFamily="sans-serif-medium"
+                android:gravity="center"
+                android:minWidth="76dp"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                android:text="PHOTO"
+                android:textSize="13sp" />
+
+            <TextView
+                android:id="@+id/switchVideo"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:fontFamily="sans-serif-medium"
+                android:gravity="center"
+                android:minWidth="76dp"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                android:text="VIDEO"
+                android:textSize="13sp" />
         </LinearLayout>
 
         <FrameLayout
