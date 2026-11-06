@@ -1015,14 +1015,16 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     /** At high zoom (back camera, photos), steady the viewfinder against hand tremor. */
     private fun updateSteady() {
         val c = caps
-        val focal = c?.focalLength
-        val on = c != null && focal != null && focal > 0f && c.sensorWidthMm > 0f && !c.isFront && !videoMode &&
+        val on = c != null && !c.isFront && !videoMode &&
             prefs.steadyZoom && steady.available && displayZoom() >= STEADY_FROM && textureView.height > 0
+        Log.d(TAG, "steady: $on (zoom ${displayZoom()}, gyro ${steady.available}, focal ${c?.focalLength}, sensor ${c?.sensorWidthMm})")
         if (on) {
             val longSide = maxOf(textureView.width, textureView.height).toFloat()
-            // Angle across the preview's long side (the sensor's long side), per preview pixel, at the
-            // enlarged preview scale.
-            steady.radPerPx = c!!.sensorWidthMm / (focal!! * cameraZoom() * SteadyZoom.MARGIN) / longSide
+            // Angle across the sensor's long side (= the preview's long side); a typical phone
+            // lens (~70°) if the camera doesn't report its focal length and sensor size.
+            val focal = c!!.focalLength
+            val across = if (focal != null && focal > 0f && c.sensorWidthMm > 0f) c.sensorWidthMm / focal else 1.2f
+            steady.radPerPx = across / (cameraZoom() * SteadyZoom.MARGIN) / longSide
             steady.maxShiftX = (SteadyZoom.MARGIN - 1f) / 2f * textureView.width
             steady.maxShiftY = (SteadyZoom.MARGIN - 1f) / 2f * textureView.height
         }
