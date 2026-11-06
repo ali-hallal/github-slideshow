@@ -85,12 +85,29 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private lateinit var intentAuto: TextView
     private lateinit var intentGroup: TextView
     private lateinit var intentClean: TextView
+    private lateinit var intentTrails: TextView
+    private lateinit var intentCloseup: TextView
+    private lateinit var trailsPreview: ImageView
     private lateinit var switchPhoto: TextView
     private lateinit var switchVideo: TextView
     private lateinit var captureSwitch: View
     private lateinit var btnLook: TextView
     private lateinit var lookScroll: View
     private lateinit var lookRow: LinearLayout
+    private lateinit var lookTools: View
+    private lateinit var videoKinds: View
+    private lateinit var kindNormal: TextView
+    private lateinit var kindTimelapse: TextView
+    private lateinit var kindSlowmo: TextView
+    private lateinit var kindLevel: TextView
+    // Level horizon while recording.
+    private var levelActive = false
+    private var levelAngle = 0f
+    private var levelScale = 1f
+    private var levelStartedAt = 0
+    private var phoneRoll = 0f
+    private lateinit var lookStrength: SeekBar
+    private lateinit var lookEdit: TextView
     private lateinit var recTime: TextView
     private lateinit var intentHint: TextView
     private lateinit var chipScroll: View
@@ -205,6 +222,14 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private val silkyMode get() = photoIntent("SILKY")
     private val freezeMode get() = photoIntent("FREEZE")
     private val cleanMode get() = photoIntent("CLEAN")
+    private val trailsMode get() = photoIntent("TRAILS")
+    private val closeupMode get() = photoIntent("CLOSEUP")
+    private var closeupProcessing = false
+    private val focusStack = FocusStackProcessor()
+    private var trailsProcessing = false
+    private var trailsLive: IntArray? = null
+    private var trailsLiveW = 0
+    private var trailsLiveH = 0
     private var cleanProcessing = false
     private val clean = CleanProcessor()
     private val videoMode get() = prefs.video
@@ -212,6 +237,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     // Video
     /** The camera is currently open for video (it reopens when switching between photo and video). */
     private var openedForVideo = false
+    private var openedKind = OutputPrefs.VIDEO_NORMAL
     private var recording = false
     private var recordingStartedAt = 0L
     private var videoStarting = false
@@ -222,6 +248,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private var mergeSilky = false
     /** The running merge is HDR, shot this many stops darker (0 = not HDR). */
     private var mergeHdrStops = 0f
+    /** The running merge is Auto's quiet low-light merge (same brightness, less grain). */
+    private var mergeIndoor = false
     // Auto HDR: how many stops darker to shoot right now (0 = off), with hysteresis.
     private var hdrStops = 0f
     private var hdrOnTicks = 0
@@ -276,6 +304,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         refreshUi()
         // First launch: a short guide before anything else (including the camera permission prompt).
         if (!prefs.onboarded) startActivity(Intent(this, WelcomeActivity::class.java))
+        PortraitProcessor.prefetchSubjects(this)
     }
 
     override fun onResume() {
@@ -311,6 +340,9 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         zoomProcessing = false
         freezeProcessing = false
         cleanProcessing = false
+        trailsProcessing = false
+        closeupProcessing = false
+        stopTrailsLive()
         videoStarting = false
         overlay.setFaces(emptyList())
         zoomAnimator?.cancel()
@@ -399,6 +431,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         val id = if (cameraIndex == 0) lensCameraId ?: cameraIds[0] else cameraIds[cameraIndex]
         Log.i(TAG, "startCamera index=$cameraIndex id=$id ids=$cameraIds extra lenses=$extraLenses")
         openedForVideo = videoMode
+        openedKind = prefs.videoKind
         camera.open(id, texture, settings, prefs.output().copy(video = openedForVideo))
     }
 
@@ -457,12 +490,23 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         intentAuto = findViewById(R.id.intentAuto)
         intentGroup = findViewById(R.id.intentGroup)
         intentClean = findViewById(R.id.intentClean)
+        intentTrails = findViewById(R.id.intentTrails)
+        intentCloseup = findViewById(R.id.intentCloseup)
+        trailsPreview = findViewById(R.id.trailsPreview)
         switchPhoto = findViewById(R.id.switchPhoto)
         switchVideo = findViewById(R.id.switchVideo)
         captureSwitch = findViewById(R.id.captureSwitch)
         btnLook = findViewById(R.id.btnLook)
         lookScroll = findViewById(R.id.lookScroll)
         lookRow = findViewById(R.id.lookRow)
+        lookTools = findViewById(R.id.lookTools)
+        videoKinds = findViewById(R.id.videoKinds)
+        kindNormal = findViewById(R.id.kindNormal)
+        kindTimelapse = findViewById(R.id.kindTimelapse)
+        kindSlowmo = findViewById(R.id.kindSlowmo)
+        kindLevel = findViewById(R.id.kindLevel)
+        lookStrength = findViewById(R.id.lookStrength)
+        lookEdit = findViewById(R.id.lookEdit)
         recTime = findViewById(R.id.recTime)
         intentHint = findViewById(R.id.intentHint)
         chipScroll = findViewById(R.id.chipScroll)
@@ -490,7 +534,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             val w = right - left
             val h = bottom - top
             positionLensRow()
-            for (v in listOf<View>(overlay, shutterFlash)) {
+            for (v in listOf<View>(overlay, shutterFlash, trailsPreview)) {
                 val lp = v.layoutParams as FrameLayout.LayoutParams
                 if (lp.width != w || lp.height != h) {
                     lp.width = w
@@ -593,9 +637,30 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         intentAuto.setOnClickListener { setIntent("AUTO") }
         intentGroup.setOnClickListener { setIntent("GROUP") }
         intentClean.setOnClickListener { setIntent("CLEAN") }
+        intentTrails.setOnClickListener { setIntent("TRAILS") }
+        intentCloseup.setOnClickListener { setIntent("CLOSEUP") }
         switchPhoto.setOnClickListener { setVideo(false) }
         switchVideo.setOnClickListener { setVideo(true) }
         btnLook.setOnClickListener { toggleLooks() }
+        lookStrength.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                if (!fromUser) return
+                prefs.lookStrength = progress
+                applyLiveLook()
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar) = Unit
+            override fun onStopTrackingTouch(seekBar: SeekBar) = Unit
+        })
+        lookEdit.setOnClickListener { editMyLook() }
+        kindNormal.setOnClickListener { setVideoKind(OutputPrefs.VIDEO_NORMAL) }
+        kindTimelapse.setOnClickListener { setVideoKind(OutputPrefs.VIDEO_TIMELAPSE) }
+        kindSlowmo.setOnClickListener { setVideoKind(OutputPrefs.VIDEO_SLOWMO) }
+        kindLevel.setOnClickListener {
+            prefs.levelVideo = !prefs.levelVideo
+            haptic(kindLevel, HapticFeedbackConstants.VIRTUAL_KEY)
+            toast(if (prefs.levelVideo) "Level horizon on · the video stays straight even if you tilt (slightly zoomed in)" else "Level horizon off")
+            refreshUi()
+        }
         intentPortrait.setOnClickListener { setIntent("PORTRAIT") }
         intentNight.setOnClickListener { setIntent("NIGHT") }
         intentSilky.setOnClickListener { setIntent("SILKY") }
@@ -733,6 +798,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         "SILKY" -> intentSilky
         "FREEZE" -> intentFreeze
         "CLEAN" -> intentClean
+        "TRAILS" -> intentTrails
+        "CLOSEUP" -> intentCloseup
         else -> intentAuto
     }
 
@@ -763,7 +830,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             intentAuto to (intent == "AUTO"), intentPortrait to (intent == "PORTRAIT"),
             intentNight to (intent == "NIGHT"), intentSilky to (intent == "SILKY"),
             intentFreeze to (intent == "FREEZE"), intentGroup to (intent == "GROUP"),
-            intentClean to (intent == "CLEAN"),
+            intentClean to (intent == "CLEAN"), intentTrails to (intent == "TRAILS"),
+            intentCloseup to (intent == "CLOSEUP"),
         )) {
             v.setBackgroundResource(if (on) R.drawable.pill_selected_bg else R.drawable.pill_bg)
             v.setTextColor(getColor(if (on) R.color.black else R.color.white))
@@ -789,21 +857,32 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             "NIGHT" -> "Merges several shots for brighter, cleaner low-light photos · hold still about 1 s"
             "FREEZE" -> "Sharp action: kids, pets, sports · catches the moment even if you press a little late"
             "CLEAN" -> "Removes people and cars passing through · hold still about 3 s"
+            "CLOSEUP" -> "Sharp from front to back: flowers, food, small things · tap your subject, hold still about 1 s"
+            "TRAILS" -> "Moving lights draw lines: cars at night, sparklers, a torch · rest the phone, about 4 s"
             else -> "Finds faces and sets everything for you"
         }
         // Video: the photo modes make way for a video tip; the looks strip replaces the modes.
         captureSelector(videoMode)
+        val slowMo = videoMode && prefs.videoKind == OutputPrefs.VIDEO_SLOWMO
         if (videoMode) {
             show(intentScroll, false)
             show(portraitRow, false)
             show(intentHint, !pro)
-            intentHint.text = "Tap the red button to start and stop · " + videoLabel() +
-                (if (prefs.stabilize) ", stabilized" else "")
+            intentHint.text = when (prefs.videoKind) {
+                OutputPrefs.VIDEO_TIMELAPSE -> "Time-lapse: speeds things up ${CameraController.TIMELAPSE_FACTOR}× · clouds, traffic, sunsets · rest the phone"
+                OutputPrefs.VIDEO_SLOWMO -> "Slow motion (${caps?.slowMotion?.second ?: 120} fps) · needs good light · no looks or sound"
+                else -> "Tap the red button to start and stop · " + videoLabel() + (if (prefs.stabilize) ", stabilized" else "")
+            } + if (prefs.levelVideo && !slowMo) " · level" else ""
         }
-        show(btnLook, !videoMode)
-        setActive(btnLook, looksOpen || !Looks.byId(prefs.look).isNatural)
-        show(lookScroll, looksOpen && !videoMode && !recording)
-        if (looksOpen && !videoMode) {
+        show(btnLook, !slowMo)
+        updateVideoKinds()
+        setActive(btnLook, looksOpen || !Looks.resolve(prefs).isNatural)
+        show(lookScroll, looksOpen && !slowMo && !recording)
+        show(lookTools, looksOpen && !slowMo && !recording && prefs.look != Looks.NATURAL)
+        show(lookEdit, prefs.look == Looks.MINE)
+        lookStrength.progress = prefs.lookStrength
+        if (looksOpen && !slowMo) {
+            show(videoKinds, false)
             show(intentScroll, false)
             show(portraitRow, false)
             show(intentHint, false)
@@ -914,7 +993,13 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         val h = textureView.height.toFloat()
         val s = previewScale()
         val shifted = steady.active && (steadyDx != 0f || steadyDy != 0f)
-        if ((s <= 1.001f && !shifted) || w == 0f) {
+        if (levelActive && w > 0f) {
+            // Show what the levelled video records: rotated back by the tilt, slightly enlarged.
+            textureView.setTransform(Matrix().apply {
+                setScale(levelScale, levelScale, w / 2, h / 2)
+                postRotate(Math.toDegrees(levelAngle.toDouble()).toFloat(), w / 2, h / 2)
+            })
+        } else if ((s <= 1.001f && !shifted) || w == 0f) {
             textureView.setTransform(null)
         } else {
             textureView.setTransform(Matrix().apply {
@@ -1059,7 +1144,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         if (groupWaiting) {
             cancelGroup(); return
         }
-        if (capturing || groupProcessing || portraitProcessing || nightProcessing || zoomProcessing || freezeProcessing || cleanProcessing || caps == null) return
+        if (capturing || groupProcessing || portraitProcessing || nightProcessing || zoomProcessing || freezeProcessing || cleanProcessing || trailsProcessing || closeupProcessing || caps == null) return
         if (extraCrop > 1.01f && pendingEnhance >= MAX_PENDING_ENHANCE) {
             toast("Still enhancing the last zoom photos…")
             return
@@ -1099,6 +1184,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             startSilky()
         } else if (cleanMode) {
             startClean()
+        } else if (trailsMode) {
+            startTrails()
+        } else if (closeupMode && caps?.canManualFocus == true) {
+            startCloseup()
         } else if (freezeMode) {
             // Never miss the moment: the sharpest frame from around the press.
             freezeProcessing = true
@@ -1106,6 +1195,9 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         } else if (hdrStops > 0f && hdrApplies()) {
             // Backlit / high-contrast scene: a darker burst, merged and brightened where needed.
             startHdr()
+        } else if (lowLightApplies()) {
+            // Dim room: a few shots merged for less grain, at the normal brightness.
+            startLowLight()
         } else if (extraCrop > 1.01f) {
             // Super zoom: a short burst, rebuilt into one detailed zoomed photo.
             zoomProcessing = true
@@ -1260,7 +1352,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     override fun onCaptureFinished(success: Boolean) {
-        if ((groupProcessing || portraitProcessing || nightProcessing || zoomProcessing || freezeProcessing || cleanProcessing) && success) {
+        if ((groupProcessing || portraitProcessing || nightProcessing || zoomProcessing || freezeProcessing || cleanProcessing || trailsProcessing || closeupProcessing) && success) {
             // Wait for the photo(s) to be processed and saved.
             if (pressRatio < BLURRY_RATIO) toast("This one may be blurry: your hands moved. Brace your elbows and try again.")
             pressRatio = Float.MAX_VALUE
@@ -1273,6 +1365,9 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             zoomProcessing = false
             freezeProcessing = false
             cleanProcessing = false
+            trailsProcessing = false
+            closeupProcessing = false
+            stopTrailsLive()
             groupStatus.visibility = View.GONE
         }
         if (success && pressRatio < BLURRY_RATIO) {
@@ -1287,7 +1382,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     override fun onPhotoSaved(uri: Uri, mimeType: String) {
         if (mimeType == "image/x-adobe-dng" && lastPhoto != null) return
         lastPhoto = uri
-        val look = Looks.byId(prefs.look)
+        val look = Looks.resolve(prefs)
         if (mimeType == "image/jpeg" && !look.isNatural) applyLookToSaved(uri, look)
         loadThumbnail(uri)
     }
@@ -1387,7 +1482,6 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         cancelGroup()
         groupStatus.visibility = View.GONE
         overlay.setFaces(emptyList())
-        if (video) looksOpen = false
         if (!superZoomAllowed() && extraCrop > 1f) {
             extraCrop = 1f
             applyPreviewCrop()
@@ -1399,6 +1493,69 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         syncFreeze()
         syncVideo()
         refreshUi()
+    }
+
+    // ------------------------------------------------------------------ video kinds and level horizon
+
+    private fun updateVideoKinds() {
+        val show = videoMode && !recording && !looksOpen
+        videoKinds.visibility = if (show) View.VISIBLE else View.GONE
+        if (!show) return
+        val slowAvailable = caps?.slowMotion != null || (mainBackCaps?.slowMotion != null && caps?.isFront != true)
+        kindSlowmo.visibility = if (slowAvailable || prefs.videoKind == OutputPrefs.VIDEO_SLOWMO) View.VISIBLE else View.GONE
+        for ((v, on) in listOf(
+            kindNormal to (prefs.videoKind == OutputPrefs.VIDEO_NORMAL),
+            kindTimelapse to (prefs.videoKind == OutputPrefs.VIDEO_TIMELAPSE),
+            kindSlowmo to (prefs.videoKind == OutputPrefs.VIDEO_SLOWMO),
+            kindLevel to (prefs.levelVideo && prefs.videoKind != OutputPrefs.VIDEO_SLOWMO),
+        )) {
+            v.setBackgroundResource(if (on) R.drawable.pill_selected_bg else R.drawable.pill_bg)
+            v.setTextColor(getColor(if (on) R.color.black else R.color.white))
+        }
+        kindLevel.visibility = if (prefs.videoKind == OutputPrefs.VIDEO_SLOWMO) View.GONE else View.VISIBLE
+    }
+
+    private fun setVideoKind(kind: Int) {
+        if (kind == prefs.videoKind || recording) return
+        if (kind == OutputPrefs.VIDEO_SLOWMO && caps?.slowMotion == null) {
+            toast("Slow motion isn't available on this camera")
+            return
+        }
+        prefs.videoKind = kind
+        haptic(videoKinds, HapticFeedbackConstants.VIRTUAL_KEY)
+        // Each kind sets the camera up differently: reopen it.
+        if (openedForVideo && resumed && hasCameraPermission()) {
+            caps = null
+            startCamera()
+        }
+        refreshUi()
+    }
+
+    /** Recording started: keep the horizon level if asked (and possible). */
+    private fun startLevel() {
+        val size = camera.videoSize
+        val c = caps
+        levelActive = prefs.levelVideo && size != null && c != null && !c.isFront && camera.videoEffectsAvailable
+        if (!levelActive) return
+        levelStartedAt = ((deviceOrientation + 45) / 90 * 90) % 360
+        levelScale = VideoEffects.coverScale(size!!.width, size.height, MAX_LEVEL_RAD)
+        levelAngle = 0f
+        updateLevel()
+    }
+
+    private fun updateLevel() {
+        val target = VideoEffects.levelFor(((phoneRoll.toInt() % 360) + 360) % 360, levelStartedAt, MAX_LEVEL_RAD)
+        levelAngle += (target - levelAngle) * 0.5f
+        camera.setVideoLevel(levelAngle, levelScale)
+        applyPreviewCrop()
+    }
+
+    private fun stopLevel() {
+        if (!levelActive) return
+        levelActive = false
+        levelAngle = 0f
+        camera.setVideoLevel(0f, 1f)
+        applyPreviewCrop()
     }
 
     /** Shutter held in photo mode: switch to video, record while held, come back to photos. */
@@ -1451,13 +1608,14 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             null
         }
         val current = prefs.look
-        for (look in Looks.all) {
+        for (look in Looks.all + Looks.custom(prefs.customLook())) {
             val cell = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER_HORIZONTAL
                 setPadding((5 * d).toInt(), (4 * d).toInt(), (5 * d).toInt(), (2 * d).toInt())
                 contentDescription = "Look ${look.name}"
-                setOnClickListener { selectLook(look.id) }
+                // Tapping My look again opens its editor.
+                setOnClickListener { if (look.id == Looks.MINE && prefs.look == Looks.MINE) editMyLook() else selectLook(look.id) }
             }
             val img = ImageView(this).apply {
                 scaleType = ImageView.ScaleType.CENTER_CROP
@@ -1485,11 +1643,12 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     private fun selectLook(id: String) {
+        if (id != prefs.look) prefs.lookStrength = 100
         prefs.look = id
         haptic(lookRow, HapticFeedbackConstants.VIRTUAL_KEY)
         applyLiveLook()
         buildLookRow()
-        zoomIndicator.text = Looks.byId(id).name
+        zoomIndicator.text = Looks.resolve(prefs).name
         zoomIndicator.setTextColor(getColor(R.color.white))
         zoomIndicator.animate().cancel()
         zoomIndicator.alpha = 1f
@@ -1499,10 +1658,75 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         refreshUi()
     }
 
+    /** My look: sliders for warmth, fade, contrast, colour, grain and vignette, applied live. */
+    private fun editMyLook() {
+        if (prefs.look != Looks.MINE) selectLook(Looks.MINE)
+        val d = resources.displayMetrics.density
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding((20 * d).toInt(), (8 * d).toInt(), (20 * d).toInt(), (8 * d).toInt())
+        }
+        val sliders = listOf(
+            Triple("Warmth", "myWarmth", 20) to (-100..100),
+            Triple("Fade", "myFade", 30) to (0..100),
+            Triple("Contrast", "myContrast", 0) to (-100..100),
+            Triple("Colour", "mySaturation", -10) to (-100..100),
+            Triple("Grain", "myGrain", 30) to (0..100),
+            Triple("Vignette", "myVignette", 30) to (0..100),
+        )
+        for ((spec, range) in sliders) {
+            val (label, key, default) = spec
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            row.addView(TextView(this).apply {
+                text = label
+                textSize = 13f
+                setTextColor(getColor(R.color.white))
+            }, LinearLayout.LayoutParams((84 * d).toInt(), -2))
+            row.addView(SeekBar(this).apply {
+                contentDescription = "My look $label"
+                max = range.last - range.first
+                progress = prefs.customValue(key, default) - range.first
+                progressTintList = android.content.res.ColorStateList.valueOf(getColor(R.color.accent))
+                thumbTintList = progressTintList
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(seekBar: SeekBar, p: Int, fromUser: Boolean) {
+                        if (!fromUser) return
+                        prefs.setCustomValue(key, p + range.first)
+                        applyLiveLook()
+                    }
+                    override fun onStartTrackingTouch(seekBar: SeekBar) = Unit
+                    override fun onStopTrackingTouch(seekBar: SeekBar) = Unit
+                })
+            }, LinearLayout.LayoutParams(0, (40 * d).toInt(), 1f))
+            panel.addView(row)
+        }
+        val dialog = android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_NoActionBar)
+            .setTitle("My look")
+            .setView(panel)
+            .setPositiveButton("Done", null)
+            .create()
+        dialog.setOnDismissListener {
+            buildLookRow()
+            refreshUi()
+        }
+        dialog.show()
+        // Keep the viewfinder visible: no dimming, panel at the bottom.
+        dialog.window?.apply {
+            clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            setGravity(Gravity.BOTTOM)
+        }
+    }
+
     /** Shows the look live: colours as a filter on the preview layer, vignette/date on the overlay. */
     private fun applyLiveLook() {
-        val look = Looks.byId(prefs.look)
-        if (videoMode || look.isNatural) {
+        val look = Looks.resolve(prefs)
+        // Video records the look only through the effects stage (not in slow motion).
+        val unsupported = videoMode && openedForVideo && caps != null && !camera.videoEffectsAvailable
+        camera.setVideoLook(if (unsupported) null else look)
+        if (unsupported || look.isNatural) {
             textureView.setLayerPaint(null)
             overlay.look = null
         } else {
@@ -1596,6 +1820,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         shutter.busy = false
         recTime.visibility = View.VISIBLE
         mainHandler.post(recTick)
+        startLevel()
         if (!withSound) toast("Recording without sound (microphone not allowed)")
         refreshUi()
     }
@@ -1604,6 +1829,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         videoStarting = false
         val length = SystemClock.uptimeMillis() - recordingStartedAt
         recording = false
+        stopLevel()
         mainHandler.removeCallbacks(recTick)
         recTime.visibility = View.GONE
         shutter.busy = false
@@ -1620,7 +1846,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private val recTick = object : Runnable {
         override fun run() {
             if (!recording) return
-            recTime.text = "● " + VideoRecorder.durationLabel(SystemClock.uptimeMillis() - recordingStartedAt)
+            val elapsed = SystemClock.uptimeMillis() - recordingStartedAt
+            recTime.text = "● " + VideoRecorder.durationLabel(elapsed) +
+                if (openedKind == OutputPrefs.VIDEO_TIMELAPSE && camera.videoEffectsAvailable)
+                    " → " + VideoRecorder.durationLabel(elapsed / CameraController.TIMELAPSE_FACTOR) else ""
             mainHandler.postDelayed(this, 500)
         }
     }
@@ -1665,6 +1894,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         val expR = c.exposureRange ?: return
         nightProcessing = true
         mergeSilky = false
+        mergeIndoor = false
         mergeHdrStops = hdrStops
         val (iso, t) = Hdr.plan(
             liveIso ?: 100, liveExposure ?: 10_000_000L, safeShutterNs() ?: 33_000_000L, hdrStops, isoR, expR,
@@ -1690,6 +1920,14 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         }
         if (cleanProcessing) {
             processClean(frames, mimeType)
+            return
+        }
+        if (trailsProcessing) {
+            processTrails(frames, mimeType)
+            return
+        }
+        if (closeupProcessing) {
+            processCloseup(frames, mimeType)
             return
         }
         if (!groupProcessing) return
@@ -1883,6 +2121,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         val c = caps ?: return
         nightProcessing = true
         mergeSilky = true
+        mergeIndoor = false
         mergeHdrStops = 0f
         val frames = SILKY_FRAMES[prefs.silkyStrength.coerceIn(0, 2)]
         val isoRange = c.isoRange
@@ -1897,6 +2136,141 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             camera.takeBurst(deviceOrientation, frames, toMemory = true)
         }
         showGroupStatus("Hold still… capturing $frames shots")
+    }
+
+    // ------------------------------------------------------------------ close-up (focus stacking)
+
+    private fun startCloseup() {
+        val c = caps ?: return
+        closeupProcessing = true
+        val focus = FocusStackProcessor.plan(liveFocus ?: (c.minFocusDistance / 2), c.minFocusDistance, CLOSEUP_FRAMES)
+        Log.i(TAG, "close-up plan: focus ${focus.joinToString { "%.2f".format(Locale.US, it) }} dpt")
+        showGroupStatus("Hold still… focusing near to far")
+        camera.takeBurst(deviceOrientation, CLOSEUP_FRAMES, toMemory = true, focusDistances = focus)
+    }
+
+    private fun processCloseup(frames: List<ByteArray>, mimeType: String) {
+        showGroupStatus("Making everything sharp…")
+        val quality = prefs.jpegQuality
+        Thread {
+            val result = try {
+                if (frames.size >= 2) focusStack.process(frames, quality) else null
+            } catch (e: Throwable) {
+                Log.e(TAG, "close-up failed", e)
+                null
+            }
+            val source = frames[result?.reference ?: (frames.size / 2)]
+            val bytes = result?.jpeg ?: source
+            val mime = if (result != null) "image/jpeg" else mimeType
+            val ext = if (mime == "image/heic") "heic" else "jpg"
+            val name = "${MediaSaver.newBaseName()}${if (result != null) "_CLOSEUP" else ""}.$ext"
+            if (result != null) OriginalStore.save(this, name, source)
+            val uri = MediaSaver.save(
+                this, name, mime,
+                writer = { it.write(bytes) },
+                afterWrite = if (result != null) { u -> MediaSaver.copyExif(this, u, source) } else null,
+            )
+            runOnUiThread {
+                closeupProcessing = false
+                capturing = false
+                shutter.busy = false
+                groupStatus.visibility = View.GONE
+                if (uri != null) onPhotoSaved(uri, mime) else toast(getString(R.string.save_failed))
+                toast(if (result != null) "Close-up · ${result.used} focus steps combined" else "Saved a single shot")
+            }
+        }.start()
+    }
+
+    // ------------------------------------------------------------------ light trails
+
+    private val trails = TrailsProcessor()
+
+    private fun startTrails() {
+        trailsProcessing = true
+        val c = caps
+        val isoR = c?.isoRange
+        val expR = c?.exposureRange
+        val exposure = if (c != null && c.manualSensor && isoR != null && expR != null) {
+            TrailsProcessor.plan(liveIso ?: 400, liveExposure ?: 33_000_000L, isoR, expR, TRAILS_FRAME_NS)
+        } else null
+        val seconds = TRAILS_FRAMES * (exposure?.second ?: 33_000_000L) / 1e9
+        Log.i(TAG, "trails plan: $TRAILS_FRAMES x ${exposure?.let { "ISO ${it.first} ${Stops.shutterLabel(it.second)}" } ?: "auto"}")
+        showGroupStatus("Hold still… drawing light trails (${"%.0f".format(Locale.US, maxOf(1.0, seconds))} s)")
+        trailsLive = null
+        trailsPreview.setImageDrawable(null)
+        trailsPreview.visibility = View.VISIBLE
+        mainHandler.post(trailsTick)
+        camera.takeBurst(deviceOrientation, TRAILS_FRAMES, toMemory = true, exposure = exposure)
+    }
+
+    /** Live preview: the viewfinder frames lighten-stacked as they come, so the lines grow on screen. */
+    private val trailsTick = object : Runnable {
+        override fun run() {
+            if (!trailsProcessing || textureView.width == 0) return
+            val w = TRAILS_LIVE_WIDTH
+            val h = w * textureView.height / textureView.width
+            val frame = try {
+                textureView.getBitmap(w, h)
+            } catch (e: Exception) {
+                null
+            }
+            if (frame != null) {
+                val px = IntArray(w * h)
+                frame.getPixels(px, 0, w, 0, 0, w, h)
+                frame.recycle()
+                val acc = trailsLive?.takeIf { trailsLiveW == w && trailsLiveH == h }
+                if (acc == null) {
+                    trailsLive = px
+                    trailsLiveW = w
+                    trailsLiveH = h
+                } else {
+                    TrailsProcessor.lighten(acc, px, w, h, 0, 0)
+                }
+                trailsPreview.setImageBitmap(android.graphics.Bitmap.createBitmap(trailsLive!!, w, h, android.graphics.Bitmap.Config.ARGB_8888))
+            }
+            mainHandler.postDelayed(this, TRAILS_LIVE_MS)
+        }
+    }
+
+    private fun stopTrailsLive() {
+        mainHandler.removeCallbacks(trailsTick)
+        trailsLive = null
+        trailsPreview.visibility = View.GONE
+        trailsPreview.setImageDrawable(null)
+    }
+
+    private fun processTrails(frames: List<ByteArray>, mimeType: String) {
+        mainHandler.removeCallbacks(trailsTick) // keep showing the last live result while the photo is made
+        showGroupStatus("Stacking light trails…")
+        val quality = prefs.jpegQuality
+        Thread {
+            val result = try {
+                if (frames.size >= 2) trails.process(frames, quality) else null
+            } catch (e: Throwable) {
+                Log.e(TAG, "trails failed", e)
+                null
+            }
+            val source = frames.first()
+            val bytes = result?.jpeg ?: source
+            val mime = if (result != null) "image/jpeg" else mimeType
+            val ext = if (mime == "image/heic") "heic" else "jpg"
+            val name = "${MediaSaver.newBaseName()}${if (result != null) "_TRAILS" else ""}.$ext"
+            if (result != null) OriginalStore.save(this, name, source)
+            val uri = MediaSaver.save(
+                this, name, mime,
+                writer = { it.write(bytes) },
+                afterWrite = if (result != null) { u -> MediaSaver.copyExif(this, u, source) } else null,
+            )
+            runOnUiThread {
+                trailsProcessing = false
+                stopTrailsLive()
+                capturing = false
+                shutter.busy = false
+                groupStatus.visibility = View.GONE
+                if (uri != null) onPhotoSaved(uri, mime) else toast(getString(R.string.save_failed))
+                toast(if (result != null) "Light trails · ${result.used} shots stacked" else "Saved a single shot")
+            }
+        }.start()
     }
 
     // ------------------------------------------------------------------ clean (remove passers-by)
@@ -1939,10 +2313,25 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         }.start()
     }
 
+    /** Auto in a dim room (not dark enough for Night): merge a few shots quietly. */
+    private fun lowLightApplies() = photoIntent("AUTO") && prefs.lowLightMerge && extraCrop <= 1.001f && !settings.raw &&
+        !settings.manualExposure && ((liveIso ?: 0) >= LOW_LIGHT_ISO || prefs.forceLowLight)
+
+    private fun startLowLight() {
+        nightProcessing = true
+        mergeSilky = false
+        mergeHdrStops = 0f
+        mergeIndoor = true
+        nightIso = liveIso ?: LOW_LIGHT_ISO
+        showGroupStatus("Hold still…")
+        camera.takeBurst(deviceOrientation, LOW_LIGHT_FRAMES, toMemory = true)
+    }
+
     private fun startNight() {
         val c = caps ?: return
         nightProcessing = true
         mergeSilky = false
+        mergeIndoor = false
         mergeHdrStops = 0f
         val isoRange = c.isoRange
         val expRange = c.exposureRange
@@ -1969,6 +2358,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private fun processNight(frames: List<ByteArray>, mimeType: String) {
         val silky = mergeSilky
         val hdr = mergeHdrStops
+        val indoor = mergeIndoor
+        mergeIndoor = false
         showGroupStatus(
             when {
                 hdr > 0f -> "Balancing light…"
@@ -1980,7 +2371,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         val quality = prefs.jpegQuality
         Thread {
             val result = try {
-                night.process(frames, iso, quality, silky, hdrStops = hdr)
+                night.process(frames, iso, quality, silky, hdrStops = hdr, lift = !indoor)
             } catch (e: Throwable) {
                 Log.e(TAG, "night merge failed", e)
                 null
@@ -1992,6 +2383,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             val suffix = when {
                 result == null -> ""
                 hdr > 0f -> "_HDR"
+                indoor -> "_LOWLIGHT"
                 silky -> "_SILKY"
                 else -> "_NIGHT"
             }
@@ -2013,6 +2405,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                     when {
                         result == null -> "Saved a single shot"
                         hdr > 0f -> "HDR photo · bright and dark areas balanced"
+                        indoor -> "Low light · merged ${result.merged} shots for less grain"
                         silky -> "Silky photo · blended ${result.merged} shots"
                         else -> "Night photo · merged ${result.merged} shots"
                     },
@@ -2065,7 +2458,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 shutter.busy = false
                 groupStatus.visibility = View.GONE
                 if (uri != null) onPhotoSaved(uri, mime) else toast(getString(R.string.save_failed))
-                toast(if (processed) "Portrait saved" else "No person found · saved a normal photo")
+                toast(if (processed) "Portrait saved" else "Nothing stood out from the background · saved a normal photo")
             }
         }.start()
     }
@@ -2073,7 +2466,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     /** In Portrait, nudge the user toward a person when none is in view. */
     private fun updatePortraitHint() {
         if (!portraitMode || capturing || portraitProcessing) return
-        if (SystemClock.uptimeMillis() - lastFaceSeen > 1200) showGroupStatus("Point at a person · stand 1–2 m away")
+        if (SystemClock.uptimeMillis() - lastFaceSeen > 1200) showGroupStatus("Point at a person, pet or object · stand close")
         else groupStatus.visibility = View.GONE
     }
 
@@ -2153,6 +2546,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         val (x, y, z) = gravity
         val roll = Math.toDegrees(atan2(-x.toDouble(), y.toDouble())).toFloat()
         overlay.setRoll(roll, abs(z) > 8.5f)
+        phoneRoll = roll
+        if (levelActive) updateLevel()
     }
 
     override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) = Unit
@@ -2511,6 +2906,17 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         private const val REQUEST_CAMERA = 1
         private const val REQUEST_AUDIO = 3
         private const val CLEAN_FRAMES = 7
+        private const val TRAILS_FRAMES = 12
+        private const val CLOSEUP_FRAMES = 5
+        /** Each trails frame up to 1/3 s, back to back: lines without gaps. */
+        private const val TRAILS_FRAME_NS = 333_000_000L
+        private const val TRAILS_LIVE_WIDTH = 270
+        private const val TRAILS_LIVE_MS = 80L
+        /** Auto merges a few shots from this ISO up (dim rooms); Night is suggested from DARK_ISO. */
+        private const val LOW_LIGHT_ISO = 640
+        private const val LOW_LIGHT_FRAMES = 4
+        /** Level horizon: tilts up to this much (radians, ~8°) are straightened. */
+        private const val MAX_LEVEL_RAD = 0.14f
         /** Steady the viewfinder from this zoom up. */
         private const val STEADY_FROM = 4f
         private const val CLEAN_INTERVAL_MS = 450L

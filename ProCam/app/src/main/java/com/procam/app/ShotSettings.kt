@@ -64,7 +64,15 @@ data class OutputPrefs(
     val video: Boolean = false,
     val video4k: Boolean = false,
     val stabilize: Boolean = true,
-)
+    /** Video kind: [VIDEO_NORMAL], [VIDEO_TIMELAPSE] or [VIDEO_SLOWMO]. */
+    val videoKind: Int = VIDEO_NORMAL,
+) {
+    companion object {
+        const val VIDEO_NORMAL = 0
+        const val VIDEO_TIMELAPSE = 1
+        const val VIDEO_SLOWMO = 2
+    }
+}
 
 /** What a given camera can do. */
 data class CameraCaps(
@@ -105,6 +113,8 @@ data class CameraCaps(
     /** In-camera noise reduction / edge (sharpening) modes the camera offers. */
     val noiseReductionModes: IntArray,
     val edgeModes: IntArray,
+    /** Slow motion this camera can record: (video size, frames per second), or null. */
+    val slowMotion: Pair<android.util.Size, Int>? = null,
 ) {
     val isFront get() = facing == CameraCharacteristics.LENS_FACING_FRONT
     val canManualFocus get() = manualSensor && minFocusDistance > 0f
@@ -149,7 +159,27 @@ data class CameraCaps(
                     .contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON),
                 noiseReductionModes = c.get(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES) ?: IntArray(0),
                 edgeModes = c.get(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES) ?: IntArray(0),
+                slowMotion = slowMotion(c, capabilities),
             )
+        }
+
+        /** Best slow-motion setting: 1080p (else 720p) at the highest fixed rate up to 240 fps. */
+        private fun slowMotion(c: CameraCharacteristics, capabilities: IntArray): Pair<android.util.Size, Int>? {
+            if (!capabilities.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_CONSTRAINED_HIGH_SPEED_VIDEO)) return null
+            val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return null
+            return try {
+                val sizes = map.highSpeedVideoSizes.filter { it.width * 9 == it.height * 16 && it.width <= 1920 }
+                    .sortedByDescending { it.width }
+                for (size in sizes) {
+                    val fps = map.getHighSpeedVideoFpsRangesFor(size)
+                        .filter { it.lower == it.upper && it.upper in 120..240 }
+                        .maxOfOrNull { it.upper } ?: continue
+                    return size to fps
+                }
+                null
+            } catch (e: Exception) {
+                null
+            }
         }
 
         /** Finds the zoom ratio of each physical lens behind a logical multi-camera. */

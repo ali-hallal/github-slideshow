@@ -19,6 +19,16 @@
             android:layout_height="wrap_content"
             android:layout_gravity="top|center_horizontal" />
 
+        <!-- Light trails building up live while they're captured (sized in code). -->
+        <ImageView
+            android:id="@+id/trailsPreview"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:layout_gravity="top|center_horizontal"
+            android:contentDescription="Light trails so far"
+            android:scaleType="fitXY"
+            android:visibility="gone" />
+
         <com.procam.app.OverlayView
             android:id="@+id/overlay"
             android:layout_width="0dp"
@@ -286,8 +296,25 @@
                 <TextView android:id="@+id/intentFreeze" style="@style/IntentPill" android:text="Freeze" />
                 <TextView android:id="@+id/intentGroup" style="@style/IntentPill" android:text="Group" />
                 <TextView android:id="@+id/intentClean" style="@style/IntentPill" android:text="Clean" />
+                <TextView android:id="@+id/intentCloseup" style="@style/IntentPill" android:text="Close-up" />
+                <TextView android:id="@+id/intentTrails" style="@style/IntentPill" android:text="Light trails" />
             </LinearLayout>
         </HorizontalScrollView>
+
+        <!-- Video kinds (shown in video mode): normal, time-lapse, slow motion; and level horizon. -->
+        <LinearLayout
+            android:id="@+id/videoKinds"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_horizontal"
+            android:orientation="horizontal"
+            android:visibility="gone">
+
+            <TextView android:id="@+id/kindNormal" style="@style/IntentPill" android:text="Video" />
+            <TextView android:id="@+id/kindTimelapse" style="@style/IntentPill" android:text="Time-lapse" />
+            <TextView android:id="@+id/kindSlowmo" style="@style/IntentPill" android:text="Slow-mo" />
+            <TextView android:id="@+id/kindLevel" style="@style/IntentPill" android:contentDescription="Keep the horizon level" android:text="Level" />
+        </LinearLayout>
 
         <!-- Looks (filters): live in the viewfinder, opened with LOOK in the top bar. -->
         <HorizontalScrollView
@@ -305,6 +332,48 @@
                 android:paddingStart="8dp"
                 android:paddingEnd="8dp" />
         </HorizontalScrollView>
+
+        <!-- Look strength, and editing My look. -->
+        <LinearLayout
+            android:id="@+id/lookTools"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="16dp"
+            android:paddingEnd="12dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Strength"
+                android:textColor="@color/dim"
+                android:textSize="12sp" />
+
+            <SeekBar
+                android:id="@+id/lookStrength"
+                android:layout_width="0dp"
+                android:layout_height="36dp"
+                android:layout_weight="1"
+                android:contentDescription="Look strength"
+                android:max="100"
+                android:progressTint="@color/accent"
+                android:thumbTint="@color/accent" />
+
+            <TextView
+                android:id="@+id/lookEdit"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:background="@drawable/pill_bg"
+                android:contentDescription="Edit My look"
+                android:gravity="center"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                android:text="Edit"
+                android:textColor="@color/white"
+                android:textSize="13sp" />
+        </LinearLayout>
 
         <LinearLayout
             android:id="@+id/portraitRow"

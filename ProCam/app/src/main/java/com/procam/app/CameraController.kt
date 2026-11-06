@@ -110,6 +110,7 @@ class CameraController(context: Context, private val listener: Listener) {
     private var burstExposure: Pair<Int, Long>? = null
     private var burstMinimal = false
     private var burstIntervalMs = 0L
+    private var burstFocus: FloatArray? = null
     // Fast bursts: a video-size YUV stream (no JPEG encode/decode), centre-cropped on arrival.
     private var yuvReader: ImageReader? = null
     // Video
@@ -346,6 +347,8 @@ class CameraController(context: Context, private val listener: Listener) {
         minimalProcessing: Boolean = false,
         /** Spread the frames out in time (Clean mode: let passers-by move), 0 = as fast as possible. */
         intervalMs: Long = 0L,
+        /** Close-up focus stacking: one focus distance (diopters) per frame; null = normal focus. */
+        focusDistances: FloatArray? = null,
     ) {
         val h = handler
         if (h == null) {
@@ -359,6 +362,8 @@ class CameraController(context: Context, private val listener: Listener) {
             burstExposure = exposure
             burstMinimal = minimalProcessing
             burstIntervalMs = intervalMs
+            burstFocus = focusDistances?.takeIf { caps?.canManualFocus == true }
+            if (burstFocus != null) stillCount = burstFocus!!.size.coerceAtMost(MAX_BURST)
             takePictureInternal(deviceOrientation)
         }
     }
@@ -431,14 +436,17 @@ class CameraController(context: Context, private val listener: Listener) {
 
     /** Video: a 16:9 preview plus the recorder's surface, nothing else. */
     private fun openVideo(cameraId: String, c: CameraCharacteristics, cp: CameraCaps, map: android.hardware.camera2.params.StreamConfigurationMap, texture: SurfaceTexture) {
+        val slow = if (output.videoKind == OutputPrefs.VIDEO_SLOWMO) cp.slowMotion else null
+        slowMotion = slow != null
         val fpsRanges = c.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: emptyArray()
-        videoFps = fpsRanges.firstOrNull { it.lower == VIDEO_FPS && it.upper == VIDEO_FPS }
+        videoFps = if (slow != null) Range(slow.second, slow.second)
+        else fpsRanges.firstOrNull { it.lower == VIDEO_FPS && it.upper == VIDEO_FPS }
             ?: fpsRanges.filter { it.upper == VIDEO_FPS }.maxByOrNull { it.lower }
-        val fps = videoFps?.upper ?: VIDEO_FPS
-        val size = VideoRecorder.pickSize(map.getOutputSizes(android.media.MediaRecorder::class.java), output.video4k, fps)
+        val fps = if (slow != null) VIDEO_FPS else videoFps?.upper ?: VIDEO_FPS
+        val size = slow?.first ?: VideoRecorder.pickSize(map.getOutputSizes(android.media.MediaRecorder::class.java), output.video4k, fps)
         val stab = c.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES) ?: IntArray(0)
         videoStabMode = when {
-            !output.stabilize -> null
+            !output.stabilize || slow != null -> null
             // Preview stabilization (Android 13+) steadies the viewfinder too, so what you see is what's recorded.
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                 stab.contains(CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION) ->
@@ -446,12 +454,19 @@ class CameraController(context: Context, private val listener: Listener) {
             stab.contains(CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON) -> CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON
             else -> null
         }
-        val previewSize = pickPreviewSize(map.getOutputSizes(SurfaceTexture::class.java), size)
+        // Slow motion: every output of a high-speed session must be the video size.
+        val previewSize = if (slow != null) size else pickPreviewSize(map.getOutputSizes(SurfaceTexture::class.java), size)
         texture.setDefaultBufferSize(previewSize.width, previewSize.height)
         previewSurface = Surface(texture)
-        videoRecorder = VideoRecorder(appContext, size, fps)
+        val rec = VideoRecorder(appContext, size, fps, captureRate = slow?.second)
+        videoRecorder = rec
         videoSize = size
-        Log.i(TAG, "video: ${size.width}x${size.height} @$fps preview=$previewSize stabilization=$videoStabMode ois=${cp.ois}")
+        // Looks, level horizon and time-lapse go through the GPU on the way to the encoder
+        // (not slow motion: high-speed sessions only take the preview and the encoder).
+        effects = if (slow == null) VideoEffects(size, rec.surface).takeIf { it.start() } else null
+        effects?.timelapse = if (output.videoKind == OutputPrefs.VIDEO_TIMELAPSE) TIMELAPSE_FACTOR else 1
+        Log.i(TAG, "video: ${size.width}x${size.height} @$fps preview=$previewSize stabilization=$videoStabMode ois=${cp.ois} " +
+            "effects=${effects != null} kind=${output.videoKind} slow=${slow?.second}")
         main.post { listener.onCameraOpened(cp, previewSize) }
         if (!openLock.tryAcquire(OPEN_WAIT_MS, TimeUnit.MILLISECONDS)) throw IllegalStateException("Timed out waiting to open camera")
         opening = true
@@ -483,9 +498,10 @@ class CameraController(context: Context, private val listener: Listener) {
             override fun onConfigureFailed(s: CameraCaptureSession) = postError("This camera can't record video here")
         }
         try {
+            val target = effects?.inputSurface ?: rec.surface
             d.createCaptureSession(SessionConfiguration(
-                SessionConfiguration.SESSION_REGULAR,
-                listOf(OutputConfiguration(preview), OutputConfiguration(rec.surface)), sessionExecutor, callback,
+                if (slowMotion) SessionConfiguration.SESSION_HIGH_SPEED else SessionConfiguration.SESSION_REGULAR,
+                listOf(OutputConfiguration(preview), OutputConfiguration(target)), sessionExecutor, callback,
             ))
         } catch (e: Exception) {
             Log.e(TAG, "createVideoSession", e)
@@ -507,12 +523,15 @@ class CameraController(context: Context, private val listener: Listener) {
                 main.post { listener.onRecordingStopped(null) }
                 return@post
             }
-            val ok = rec.start(jpegOrientation(c, deviceOrientation), audio, location)
+            // Time-lapse and slow motion have no sound (it wouldn't match the picture's speed).
+            val sound = audio && output.videoKind == OutputPrefs.VIDEO_NORMAL
+            val ok = rec.start(jpegOrientation(c, deviceOrientation), sound, location)
             if (!ok) {
                 postError("Couldn't start recording")
                 main.post { listener.onRecordingStopped(null) }
                 return@post
             }
+            effects?.recording = true
             updateRepeating()
             main.post { listener.onRecordingStarted(rec.withSound) }
         }
@@ -531,6 +550,23 @@ class CameraController(context: Context, private val listener: Listener) {
 
     private var pendingRecording: Pair<Int, Boolean>? = null
 
+    private var effects: VideoEffects? = null
+    private var slowMotion = false
+
+    /** Look for the video being recorded (null = Natural). */
+    fun setVideoLook(look: Looks.Look?) {
+        effects?.look = look?.takeUnless { it.isNatural }
+    }
+
+    /** Level horizon: rotate the video by [angle] (radians, clockwise), enlarged by [scale] to cover. */
+    fun setVideoLevel(angle: Float, scale: Float) {
+        effects?.levelAngle = angle
+        effects?.levelScale = scale
+    }
+
+    /** The open video setup can apply looks / levelling / time-lapse. */
+    val videoEffectsAvailable get() = effects != null
+
     /** Size the open camera records video at (null when open for photos). */
     @Volatile var videoSize: Size? = null
         private set
@@ -538,6 +574,7 @@ class CameraController(context: Context, private val listener: Listener) {
     private fun finishRecording() {
         val rec = videoRecorder ?: return
         if (!rec.recording) return
+        effects?.recording = false
         val uri = rec.stop()
         updateRepeating()
         Log.i(TAG, "video: saved $uri")
@@ -573,6 +610,9 @@ class CameraController(context: Context, private val listener: Listener) {
         shotNames.clear()
         rawReader?.close()
         rawReader = null
+        effects?.release()
+        effects = null
+        slowMotion = false
         videoRecorder?.release()
         videoRecorder = null
         videoSize = null
@@ -672,7 +712,7 @@ class CameraController(context: Context, private val listener: Listener) {
                 val surface = previewSurface ?: return
                 val b = d.createCaptureRequest(if (rec.recording) CameraDevice.TEMPLATE_RECORD else CameraDevice.TEMPLATE_PREVIEW)
                 b.addTarget(surface)
-                if (rec.recording) b.addTarget(rec.surface)
+                if (rec.recording) b.addTarget(effects?.inputSurface ?: rec.surface)
                 applySettings(b, still = false)
                 videoFps?.let { b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
                 videoStabMode?.let { b.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, it) }
@@ -680,7 +720,11 @@ class CameraController(context: Context, private val listener: Listener) {
                 if (b.get(CaptureRequest.CONTROL_AF_MODE) == CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE &&
                     caps?.afModes?.contains(CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO) == true
                 ) b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
-                s.setRepeatingRequest(b.build(), previewCallback, handler)
+                if (slowMotion && s is android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession) {
+                    s.setRepeatingBurst(s.createHighSpeedRequestList(b.build()), previewCallback, handler)
+                } else {
+                    s.setRepeatingRequest(b.build(), previewCallback, handler)
+                }
                 return
             }
             val b = previewBuilder() ?: return
@@ -1028,7 +1072,24 @@ class CameraController(context: Context, private val listener: Listener) {
                 burstFrames.clear()
                 burstExpected = stillCount
                 val interval = burstIntervalMs
-                if (stillCount == 1) {
+                val focus = burstFocus
+                if (focus != null && stillCount > 1) {
+                    // Focus bracket: each frame focused a little further away; time for the lens to move.
+                    b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
+                    val requests = (0 until stillCount).map { k ->
+                        b.set(CaptureRequest.LENS_FOCUS_DISTANCE, focus[k])
+                        b.build()
+                    }
+                    requests.forEachIndexed { k, r ->
+                        handler?.postDelayed({
+                            try {
+                                if (session === s) s.capture(r, stillCallback, handler)
+                            } catch (e: Exception) {
+                                Log.w(TAG, "focus bracket", e)
+                            }
+                        }, k * max(interval, FOCUS_STEP_MS))
+                    }
+                } else if (stillCount == 1) {
                     s.capture(b.build(), stillCallback, handler)
                 } else if (interval > 0) {
                     // Spaced out: one frame now, the rest every [interval] ms.
@@ -1301,6 +1362,10 @@ class CameraController(context: Context, private val listener: Listener) {
         private const val FAST_MAX_W = 1920
         private const val FAST_MAX_H = 1440
         private const val VIDEO_FPS = 30
+        /** Time for the lens to move between focus-bracketed frames. */
+        private const val FOCUS_STEP_MS = 180L
+        /** Time-lapse: one frame in 15 kept (30 fps camera → 2 frames a second, played 15× faster). */
+        const val TIMELAPSE_FACTOR = 15
         /** How long to wait for a previous open/close (slow phones take a few seconds). */
         private const val OPEN_WAIT_MS = 6000L
 

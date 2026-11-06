@@ -24,7 +24,13 @@ import java.util.Locale
  * The camera draws into [surface], a persistent encoder surface: it exists before recording, so
  * the camera session is set up once and each recording just attaches a new MediaRecorder to it.
  */
-class VideoRecorder(context: Context, val size: Size, val fps: Int) {
+class VideoRecorder(
+    context: Context,
+    val size: Size,
+    val fps: Int,
+    /** Slow motion: frames captured at this rate, played back at [fps] (null = normal). */
+    private val captureRate: Int? = null,
+) {
 
     private val app = context.applicationContext
     val surface: Surface = MediaCodec.createPersistentInputSurface()
@@ -138,7 +144,8 @@ class VideoRecorder(context: Context, val size: Size, val fps: Int) {
         r.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
         r.setVideoSize(size.width, size.height)
         r.setVideoFrameRate(fps)
-        r.setVideoEncodingBitRate(bitRate(size, fps))
+        if (captureRate != null) r.setCaptureRate(captureRate.toDouble())
+        r.setVideoEncodingBitRate(bitRate(size, captureRate ?: fps).coerceAtMost(100_000_000))
         if (audio) {
             r.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
             r.setAudioEncodingBitRate(192_000)
@@ -155,7 +162,7 @@ class VideoRecorder(context: Context, val size: Size, val fps: Int) {
 
         /** About what phones use: ~17 Mbit/s for 1080p30, ~50 for 4K30. */
         fun bitRate(size: Size, fps: Int): Int =
-            (size.width.toLong() * size.height * fps * 0.27).toLong().coerceIn(2_000_000L, 60_000_000L).toInt()
+            (size.width.toLong() * size.height * fps * 0.27).toLong().coerceIn(2_000_000L, 100_000_000L).toInt()
 
         /**
          * The video size to record: the largest 16:9 size the camera offers up to 1080p (or 4K when

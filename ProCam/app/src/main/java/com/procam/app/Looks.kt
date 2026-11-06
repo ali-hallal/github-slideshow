@@ -40,6 +40,45 @@ object Looks {
     }
 
     const val NATURAL = "natural"
+    const val MINE = "mine"
+
+    /** "My look" settings: warmth, contrast, saturation in -1..1; fade, grain, vignette in 0..1. */
+    data class Custom(
+        val warmth: Float = 0.2f,
+        val fade: Float = 0.3f,
+        val contrast: Float = 0f,
+        val saturation: Float = -0.1f,
+        val grain: Float = 0.3f,
+        val vignette: Float = 0.3f,
+    )
+
+    /** The user's own look from [c]. */
+    fun custom(c: Custom): Look = Look(
+        MINE, "My look",
+        m {
+            saturation((1f + c.saturation).coerceAtLeast(0f))
+            scaleRgb(1f + 0.12f * c.warmth, 1f, 1f - 0.15f * c.warmth)
+            contrast(1f + 0.4f * c.contrast)
+            if (c.fade > 0f) fade(1f - 0.2f * c.fade, 32f * c.fade)
+        },
+        vignette = 0.5f * c.vignette,
+        grain = 9f * c.grain,
+    )
+
+    /** [look] at [strength] (0 = no change, 1 = full): blended with Natural. */
+    fun withStrength(look: Look, strength: Float): Look {
+        val s = strength.coerceIn(0f, 1f)
+        if (look.isNatural || s >= 0.999f) return look
+        val id = ColorMatrix().array
+        val blended = FloatArray(20) { id[it] + s * (look.matrix[it] - id[it]) }
+        return Look(look.id, look.name, blended, look.vignette * s, look.grain * s, look.dateStamp)
+    }
+
+    /** The look in use: the chosen one (or My look) at the chosen strength. */
+    fun resolve(prefs: Prefs): Look {
+        val base = if (prefs.look == MINE) custom(prefs.customLook()) else byId(prefs.look)
+        return withStrength(base, prefs.lookStrength / 100f)
+    }
 
     val all: List<Look> by lazy {
         listOf(

@@ -7,6 +7,8 @@ import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.segmentation.Segmentation
 import com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions
+import com.google.mlkit.vision.segmentation.subject.SubjectSegmentation
+import com.google.mlkit.vision.segmentation.subject.SubjectSegmenterOptions
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.util.concurrent.TimeUnit
@@ -55,7 +57,13 @@ class PortraitProcessor {
         }
     }
 
-    fun close() = segmenter.close()
+    fun close() {
+        segmenter.close()
+        try {
+            subjects.close()
+        } catch (_: Throwable) {
+        }
+    }
 
     /** Person mask (0 = background, 1 = person) or null if nobody is in the photo. */
     private fun segment(full: Bitmap): Mask? {
@@ -74,8 +82,38 @@ class PortraitProcessor {
         }
         val fraction = person.toFloat() / values.size
         Log.i(TAG, "person covers ${(fraction * 100).roundToInt()}% of the frame")
-        if (fraction < MIN_PERSON_FRACTION) return null
-        return Mask(values, m.width, m.height)
+        if (fraction >= MIN_PERSON_FRACTION) return Mask(values, m.width, m.height)
+        // No person: try the main subject, whatever it is (pet, plate, flower, product).
+        return segmentSubject(full)
+    }
+
+    private val subjects by lazy {
+        SubjectSegmentation.getClient(SubjectSegmenterOptions.Builder().enableForegroundConfidenceMask().build())
+    }
+
+    /** Mask of the photo's main subject (any kind), or null if none / not available on this phone. */
+    private fun segmentSubject(full: Bitmap): Mask? = try {
+        val scale = SEGMENT_SIDE.toFloat() / max(full.width, full.height)
+        val sw = (full.width * scale).roundToInt().coerceAtLeast(1)
+        val sh = (full.height * scale).roundToInt().coerceAtLeast(1)
+        val small = shrink(full, sw, sh)
+        val result = Tasks.await(subjects.process(InputImage.fromBitmap(small, 0)), 20, TimeUnit.SECONDS)
+        small.recycle()
+        val buf = result.foregroundConfidenceMask ?: throw IllegalStateException("no mask")
+        buf.rewind()
+        val values = FloatArray(sw * sh) { if (buf.hasRemaining()) buf.get() else 0f }
+        var inside = 0
+        for (i in values.indices) {
+            values[i] = smoothstep(0.3f, 0.7f, values[i])
+            if (values[i] > 0.5f) inside++
+        }
+        val fraction = inside.toFloat() / values.size
+        Log.i(TAG, "subject covers ${(fraction * 100).roundToInt()}% of the frame")
+        // A real subject: not a speck, not the whole picture.
+        if (fraction < MIN_PERSON_FRACTION || fraction > MAX_SUBJECT_FRACTION) null else Mask(values, sw, sh)
+    } catch (e: Exception) {
+        Log.w(TAG, "subject segmentation unavailable: ${e.message}")
+        null
     }
 
     /** A low-resolution mask, sampled with bilinear interpolation. */
@@ -102,6 +140,20 @@ class PortraitProcessor {
         private const val SEGMENT_SIDE = 512
         private const val BLUR_SCALE = 8
         private const val MIN_PERSON_FRACTION = 0.03f
+        private const val MAX_SUBJECT_FRACTION = 0.85f
+
+        /** Asks Google Play services to download the subject model ahead of the first portrait. */
+        fun prefetchSubjects(context: android.content.Context) {
+            try {
+                val client = SubjectSegmentation.getClient(SubjectSegmenterOptions.Builder().enableForegroundConfidenceMask().build())
+                com.google.android.gms.common.moduleinstall.ModuleInstall.getClient(context)
+                    .installModules(com.google.android.gms.common.moduleinstall.ModuleInstallRequest.newBuilder().addApi(client).build())
+                    .addOnSuccessListener { Log.i(TAG, "subject model ready") }
+                    .addOnFailureListener { Log.w(TAG, "subject model download failed: ${it.message}") }
+            } catch (e: Throwable) {
+                Log.w(TAG, "subject model prefetch", e)
+            }
+        }
         private val RADIUS = intArrayOf(3, 6, 10) // in 1/8-scale pixels: ~25 / 50 / 80 px at full size
 
         /**

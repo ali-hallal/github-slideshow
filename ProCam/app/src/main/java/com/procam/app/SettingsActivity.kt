@@ -120,6 +120,8 @@ class SettingsActivity : Activity() {
             listOf("Off", "On"), { if (prefs.grid) 1 else 0 }, { prefs.grid = it == 1 }))
         row(Option("Level", "Horizon indicator, turns green when straight",
             listOf("Off", "On"), { if (prefs.level) 1 else 0 }, { prefs.level = it == 1 }))
+        row(Option("Low-light merge", "In dim rooms, Auto merges a few shots for cleaner, less grainy photos",
+            listOf("Off", "On"), { if (prefs.lowLightMerge) 1 else 0 }, { prefs.lowLightMerge = it == 1 }))
         row(Option("Auto HDR", "In Auto, balance bright skies and dark subjects automatically (shows an HDR badge)",
             listOf("Off", "On"), { if (prefs.autoHdr) 1 else 0 }, { prefs.autoHdr = it == 1 }))
         row(Option("Steady zoom view", "At 4× and beyond, the picture on screen is held steady against hand shake",

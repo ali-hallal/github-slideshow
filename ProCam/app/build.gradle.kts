@@ -51,6 +51,9 @@ dependencies {
     implementation("com.google.mlkit:face-detection:16.1.7")
     // On-device person segmentation for Portrait (bundled model).
     implementation("com.google.mlkit:segmentation-selfie:16.0.0-beta6")
+    // Portrait for pets, food and objects: segments the main subject, whatever it is
+    // (Google Play services module, downloaded once).
+    implementation("com.google.android.gms:play-services-mlkit-subject-segmentation:16.0.0-beta1")
 
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test:rules:1.6.1")

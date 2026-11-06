@@ -29,22 +29,22 @@ class NightProcessor {
      * @param silky Silky (long-exposure look): keep motion instead of rejecting it, so moving water,
      *   clouds and lights blur into streaks while the aligned still parts stay sharp; no shadow lift.
      */
-    fun process(frames: List<ByteArray>, iso: Int, quality: Int, silky: Boolean = false, hdrStops: Float = 0f): Result {
+    fun process(frames: List<ByteArray>, iso: Int, quality: Int, silky: Boolean = false, hdrStops: Float = 0f, lift: Boolean = true): Result {
         require(frames.isNotEmpty())
         val perPixel = if (silky) BYTES_PER_PIXEL_SILKY else BYTES_PER_PIXEL
         val side = Budget.sideFor(frames[0], perPixel)
         return try {
-            merge(frames, iso, quality, silky, hdrStops, side)
+            merge(frames, iso, quality, silky, hdrStops, side, lift)
         } catch (e: OutOfMemoryError) {
             if (side <= Budget.FLOOR) throw e
             // Memory was tighter than it looked: try again at the safe size.
             Log.w(TAG, "out of memory at $side px, retrying at ${Budget.FLOOR}")
             System.gc()
-            merge(frames, iso, quality, silky, hdrStops, Budget.FLOOR)
+            merge(frames, iso, quality, silky, hdrStops, Budget.FLOOR, lift)
         }
     }
 
-    private fun merge(frames: List<ByteArray>, iso: Int, quality: Int, silky: Boolean, hdrStops: Float, side: Int): Result {
+    private fun merge(frames: List<ByteArray>, iso: Int, quality: Int, silky: Boolean, hdrStops: Float, side: Int, lift: Boolean): Result {
         val hdr = hdrStops > 0f
         // Small grey copies for choosing the reference and aligning.
         val smalls = frames.map { bytes ->
@@ -101,7 +101,7 @@ class NightProcessor {
         framePx = null
 
         // Average (+ shadow lift for Night).
-        val curve = if (silky || hdr) IDENTITY else LIFT
+        val curve = if (silky || hdr || !lift) IDENTITY else LIFT
         val sr = sumR!!
         val sg = sumG!!
         val sb = sumB!!

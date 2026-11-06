@@ -1116,6 +1116,228 @@ class ProCamTest {
         waitFor("back to normal at 1×") { abs(scale() - 1f) < 0.01f }
     }
 
+    @Test
+    fun lookStrengthAndMyLook() {
+        val mono = Looks.byId("mono")
+        val none = Looks.withStrength(mono, 0f)
+        val identity = android.graphics.ColorMatrix().array
+        for (i in 0 until 20) assertEquals("strength 0 = Natural", identity[i], none.matrix[i], 1e-4f)
+        val half = Looks.withStrength(mono, 0.5f)
+        assertEquals("halfway", (identity[1] + mono.matrix[1]) / 2, half.matrix[1], 1e-4f)
+        val noir = Looks.byId("noir")
+        assertEquals("vignette scales too", noir.vignette / 2, Looks.withStrength(noir, 0.5f).vignette, 1e-4f)
+        // My look: warm makes grey reddish, cool makes it bluish.
+        fun redMinusBlue(l: Looks.Look) = l.matrix[0] * 128 + l.matrix[1] * 128 + l.matrix[2] * 128 + l.matrix[4] -
+            (l.matrix[10] * 128 + l.matrix[11] * 128 + l.matrix[12] * 128 + l.matrix[14])
+        assertTrue(redMinusBlue(Looks.custom(Looks.Custom(warmth = 1f, fade = 0f, grain = 0f, vignette = 0f))) > 20)
+        assertTrue(redMinusBlue(Looks.custom(Looks.Custom(warmth = -1f, fade = 0f, grain = 0f, vignette = 0f))) < -20)
+    }
+
+    @Test
+    fun myLookEditorChangesTheLiveLook() {
+        waitForCamera()
+        setSimple(true)
+        onView(withId(R.id.btnLook)).perform(click())
+        onView(withContentDescription("Look My look")).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
+        assertEquals(Looks.MINE, Prefs(context).look)
+        onView(withId(R.id.lookTools)).check(matches(isDisplayed()))
+        onView(withId(R.id.lookEdit)).check(matches(isDisplayed()))
+        // Strength: half.
+        onView(withId(R.id.lookStrength)).perform(tapAt(0.5f, 0.5f))
+        assertTrue("strength about half: ${Prefs(context).lookStrength}", Prefs(context).lookStrength in 35..65)
+        // Editor: warmth all the way up.
+        onView(withId(R.id.lookEdit)).perform(click())
+        onView(withContentDescription("My look Warmth")).perform(tapAt(0.98f, 0.5f))
+        assertTrue("warmth saved: ${Prefs(context).customValue("myWarmth", 0)}", Prefs(context).customValue("myWarmth", 0) > 85)
+        onView(withText("Done")).perform(click())
+        var live: String? = null
+        activityRule.scenario.onActivity { live = it.findViewById<OverlayView>(R.id.overlay).look?.id }
+        assertEquals(Looks.MINE, live)
+    }
+
+    @Test
+    fun videoLevelMath() {
+        assertEquals(1f, VideoEffects.coverScale(1920, 1080, 0f), 1e-4f)
+        val s = VideoEffects.coverScale(1920, 1080, 0.14f)
+        assertTrue("about 24% enlargement at 8°: $s", s in 1.2f..1.28f)
+        assertEquals("tilted 5° clockwise", Math.toRadians(5.0).toFloat(), VideoEffects.levelFor(5, 0, 0.14f), 1e-4f)
+        assertEquals("tilted 5° anticlockwise", -Math.toRadians(5.0).toFloat(), VideoEffects.levelFor(355, 0, 0.14f), 1e-4f)
+        assertEquals("relative to a landscape start", Math.toRadians(5.0).toFloat(), VideoEffects.levelFor(95, 90, 0.14f), 1e-4f)
+        assertEquals("limited", 0.14f, VideoEffects.levelFor(40, 0, 0.14f), 1e-4f)
+    }
+
+    private fun recordClip(seconds: Long): android.net.Uri {
+        val before = videoCount()
+        onView(withId(R.id.shutter)).perform(click())
+        waitFor("recording started", 20_000) { visible(R.id.recTime) }
+        SystemClock.sleep(seconds * 1000)
+        onView(withId(R.id.shutter)).perform(click())
+        waitFor("video saved", 20_000) { videoCount() > before }
+        waitFor("recording UI gone") { !visible(R.id.recTime) }
+        return latestVideo()!!
+    }
+
+    @Test
+    fun videoIsRecordedWithTheLook() {
+        waitForCamera()
+        setSimple(true)
+        onView(withId(R.id.switchVideo)).perform(click())
+        SystemClock.sleep(1500)
+        waitForCamera()
+        onView(withId(R.id.btnLook)).perform(click())
+        onView(withContentDescription("Look Mono")).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
+        onView(withId(R.id.btnLook)).perform(click())
+        val uri = recordClip(3)
+        val r = android.media.MediaMetadataRetriever()
+        r.setDataSource(context, uri)
+        val frame = r.getFrameAtTime(1_500_000)!!
+        r.release()
+        var colour = 0L
+        var n = 0
+        for (y in 0 until frame.height step 8) for (x in 0 until frame.width step 8) {
+            val p = frame.getPixel(x, y)
+            colour += abs(((p shr 16) and 0xFF) - ((p shr 8) and 0xFF)) + abs(((p shr 8) and 0xFF) - (p and 0xFF))
+            n++
+        }
+        Log.i(TAG, "mono video colourfulness ${colour.toDouble() / n} (${frame.width}x${frame.height})")
+        assertTrue("video frames are black and white", colour.toDouble() / n < 8.0)
+        context.contentResolver.delete(uri, null, null)
+    }
+
+    @Test
+    fun timelapseSpeedsUpTheClip() {
+        waitForCamera()
+        setSimple(true)
+        onView(withId(R.id.switchVideo)).perform(click())
+        SystemClock.sleep(1500)
+        waitForCamera()
+        onView(withId(R.id.kindTimelapse)).perform(click())
+        SystemClock.sleep(1500)
+        waitForCamera()
+        assertTrue(text(R.id.intentHint).contains("Time-lapse"))
+        val uri = recordClip(9)
+        val r = android.media.MediaMetadataRetriever()
+        r.setDataSource(context, uri)
+        val ms = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)!!.toLong()
+        r.release()
+        Log.i(TAG, "time-lapse: 9 s recorded -> $ms ms")
+        assertTrue("much shorter than the 9 s recorded: $ms ms", ms in 100..3000)
+        context.contentResolver.delete(uri, null, null)
+    }
+
+    @Test
+    fun levelHorizonEnlargesPreviewWhileRecording() {
+        waitForCamera()
+        setSimple(true)
+        onView(withId(R.id.switchVideo)).perform(click())
+        SystemClock.sleep(1500)
+        waitForCamera()
+        onView(withId(R.id.kindLevel)).perform(click())
+        assertTrue(Prefs(context).levelVideo)
+        val before = videoCount()
+        onView(withId(R.id.shutter)).perform(click())
+        waitFor("recording started", 20_000) { visible(R.id.recTime) }
+        SystemClock.sleep(1500)
+        var sx = 0f
+        activityRule.scenario.onActivity {
+            val v = FloatArray(9)
+            it.findViewById<android.view.TextureView>(R.id.textureView).getTransform(null).getValues(v)
+            sx = kotlin.math.hypot(v[android.graphics.Matrix.MSCALE_X].toDouble(), v[android.graphics.Matrix.MSKEW_Y].toDouble()).toFloat()
+        }
+        Log.i(TAG, "level: preview scale $sx while recording")
+        assertTrue("preview shows the levelled (enlarged) framing: $sx", sx > 1.1f)
+        onView(withId(R.id.shutter)).perform(click())
+        waitFor("video saved", 20_000) { videoCount() > before }
+        latestVideo()?.let { context.contentResolver.delete(it, null, null) }
+    }
+
+    @Test
+    fun focusStackMakesEverythingSharp() {
+        val w = 500
+        val h = 400
+        val n = 5
+        val rnd = java.util.Random(1)
+        val truth = FloatArray(w * h) { 128f + 90f * (rnd.nextFloat() - 0.5f) }
+        val blurred = truth.copyOf().also { repeat(3) { _ -> PortraitProcessor.boxBlur(it, w, h, 3) } }
+        // Each shot is sharp in one vertical band only (like focus at one distance).
+        val frames = (0 until n).map { k ->
+            IntArray(w * h) { i ->
+                val v = (if ((i % w) * n / w == k) truth[i] else blurred[i]).toInt().coerceIn(0, 255)
+                (0xFF shl 24) or (v shl 16) or (v shl 8) or v
+            }
+        }
+        val out = IntArray(w * h)
+        FocusStackProcessor.stack(frames, frames.map { FocusStackProcessor.sharpness(it, w, h, 2) }, List(n) { 0 to 0 }, w, h, out)
+        fun err(a: IntArray) = a.indices.sumOf { abs((a[it] and 0xFF) - truth[it].toInt().coerceIn(0, 255)).toDouble() } / a.size
+        Log.i(TAG, "focus stack: single ${err(frames[0])} -> stacked ${err(out)}")
+        assertTrue("stacked is sharp everywhere: ${err(out)} vs ${err(frames[0])}", err(out) < err(frames[0]) * 0.2)
+        val plan = FocusStackProcessor.plan(5f, 10f, 5)
+        assertTrue("near to far: ${plan.toList()}", plan.first() > plan.last() && plan.all { it in 0f..10f })
+    }
+
+    @Test
+    fun lightTrailsKeepTheBrightest() {
+        val w = 4
+        val acc = IntArray(w * 1) { 0xFF101010.toInt() }
+        val frame = intArrayOf(0xFF000000.toInt(), 0xFFFF8000.toInt(), 0xFF101010.toInt(), 0xFF00FF00.toInt())
+        TrailsProcessor.lighten(acc, frame, w, 1, 0, 0)
+        assertEquals(0xFF101010.toInt(), acc[0])
+        assertEquals(0xFFFF8010.toInt(), acc[1])
+        assertEquals(0xFF10FF10.toInt(), acc[3])
+        // Exposure: same brightness as auto, frames up to 1/3 s.
+        val (iso, t) = TrailsProcessor.plan(1600, 33_000_000L, Range(50, 3200), Range(100_000L, 1_000_000_000L), 333_000_000L)
+        assertEquals(1600.0 * 33_000_000, iso.toDouble() * t, 1600.0 * 33_000_000 * 0.05)
+        assertTrue(t <= 333_000_000L)
+    }
+
+    private fun captureAndExpect(intentId: Int, suffix: String, timeoutMs: Long = 90_000) {
+        waitForCamera()
+        setSimple(true)
+        onView(withId(intentId)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
+        val before = count("image/jpeg")
+        onView(withId(R.id.shutter)).perform(click())
+        waitFor("$suffix photo saved", timeoutMs) { count("image/jpeg") > before }
+        waitFor("finished", 30_000) { !shutterBusy() }
+        SystemClock.sleep(1500)
+        assertEquals("exactly one photo", before + 1, count("image/jpeg"))
+        val names = context.contentResolver.query(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI, arrayOf(MediaStore.Images.Media.DISPLAY_NAME),
+            "${MediaStore.Images.Media.DISPLAY_NAME} LIKE ?", arrayOf("%$suffix%"), null,
+        )?.use { it.count } ?: 0
+        assertTrue("a $suffix photo was saved", names > 0)
+    }
+
+    @Test
+    fun lightTrailsCaptureSavesStackedPhoto() {
+        captureAndExpect(R.id.intentTrails, "_TRAILS")
+        assertEquals("Light trails", ReviewActivity.describe("PROCAM_1_TRAILS.jpg").first)
+    }
+
+    @Test
+    fun closeUpCaptureSavesStackedPhoto() {
+        assumeTrue("needs manual focus", backCameraHas(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR))
+        captureAndExpect(R.id.intentCloseup, "_CLOSEUP")
+        assertEquals("Close-up", ReviewActivity.describe("PROCAM_1_CLOSEUP.jpg").first)
+    }
+
+    @Test
+    fun autoMergesShotsInDimLight() {
+        waitForCamera()
+        setSimple(true)
+        context.getSharedPreferences("procam", android.content.Context.MODE_PRIVATE).edit().putBoolean("forceLowLight", true).commit()
+        val before = count("image/jpeg")
+        onView(withId(R.id.shutter)).perform(click())
+        waitFor("low-light photo saved", 60_000) { count("image/jpeg") > before }
+        waitFor("finished", 20_000) { !shutterBusy() }
+        SystemClock.sleep(1500)
+        assertEquals("exactly one photo", before + 1, count("image/jpeg"))
+        val names = context.contentResolver.query(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI, arrayOf(MediaStore.Images.Media.DISPLAY_NAME),
+            "${MediaStore.Images.Media.DISPLAY_NAME} LIKE ?", arrayOf("%_LOWLIGHT%"), null,
+        )?.use { it.count } ?: 0
+        assertTrue("a _LOWLIGHT photo was saved", names > 0)
+    }
+
     // ------------------------------------------------------------------ helpers
 
     /** Switches between Simple and Pro with the top-bar button. */

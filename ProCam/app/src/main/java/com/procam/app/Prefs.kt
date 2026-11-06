@@ -21,6 +21,24 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("video", false)
         set(v) = sp.edit().putBoolean("video", v).apply()
 
+    /** Video kind: normal, time-lapse or slow motion (OutputPrefs.VIDEO_*). */
+    var videoKind: Int
+        get() = sp.getInt("videoKind", OutputPrefs.VIDEO_NORMAL)
+        set(v) = sp.edit().putInt("videoKind", v).apply()
+
+    /** Keep the horizon level in videos. */
+    var levelVideo: Boolean
+        get() = sp.getBoolean("levelVideo", false)
+        set(v) = sp.edit().putBoolean("levelVideo", v).apply()
+
+    /** Auto merges a few shots in dim light for less grain. */
+    var lowLightMerge: Boolean
+        get() = sp.getBoolean("lowLightMerge", true)
+        set(v) = sp.edit().putBoolean("lowLightMerge", v).apply()
+
+    /** Test hook: treat every Auto scene as dim (used by automated tests only). */
+    val forceLowLight: Boolean get() = sp.getBoolean("forceLowLight", false)
+
     /** Steady the viewfinder at high zoom. */
     var steadyZoom: Boolean
         get() = sp.getBoolean("steadyZoom", true)
@@ -30,6 +48,24 @@ class Prefs(context: Context) {
     var holdForVideo: Boolean
         get() = sp.getBoolean("holdForVideo", true)
         set(v) = sp.edit().putBoolean("holdForVideo", v).apply()
+
+    /** Strength of the chosen look, 0..100. */
+    var lookStrength: Int
+        get() = sp.getInt("lookStrength", 100)
+        set(v) = sp.edit().putInt("lookStrength", v.coerceIn(0, 100)).apply()
+
+    /** "My look" settings, each -100..100 (fade, grain, vignette 0..100). */
+    fun customLook() = Looks.Custom(
+        warmth = sp.getInt("myWarmth", 20) / 100f,
+        fade = sp.getInt("myFade", 30) / 100f,
+        contrast = sp.getInt("myContrast", 0) / 100f,
+        saturation = sp.getInt("mySaturation", -10) / 100f,
+        grain = sp.getInt("myGrain", 30) / 100f,
+        vignette = sp.getInt("myVignette", 30) / 100f,
+    )
+
+    fun customValue(key: String, default: Int) = sp.getInt(key, default)
+    fun setCustomValue(key: String, v: Int) = sp.edit().putInt(key, v).apply()
 
     /** Chosen look (filter) id, see [Looks]. */
     var look: String
@@ -146,6 +182,7 @@ class Prefs(context: Context) {
         mirrorFront = mirrorFront,
         video4k = video4k,
         stabilize = stabilize,
+        videoKind = videoKind,
     )
 
     // ---- last-used shooting settings

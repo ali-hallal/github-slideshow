@@ -172,12 +172,14 @@ class WelcomeActivity : Activity() {
         "Pick a mode under the viewfinder. ProCam sets everything else for you.",
     ).apply {
         row(this, "Auto", "Everyday photos · finds faces and focuses on them", highlight = true)
-        row(this, "Portrait", "Blurs the background behind a person")
+        row(this, "Portrait", "Blurs the background behind a person, pet or object")
         row(this, "Night", "Brighter, cleaner photos in low light")
         row(this, "Silky", "Smooth water, clouds and light trails")
         row(this, "Freeze", "Sharp kids, pets and sports · even if you press late")
         row(this, "Group", "Waits until everyone's eyes are open")
         row(this, "Clean", "Removes people walking through your shot")
+        row(this, "Close-up", "Small things sharp from front to back")
+        row(this, "Light trails", "Moving lights draw glowing lines")
         row(this, "Video", "PHOTO | VIDEO above the shutter · or hold the shutter")
     }
 
