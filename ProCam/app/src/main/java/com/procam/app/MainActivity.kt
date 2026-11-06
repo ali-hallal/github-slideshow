@@ -958,14 +958,15 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         if (abs(target - cameraZoom()) < 0.001f) return
         val hardware = target.coerceAtMost(c.zoomRange.upper)
         extraCrop = (target / hardware).coerceAtLeast(1f)
-        updateSteady()
-        applyPreviewCrop()
-        // Face boxes don't match an enlarged or shifted preview.
-        if (extraCrop > 1.001f || steady.active) overlay.setFaces(emptyList())
         if (abs(hardware - settings.zoom) > 0.0005f) {
             settings = settings.copy(zoom = hardware)
             camera.update(settings)
         }
+        // After the new zoom is in place (a quick jump, e.g. tapping 5×, may be a single step).
+        updateSteady()
+        applyPreviewCrop()
+        // Face boxes don't match an enlarged or shifted preview.
+        if (extraCrop > 1.001f || steady.active) overlay.setFaces(emptyList())
         updateLensRow()
         updateReadout()
         updateZoomSlider()
@@ -1017,7 +1018,6 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         val c = caps
         val on = c != null && !c.isFront && !videoMode &&
             prefs.steadyZoom && steady.available && displayZoom() >= STEADY_FROM && textureView.height > 0
-        Log.d(TAG, "steady: $on (zoom ${displayZoom()}, gyro ${steady.available}, focal ${c?.focalLength}, sensor ${c?.sensorWidthMm})")
         if (on) {
             val longSide = maxOf(textureView.width, textureView.height).toFloat()
             // Angle across the sensor's long side (= the preview's long side); a typical phone
