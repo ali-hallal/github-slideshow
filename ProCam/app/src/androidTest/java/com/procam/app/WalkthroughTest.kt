@@ -184,6 +184,19 @@ class WalkthroughTest {
         onView(withId(R.id.btnLook)).perform(click())
         SystemClock.sleep(1000)
 
+        // Clean: remove passers-by.
+        onView(withId(R.id.intentClean)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
+        SystemClock.sleep(1500)
+        screenshot("simple_clean")
+        onView(withId(R.id.shutter)).perform(click())
+        SystemClock.sleep(1200)
+        screenshot("clean_hold_still")
+        waitForIdleShutter(90_000)
+        SystemClock.sleep(1000)
+        screenshot("clean_done")
+        onView(withId(R.id.intentAuto)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
+        SystemClock.sleep(1500)
+
         // Auto HDR (forced on here, as the emulator scene isn't backlit): badge, capture, review.
         context.getSharedPreferences("procam", android.content.Context.MODE_PRIVATE).edit().putBoolean("forceHdr", true).commit()
         SystemClock.sleep(2000)

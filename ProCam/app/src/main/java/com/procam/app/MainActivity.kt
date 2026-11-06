@@ -84,6 +84,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private lateinit var intentScroll: View
     private lateinit var intentAuto: TextView
     private lateinit var intentGroup: TextView
+    private lateinit var intentClean: TextView
     private lateinit var switchPhoto: TextView
     private lateinit var switchVideo: TextView
     private lateinit var captureSwitch: View
@@ -184,6 +185,9 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
 
     // Shake meter / steady shot
     private lateinit var shake: ShakeMeter
+    private lateinit var steady: SteadyZoom
+    private var steadyDx = 0f
+    private var steadyDy = 0f
     private var steadyWaitStart = 0L
     private var pressRatio = Float.MAX_VALUE
 
@@ -200,6 +204,9 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private val nightMode get() = photoIntent("NIGHT")
     private val silkyMode get() = photoIntent("SILKY")
     private val freezeMode get() = photoIntent("FREEZE")
+    private val cleanMode get() = photoIntent("CLEAN")
+    private var cleanProcessing = false
+    private val clean = CleanProcessor()
     private val videoMode get() = prefs.video
 
     // Video
@@ -247,6 +254,11 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         cameraIds = camera.primaryCameras()
         sensorManager = getSystemService(SensorManager::class.java)
         shake = ShakeMeter(this)
+        steady = SteadyZoom(this) { dx, dy ->
+            steadyDx = dx
+            steadyDy = dy
+            applyPreviewCrop()
+        }
         locationTracker = LocationTracker(this) {
             lastLocation = it
             camera.setLocation(it)
@@ -277,6 +289,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         }
         if (prefs.location) locationTracker.start() else locationTracker.stop()
         shake.start()
+        steady.start()
         mainHandler.post(analysisTick)
         if (!prefs.onboarded) return // the welcome guide is on top; continue when it closes
         if (hasCameraPermission()) {
@@ -297,6 +310,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         nightProcessing = false
         zoomProcessing = false
         freezeProcessing = false
+        cleanProcessing = false
         videoStarting = false
         overlay.setFaces(emptyList())
         zoomAnimator?.cancel()
@@ -307,6 +321,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         sensorManager.unregisterListener(this)
         locationTracker.stop()
         shake.stop()
+        steady.stop()
+        steady.active = false
         mainHandler.removeCallbacks(steadyTick)
         mainHandler.removeCallbacks(analysisTick)
         prefs.saveShot(settings)
@@ -440,6 +456,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         intentScroll = findViewById(R.id.intentScroll)
         intentAuto = findViewById(R.id.intentAuto)
         intentGroup = findViewById(R.id.intentGroup)
+        intentClean = findViewById(R.id.intentClean)
         switchPhoto = findViewById(R.id.switchPhoto)
         switchVideo = findViewById(R.id.switchVideo)
         captureSwitch = findViewById(R.id.captureSwitch)
@@ -575,6 +592,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         btnMode.setOnClickListener { setUiPro(!prefs.uiPro) }
         intentAuto.setOnClickListener { setIntent("AUTO") }
         intentGroup.setOnClickListener { setIntent("GROUP") }
+        intentClean.setOnClickListener { setIntent("CLEAN") }
         switchPhoto.setOnClickListener { setVideo(false) }
         switchVideo.setOnClickListener { setVideo(true) }
         btnLook.setOnClickListener { toggleLooks() }
@@ -714,6 +732,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         "NIGHT" -> intentNight
         "SILKY" -> intentSilky
         "FREEZE" -> intentFreeze
+        "CLEAN" -> intentClean
         else -> intentAuto
     }
 
@@ -744,6 +763,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             intentAuto to (intent == "AUTO"), intentPortrait to (intent == "PORTRAIT"),
             intentNight to (intent == "NIGHT"), intentSilky to (intent == "SILKY"),
             intentFreeze to (intent == "FREEZE"), intentGroup to (intent == "GROUP"),
+            intentClean to (intent == "CLEAN"),
         )) {
             v.setBackgroundResource(if (on) R.drawable.pill_selected_bg else R.drawable.pill_bg)
             v.setTextColor(getColor(if (on) R.color.black else R.color.white))
@@ -768,6 +788,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             "PORTRAIT" -> ""
             "NIGHT" -> "Merges several shots for brighter, cleaner low-light photos · hold still about 1 s"
             "FREEZE" -> "Sharp action: kids, pets, sports · catches the moment even if you press a little late"
+            "CLEAN" -> "Removes people and cars passing through · hold still about 3 s"
             else -> "Finds faces and sets everything for you"
         }
         // Video: the photo modes make way for a video tip; the looks strip replaces the modes.
@@ -858,7 +879,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         if (abs(target - cameraZoom()) < 0.001f) return
         val hardware = target.coerceAtMost(c.zoomRange.upper)
         extraCrop = (target / hardware).coerceAtLeast(1f)
+        updateSteady()
         applyPreviewCrop()
+        // Face boxes don't match an enlarged or shifted preview.
+        if (extraCrop > 1.001f || steady.active) overlay.setFaces(emptyList())
         if (abs(hardware - settings.zoom) > 0.0005f) {
             settings = settings.copy(zoom = hardware)
             camera.update(settings)
@@ -888,17 +912,50 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private fun applyPreviewCrop() {
         val w = textureView.width.toFloat()
         val h = textureView.height.toFloat()
-        if (extraCrop <= 1.001f || w == 0f) {
+        val s = previewScale()
+        val shifted = steady.active && (steadyDx != 0f || steadyDy != 0f)
+        if ((s <= 1.001f && !shifted) || w == 0f) {
             textureView.setTransform(null)
         } else {
-            textureView.setTransform(Matrix().apply { setScale(extraCrop, extraCrop, w / 2, h / 2) })
-            overlay.setFaces(emptyList())
+            textureView.setTransform(Matrix().apply {
+                setScale(s, s, w / 2, h / 2)
+                if (steady.active) postTranslate(steadyDx, steadyDy)
+            })
+        }
+    }
+
+    /** Preview enlargement: super zoom, plus spare picture for steadying at high zoom. */
+    private fun previewScale() = extraCrop * if (steady.active) SteadyZoom.MARGIN else 1f
+
+    /** At high zoom (back camera, photos), steady the viewfinder against hand tremor. */
+    private fun updateSteady() {
+        val c = caps
+        val focal = c?.focalLength
+        val on = c != null && focal != null && focal > 0f && c.sensorWidthMm > 0f && !c.isFront && !videoMode &&
+            prefs.steadyZoom && steady.available && displayZoom() >= STEADY_FROM && textureView.height > 0
+        if (on) {
+            val longSide = maxOf(textureView.width, textureView.height).toFloat()
+            // Angle across the preview's long side (the sensor's long side), per preview pixel, at the
+            // enlarged preview scale.
+            steady.radPerPx = c!!.sensorWidthMm / (focal!! * cameraZoom() * SteadyZoom.MARGIN) / longSide
+            steady.maxShiftX = (SteadyZoom.MARGIN - 1f) / 2f * textureView.width
+            steady.maxShiftY = (SteadyZoom.MARGIN - 1f) / 2f * textureView.height
+        }
+        if (steady.active != on) {
+            steady.active = on
+            if (!on) {
+                steadyDx = 0f
+                steadyDy = 0f
+            }
+            applyPreviewCrop()
         }
     }
 
     /** Screen tap → 0..1 position in the camera's (un-super-zoomed) frame. */
-    private fun unzoomX(x: Float) = 0.5f + (x / textureView.width - 0.5f) / extraCrop
-    private fun unzoomY(y: Float) = 0.5f + (y / textureView.height - 0.5f) / extraCrop
+    private fun unzoomX(x: Float) = 0.5f + ((x - steadyShiftX()) / textureView.width - 0.5f) / previewScale()
+    private fun unzoomY(y: Float) = 0.5f + ((y - steadyShiftY()) / textureView.height - 0.5f) / previewScale()
+    private fun steadyShiftX() = if (steady.active) steadyDx else 0f
+    private fun steadyShiftY() = if (steady.active) steadyDy else 0f
 
     // ---- zoom slider (log scale, from widest to maximum incl. super zoom)
 
@@ -1002,7 +1059,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         if (groupWaiting) {
             cancelGroup(); return
         }
-        if (capturing || groupProcessing || portraitProcessing || nightProcessing || zoomProcessing || freezeProcessing || caps == null) return
+        if (capturing || groupProcessing || portraitProcessing || nightProcessing || zoomProcessing || freezeProcessing || cleanProcessing || caps == null) return
         if (extraCrop > 1.01f && pendingEnhance >= MAX_PENDING_ENHANCE) {
             toast("Still enhancing the last zoom photos…")
             return
@@ -1040,6 +1097,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             startNight()
         } else if (silkyMode) {
             startSilky()
+        } else if (cleanMode) {
+            startClean()
         } else if (freezeMode) {
             // Never miss the moment: the sharpest frame from around the press.
             freezeProcessing = true
@@ -1186,6 +1245,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         applyPreviewCrop()
         updateZoomSlider()
         applyLiveLook()
+        updateSteady()
         refreshUi()
         // Quick video: the camera has reopened for video while the shutter is held.
         if (quickVideo && openedForVideo && !recording) {
@@ -1200,7 +1260,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     override fun onCaptureFinished(success: Boolean) {
-        if ((groupProcessing || portraitProcessing || nightProcessing || zoomProcessing || freezeProcessing) && success) {
+        if ((groupProcessing || portraitProcessing || nightProcessing || zoomProcessing || freezeProcessing || cleanProcessing) && success) {
             // Wait for the photo(s) to be processed and saved.
             if (pressRatio < BLURRY_RATIO) toast("This one may be blurry: your hands moved. Brace your elbows and try again.")
             pressRatio = Float.MAX_VALUE
@@ -1212,6 +1272,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             nightProcessing = false
             zoomProcessing = false
             freezeProcessing = false
+            cleanProcessing = false
             groupStatus.visibility = View.GONE
         }
         if (success && pressRatio < BLURRY_RATIO) {
@@ -1269,7 +1330,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     override fun onFaces(faces: List<RectF>) {
         // In Group mode the smarter ML Kit boxes (green = ready) are drawn instead; with super
         // zoom the camera's face positions no longer match the enlarged preview.
-        if (!groupMode && extraCrop <= 1.001f) overlay.setFaces(faces)
+        if (!groupMode && extraCrop <= 1.001f && !steady.active) overlay.setFaces(faces)
         if (faces.isNotEmpty()) lastFaceSeen = SystemClock.uptimeMillis()
         lastFaces = faces
     }
@@ -1334,6 +1395,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         updateZoomSlider()
         haptic(if (video) switchVideo else switchPhoto, HapticFeedbackConstants.VIRTUAL_KEY)
         applyLiveLook()
+        updateSteady()
         syncFreeze()
         syncVideo()
         refreshUi()
@@ -1626,6 +1688,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             processNight(frames, mimeType)
             return
         }
+        if (cleanProcessing) {
+            processClean(frames, mimeType)
+            return
+        }
         if (!groupProcessing) return
         groupStatus.text = "Picking the best shot…"
         Thread {
@@ -1831,6 +1897,46 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             camera.takeBurst(deviceOrientation, frames, toMemory = true)
         }
         showGroupStatus("Hold still… capturing $frames shots")
+    }
+
+    // ------------------------------------------------------------------ clean (remove passers-by)
+
+    private fun startClean() {
+        cleanProcessing = true
+        showGroupStatus("Hold still… removing passers-by (3 s)")
+        camera.takeBurst(deviceOrientation, CLEAN_FRAMES, toMemory = true, intervalMs = CLEAN_INTERVAL_MS)
+    }
+
+    private fun processClean(frames: List<ByteArray>, mimeType: String) {
+        showGroupStatus("Removing passers-by…")
+        val quality = prefs.jpegQuality
+        Thread {
+            val result = try {
+                if (frames.size >= 3) clean.process(frames, quality) else null
+            } catch (e: Throwable) {
+                Log.e(TAG, "clean failed", e)
+                null
+            }
+            val source = frames[result?.reference ?: (frames.size / 2)]
+            val bytes = result?.jpeg ?: source
+            val mime = if (result != null) "image/jpeg" else mimeType
+            val ext = if (mime == "image/heic") "heic" else "jpg"
+            val name = "${MediaSaver.newBaseName()}${if (result != null) "_CLEAN" else ""}.$ext"
+            if (result != null) OriginalStore.save(this, name, source)
+            val uri = MediaSaver.save(
+                this, name, mime,
+                writer = { it.write(bytes) },
+                afterWrite = if (result != null) { u -> MediaSaver.copyExif(this, u, source) } else null,
+            )
+            runOnUiThread {
+                cleanProcessing = false
+                capturing = false
+                shutter.busy = false
+                groupStatus.visibility = View.GONE
+                if (uri != null) onPhotoSaved(uri, mime) else toast(getString(R.string.save_failed))
+                toast(if (result != null) "Clean photo · passers-by removed (${result.used} shots)" else "Saved a single shot")
+            }
+        }.start()
     }
 
     private fun startNight() {
@@ -2404,6 +2510,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         private const val TAG = "ProCam"
         private const val REQUEST_CAMERA = 1
         private const val REQUEST_AUDIO = 3
+        private const val CLEAN_FRAMES = 7
+        /** Steady the viewfinder from this zoom up. */
+        private const val STEADY_FROM = 4f
+        private const val CLEAN_INTERVAL_MS = 450L
         private const val QUICK_VIDEO_HOLD_MS = 800L
         private const val GROUP_BURST = 3
         private const val GROUP_ANALYSIS_WIDTH = 480

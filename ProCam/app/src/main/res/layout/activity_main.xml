@@ -285,6 +285,7 @@
                 <TextView android:id="@+id/intentSilky" style="@style/IntentPill" android:text="Silky" />
                 <TextView android:id="@+id/intentFreeze" style="@style/IntentPill" android:text="Freeze" />
                 <TextView android:id="@+id/intentGroup" style="@style/IntentPill" android:text="Group" />
+                <TextView android:id="@+id/intentClean" style="@style/IntentPill" android:text="Clean" />
             </LinearLayout>
         </HorizontalScrollView>
 

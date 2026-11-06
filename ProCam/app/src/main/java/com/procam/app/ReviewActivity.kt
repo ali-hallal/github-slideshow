@@ -509,6 +509,7 @@ class ReviewActivity : Activity() {
             name.contains("_PORTRAIT") -> "Portrait" to "Background blurred to make the person stand out"
             name.contains("_NIGHT") -> "Night" to "Several shots merged for a brighter, cleaner photo"
             name.contains("_HDR") -> "HDR" to "Bright sky kept, dark areas brightened · shot darker and merged"
+            name.contains("_CLEAN") -> "Clean" to "People and cars passing through removed · shots combined over 3 s"
             name.contains("_SILKY") -> "Silky" to "Shots blended so moving things become smooth streaks"
             name.contains("_ZOOM") -> "Super zoom" to "Built from a burst for more detail than digital zoom"
             name.contains("_ACTION") -> "Freeze" to "The sharpest moment around your press"

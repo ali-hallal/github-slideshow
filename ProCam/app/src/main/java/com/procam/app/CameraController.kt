@@ -109,6 +109,7 @@ class CameraController(context: Context, private val listener: Listener) {
     private var stillToMemory = false
     private var burstExposure: Pair<Int, Long>? = null
     private var burstMinimal = false
+    private var burstIntervalMs = 0L
     // Fast bursts: a video-size YUV stream (no JPEG encode/decode), centre-cropped on arrival.
     private var yuvReader: ImageReader? = null
     // Video
@@ -343,6 +344,8 @@ class CameraController(context: Context, private val listener: Listener) {
          * sharpening (they erase the fine detail the merge recovers) and lock focus.
          */
         minimalProcessing: Boolean = false,
+        /** Spread the frames out in time (Clean mode: let passers-by move), 0 = as fast as possible. */
+        intervalMs: Long = 0L,
     ) {
         val h = handler
         if (h == null) {
@@ -355,6 +358,7 @@ class CameraController(context: Context, private val listener: Listener) {
             burstToYuv = false
             burstExposure = exposure
             burstMinimal = minimalProcessing
+            burstIntervalMs = intervalMs
             takePictureInternal(deviceOrientation)
         }
     }
@@ -1023,8 +1027,25 @@ class CameraController(context: Context, private val listener: Listener) {
             } else if (burst) {
                 burstFrames.clear()
                 burstExpected = stillCount
-                if (stillCount == 1) s.capture(b.build(), stillCallback, handler)
-                else s.captureBurst(List(stillCount) { b.build() }, stillCallback, handler)
+                val interval = burstIntervalMs
+                if (stillCount == 1) {
+                    s.capture(b.build(), stillCallback, handler)
+                } else if (interval > 0) {
+                    // Spaced out: one frame now, the rest every [interval] ms.
+                    val request = b.build()
+                    s.capture(request, stillCallback, handler)
+                    for (k in 1 until stillCount) {
+                        handler?.postDelayed({
+                            try {
+                                if (session === s) s.capture(request, stillCallback, handler)
+                            } catch (e: Exception) {
+                                Log.w(TAG, "spaced capture", e)
+                            }
+                        }, k * interval)
+                    }
+                } else {
+                    s.captureBurst(List(stillCount) { b.build() }, stillCallback, handler)
+                }
             } else {
                 burstExpected = 0
                 s.capture(b.build(), stillCallback, handler)

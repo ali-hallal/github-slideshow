@@ -1022,6 +1022,100 @@ class ProCamTest {
         assertTrue("darker corners", Looks.vignetteFactor(noir, 1f) < 0.7f)
     }
 
+    @Test
+    fun cleanMergeRemovesPasserBy() {
+        // 7 frames, hand shake between them, noise, and a dark "person" walking across.
+        val w = 600
+        val h = 400
+        val n = 7
+        val rnd = java.util.Random(3)
+        fun scene(x: Int, y: Int) = (90 + 60 * kotlin.math.sin(x / 13.0) * kotlin.math.cos(y / 17.0) + (if ((x / 50 + y / 50) % 2 == 0) 30 else 0)).toInt()
+        val shifts = listOf(0 to 0, 3 to -2, -2 to 1, 1 to 1, -3 to -1, 2 to 3, -1 to -2)
+        val frames = (0 until n).map { k ->
+            val (sx, sy) = shifts[k]
+            IntArray(w * h) { i ->
+                val ox = i % w + sx
+                val oy = i / w + sy
+                var v = scene(ox, oy)
+                val px = 40 + k * 80
+                if (ox in px until px + 60 && oy in 150 until 310) v = 25
+                v = (v + rnd.nextGaussian() * 8).toInt().coerceIn(0, 255)
+                (0xFF shl 24) or (v shl 16) or (v shl 8) or v
+            }
+        }
+        val ref = n / 2
+        val offsets = (0 until n).map { k -> (shifts[ref].first - shifts[k].first) to (shifts[ref].second - shifts[k].second) }
+        val out = IntArray(w * h)
+        CleanProcessor.merge(frames, offsets, w, h, out)
+        fun err(a: IntArray, x0: Int, x1: Int, y0: Int, y1: Int): Double {
+            var e = 0.0
+            var c = 0
+            for (y in y0 until y1) for (x in x0 until x1) {
+                e += abs((a[y * w + x] and 0xFF) - scene(x + shifts[ref].first, y + shifts[ref].second).coerceIn(0, 255)); c++
+            }
+            return e / c
+        }
+        val person = err(out, 285, 335, 160, 300)
+        val noise = err(out, 400, 560, 20, 120)
+        Log.i(TAG, "clean: person area error ${err(frames[ref], 285, 335, 160, 300)} -> $person, background ${err(frames[ref], 400, 560, 20, 120)} -> $noise")
+        assertTrue("passer-by removed: $person", person < 8)
+        assertTrue("less noise: $noise vs ${err(frames[ref], 400, 560, 20, 120)}", noise < err(frames[ref], 400, 560, 20, 120) * 0.7)
+    }
+
+    @Test
+    fun cleanCaptureSavesOnePhoto() {
+        waitForCamera()
+        setSimple(true)
+        onView(withId(R.id.intentClean)).perform(androidx.test.espresso.action.ViewActions.scrollTo(), click())
+        assertTrue("hint", text(R.id.intentHint).contains("passing through"))
+        val before = count("image/jpeg")
+        onView(withId(R.id.shutter)).perform(click())
+        waitFor("clean photo saved", 90_000) { count("image/jpeg") > before }
+        waitFor("finished", 20_000) { !shutterBusy() }
+        SystemClock.sleep(1500)
+        assertEquals("exactly one photo", before + 1, count("image/jpeg"))
+        val names = context.contentResolver.query(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI, arrayOf(MediaStore.Images.Media.DISPLAY_NAME),
+            "${MediaStore.Images.Media.DISPLAY_NAME} LIKE ?", arrayOf("%_CLEAN%"), null,
+        )?.use { it.count } ?: 0
+        assertTrue("a _CLEAN photo was saved", names > 0)
+        assertEquals("Clean", ReviewActivity.describe("PROCAM_1_CLEAN.jpg").first)
+    }
+
+    @Test
+    fun steadyZoomFilterLetsPansThrough() {
+        // Tremor: a short turn is held (cancelled on screen) ...
+        var a = 0f to 0f
+        repeat(5) { a = SteadyZoom.step(a.first, a.second, 0.2f, -0.1f, 0.02f) }
+        assertTrue("short turn tracked: $a", a.first > 0.015f && a.second < -0.007f)
+        // ... while a long steady pan fades through (the view follows the pan after a while).
+        repeat(300) { a = SteadyZoom.step(a.first, a.second, 0f, 0f, 0.02f) }
+        assertTrue("released after the movement stops: $a", abs(a.first) < 1e-3f && abs(a.second) < 1e-3f)
+    }
+
+    @Test
+    fun steadyZoomEnlargesPreviewOnlyAtHighZoom() {
+        val sm = context.getSystemService(android.hardware.SensorManager::class.java)
+        assumeTrue("needs a gyroscope", sm.getDefaultSensor(android.hardware.Sensor.TYPE_GYROSCOPE) != null)
+        waitForCamera()
+        setSimple(true)
+        fun scale(): Float {
+            var sx = 0f
+            activityRule.scenario.onActivity {
+                val m = it.findViewById<android.view.TextureView>(R.id.textureView).getTransform(null)
+                val v = FloatArray(9)
+                m.getValues(v)
+                sx = v[android.graphics.Matrix.MSCALE_X]
+            }
+            return sx
+        }
+        assertEquals("1×: no steadying", 1f, scale(), 0.01f)
+        onView(withContentDescription("Zoom 5×")).perform(click())
+        waitFor("steadying at 5×") { abs(scale() - SteadyZoom.MARGIN) < 0.02f }
+        onView(withContentDescription("Zoom 1×")).perform(click())
+        waitFor("back to normal at 1×") { abs(scale() - 1f) < 0.01f }
+    }
+
     // ------------------------------------------------------------------ helpers
 
     /** Switches between Simple and Pro with the top-bar button. */

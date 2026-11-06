@@ -122,6 +122,8 @@ class SettingsActivity : Activity() {
             listOf("Off", "On"), { if (prefs.level) 1 else 0 }, { prefs.level = it == 1 }))
         row(Option("Auto HDR", "In Auto, balance bright skies and dark subjects automatically (shows an HDR badge)",
             listOf("Off", "On"), { if (prefs.autoHdr) 1 else 0 }, { prefs.autoHdr = it == 1 }))
+        row(Option("Steady zoom view", "At 4× and beyond, the picture on screen is held steady against hand shake",
+            listOf("Off", "On"), { if (prefs.steadyZoom) 1 else 0 }, { prefs.steadyZoom = it == 1 }))
         row(Option("Focus peaking", "Highlights sharp edges in red",
             listOf("Manual focus only", "Always", "Off"), { prefs.peaking }, { prefs.peaking = it }))
         row(Option("Zebra stripes", "Stripes over areas that are too bright",
