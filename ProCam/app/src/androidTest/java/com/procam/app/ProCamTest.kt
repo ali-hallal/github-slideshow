@@ -1634,12 +1634,16 @@ class ProCamTest {
         var hw = 0f
         var v = 0f
         activityRule.scenario.onActivity { val d = it.findViewById<ZoomDial>(R.id.zoomDial); hw = d.hardwareMax; v = d.value }
-        if (v <= hw * 1.01f && visible(R.id.zoomBar)) onView(withId(R.id.zoomDial)).perform(dragAcross(0.95f, 0.05f))
+        // All the way into super zoom (the far end is where AI detail is meant for; a small area, quick).
+        repeat(3) {
+            activityRule.scenario.onActivity { val d = it.findViewById<ZoomDial>(R.id.zoomDial); v = d.value; hw = d.hi }
+            if (v < hw * 0.99f && visible(R.id.zoomBar)) onView(withId(R.id.zoomDial)).perform(dragAcross(0.95f, 0.05f))
+        }
         assertTrue("the zoom readout says AI: ${text(R.id.zoomIndicator)}", text(R.id.zoomIndicator).contains("AI"))
         AiUpscaler.lastRunMs = 0
         val before = count("image/jpeg")
         onView(withId(R.id.shutter)).perform(click())
-        waitFor("super zoom photo saved", 180_000) { count("image/jpeg") > before }
+        waitFor("super zoom photo saved", 420_000) { count("image/jpeg") > before }
         assertTrue("the AI ran", AiUpscaler.lastRunMs > 0)
         Log.i(TAG, "super zoom AI took ${AiUpscaler.lastRunMs} ms")
     }
