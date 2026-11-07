@@ -509,6 +509,7 @@ class ReviewActivity : Activity() {
             name.contains("_PORTRAIT") -> "Portrait" to "Background blurred to make the person stand out"
             name.contains("_NIGHT") -> "Night" to "Several shots merged for a brighter, cleaner photo"
             name.contains("_HDR") -> "HDR" to "Bright sky kept, dark areas brightened · shot darker and merged"
+            name.contains("_STEADY") -> "Steady" to "Shaky hands: fast shots merged so it's sharp, without extra grain"
             name.contains("_LOWLIGHT") -> "Low light" to "A few shots merged for less grain, same brightness"
             name.contains("_CLOSEUP") -> "Close-up" to "Shots focused near to far, combined so it's sharp throughout"
             name.contains("_TRAILS") -> "Light trails" to "Shots stacked so moving lights draw lines"

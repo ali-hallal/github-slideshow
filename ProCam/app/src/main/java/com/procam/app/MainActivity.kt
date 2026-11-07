@@ -251,6 +251,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private var mergeHdrStops = 0f
     /** The running merge is Auto's quiet low-light merge (same brightness, less grain). */
     private var mergeIndoor = false
+    /** ... specifically shaky hands: faster shots merged (named Steady). */
+    private var mergeSteady = false
     /** The running zoom burst is zoom enhance (within the camera's range), not super zoom. */
     private var zoomEnhancing = false
     // Auto HDR: how many stops darker to shoot right now (0 = off), with hysteresis.
@@ -1249,8 +1251,64 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 camera.takeBurst(deviceOrientation, zoomBurstFrames(), toMemory = true, exposure = exposure, minimalProcessing = true)
             }
         } else {
-            camera.takePicture(deviceOrientation)
+            // A normal photo: never slower than the hands can hold right now.
+            val plan = steadyPlan()
+            when {
+                plan == null -> camera.takePicture(deviceOrientation)
+                !plan.burst -> {
+                    Log.i(TAG, "steady shutter: ISO ${plan.iso} ${Stops.shutterLabel(plan.exposureNs)} (auto wanted ${liveExposure?.let { Stops.shutterLabel(it) }})")
+                    camera.takeBurst(deviceOrientation, 1, toMemory = false, exposure = plan.iso to plan.exposureNs)
+                }
+                else -> startSteadyBurst(plan)
+            }
         }
+    }
+
+    /**
+     * Faster shutter (higher ISO) when auto exposure's would blur with these hands, or null.
+     * Only with camera auto exposure and no flash (the flash needs the camera's own metering).
+     */
+    private fun steadyPlan(): Steady.Plan? {
+        val c = caps ?: return null
+        if (!prefs.steadyShutter || !c.manualSensor || !settings.cameraAe || settings.flash != FlashMode.OFF) return null
+        val isoR = c.isoRange ?: return null
+        val expR = c.exposureRange ?: return null
+        val iso = liveIso ?: return null
+        val exp = liveExposure ?: return null
+        val safe = if (prefs.forceShaky) FORCED_SHAKY_SAFE_NS else safeShutterNs() ?: return null
+        return Steady.plan(iso, exp, safe, isoR, expR)
+    }
+
+    /** Shaky hands and a much faster shutter: a few such shots merged so the extra noise goes away. */
+    private fun startSteadyBurst(plan: Steady.Plan) {
+        nightProcessing = true
+        mergeSilky = false
+        mergeHdrStops = 0f
+        mergeIndoor = true
+        mergeSteady = true
+        nightIso = plan.iso
+        Log.i(TAG, "steady burst: $STEADY_FRAMES x ISO ${plan.iso} ${Stops.shutterLabel(plan.exposureNs)} (auto wanted ${liveExposure?.let { Stops.shutterLabel(it) }})")
+        showGroupStatus("Shaky hands · taking a few fast shots")
+        camera.takeBurst(deviceOrientation, STEADY_FRAMES, toMemory = true, exposure = plan.iso to plan.exposureNs)
+    }
+
+    /** Frames to keep from a burst: drop those the phone moved during (gyroscope), at least [minKeep]. */
+    private fun <T> keepSteady(frames: List<T>, timing: List<Pair<Long, Long>>, minKeep: Int): List<T> {
+        if (timing.size != frames.size) return frames
+        return keepSteadyIndices(timing, minKeep).map { frames[it] }
+    }
+
+    private fun keepSteadyIndices(timing: List<Pair<Long, Long>>, minKeep: Int): List<Int> {
+        val c = caps
+        if (c == null || !camera.timestampsMatchSensors || !shake.available) return timing.indices.toList()
+        val radPerPx = ShakeMeter.radPerPx(c.focalLength ?: 0f, c.sensorWidthMm, cameraZoom())
+        val ois = if (c.ois) 4f else 1f
+        val blur = timing.map { (start, exposure) ->
+            shake.angleDuring(start, exposure)?.let { it / radPerPx / ois }
+        }
+        val keep = Steady.keep(blur, minKeep)
+        Log.i(TAG, "gyro blur per frame (px): ${blur.map { it?.let { b -> "%.1f".format(Locale.US, b) } ?: "?" }} -> keeping ${keep.size} of ${timing.size}")
+        return keep
     }
 
     private val steadyTick = object : Runnable {
@@ -1962,7 +2020,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             return
         }
         if (nightProcessing) {
-            processNight(frames, mimeType)
+            processNight(keepSteady(frames, camera.lastBurstTiming, minKeep = maxOf(2, frames.size / 2)), mimeType)
             return
         }
         if (cleanProcessing) {
@@ -2028,6 +2086,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
 
     /** Super zoom from full-resolution JPEGs (phones without the fast stream). */
     private fun processSuperZoom(frames: List<ByteArray>, mimeType: String) {
+        val timingForZoom = camera.lastBurstTiming
         val crop = extraCrop
         val quality = prefs.jpegQuality
         val enhance = zoomEnhancing
@@ -2035,7 +2094,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         releaseShutterForBackground()
         enhancer.execute {
             val result = try {
-                val burst = if (frames.size > 3) frames.drop(1) else frames
+                // The first frame can be stale; then drop the frames the phone moved during.
+                val timing = timingForZoom
+                val skip = if (frames.size > 3) 1 else 0
+                val burst = keepSteady(frames.drop(skip), timing.drop(skip), minKeep = 3)
                 when {
                     enhance -> superZoom.enhance(burst, quality)
                     aiFor(crop) -> superZoom.process(burst, crop, quality, ai = aiUpscaler())
@@ -2084,10 +2146,13 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         val quality = prefs.jpegQuality
         zoomEnhancing = false
         releaseShutterForBackground()
+        // Drop the RAW frames the phone moved during (by the gyroscope).
+        val steady = keepSteadyIndices(capture.timing, minKeep = 3)
+        val raw = if (steady.size < capture.frames.size) capture.only(steady) else capture
         enhancer.execute {
             var how = "RAW"
             val result = try {
-                rawZoom.process(capture, jpegs, capture.rotation, quality)
+                rawZoom.process(raw, jpegs, capture.rotation, quality)
             } catch (e: Throwable) {
                 Log.e(TAG, "raw zoom failed, using the JPEG merge", e)
                 how = "JPEG"
@@ -2440,7 +2505,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         mergeIndoor = true
         nightIso = liveIso ?: LOW_LIGHT_ISO
         showGroupStatus("Hold still…")
-        camera.takeBurst(deviceOrientation, LOW_LIGHT_FRAMES, toMemory = true)
+        // With shaky hands, each shot is also faster (the merge removes the extra noise).
+        val plan = steadyPlan()
+        plan?.let { nightIso = it.iso }
+        camera.takeBurst(deviceOrientation, LOW_LIGHT_FRAMES, toMemory = true, exposure = plan?.let { it.iso to it.exposureNs })
     }
 
     private fun startNight() {
@@ -2475,7 +2543,9 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         val silky = mergeSilky
         val hdr = mergeHdrStops
         val indoor = mergeIndoor
+        val steadyMerge = mergeSteady
         mergeIndoor = false
+        mergeSteady = false
         showGroupStatus(
             when {
                 hdr > 0f -> "Balancing light…"
@@ -2499,6 +2569,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             val suffix = when {
                 result == null -> ""
                 hdr > 0f -> "_HDR"
+                steadyMerge -> "_STEADY"
                 indoor -> "_LOWLIGHT"
                 silky -> "_SILKY"
                 else -> "_NIGHT"
@@ -2521,6 +2592,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                     when {
                         result == null -> "Saved a single shot"
                         hdr > 0f -> "HDR photo · bright and dark areas balanced"
+                        steadyMerge -> "Steady · ${result.merged} fast shots merged so shaking doesn't blur it"
                         indoor -> "Low light · merged ${result.merged} shots for less grain"
                         silky -> "Silky photo · blended ${result.merged} shots"
                         else -> "Night photo · merged ${result.merged} shots"
@@ -3022,6 +3094,9 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         private const val REQUEST_CAMERA = 1
         private const val REQUEST_AUDIO = 3
         private const val CLEAN_FRAMES = 7
+        private const val STEADY_FRAMES = 4
+        /** Test hook: pretend the hands only hold 1/500 s. */
+        private const val FORCED_SHAKY_SAFE_NS = 2_000_000L
         /** "Halfway into super zoom": super zoom reaches 4× past the camera's maximum; halfway on a log scale is 2×. */
         private const val AI_HALFWAY_CROP = 2f
         /** Zoom enhance from this zoom (relative to the main lens) up. */

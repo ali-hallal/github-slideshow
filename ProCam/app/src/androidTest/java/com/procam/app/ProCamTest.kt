@@ -1664,6 +1664,56 @@ class ProCamTest {
         assertTrue("a _ZOOM photo: $name", name.contains("_ZOOM"))
     }
 
+    @Test
+    fun shakeProofShutterMaths() {
+        val isoR = Range(50, 3200)
+        val expR = Range(100_000L, 1_000_000_000L)
+        // Auto wants 1/15 s; the hands hold 1/60 s: 4× faster, ISO 4× higher → merged burst.
+        val p = Steady.plan(400, 66_000_000L, 16_000_000L, isoR, expR)!!
+        assertEquals(16_000_000L, p.exposureNs)
+        assertEquals(1650.0, p.iso.toDouble(), 20.0)
+        assertTrue("big ISO raise → burst", p.burst)
+        // Slightly too slow: a single faster shot is enough.
+        val q = Steady.plan(400, 20_000_000L, 16_000_000L, isoR, expR)!!
+        assertTrue("small raise → single shot", !q.burst)
+        // Already fast enough: nothing to do.
+        assertTrue(Steady.plan(400, 10_000_000L, 16_000_000L, isoR, expR) == null)
+        // ISO can't go higher: as fast as it allows, still faster than auto.
+        val r = Steady.plan(3000, 66_000_000L, 4_000_000L, isoR, expR)!!
+        assertEquals(3200, r.iso)
+        assertTrue(r.exposureNs < 66_000_000L)
+    }
+
+    @Test
+    fun shakyFramesAreDropped() {
+        assertEquals("steady ones kept", listOf(0, 2, 4), Steady.keep(listOf(0.3f, 2.5f, 0.4f, 5.0f, 0.6f), 2))
+        assertEquals("at least minKeep, steadiest first", listOf(0, 1, 2), Steady.keep(listOf(3f, 4f, 2f, 9f), 3))
+        assertEquals("unknown blur kept", listOf(0, 1, 2), Steady.keep(listOf(null, 0.5f, null), 2))
+        // 0.1 rad/s for 50 ms = 0.005 rad.
+        val ts = LongArray(20) { it * 10_000_000L }
+        val ws = FloatArray(20) { 0.1f }
+        assertEquals(0.005f, ShakeMeter.turnedDuring(ts, ws, 30_000_000L, 80_000_000L), 1e-5f)
+    }
+
+    @Test
+    fun shakyHandsGiveASteadyMergedPhoto() {
+        waitForCamera()
+        setSimple(true)
+        context.getSharedPreferences("procam", android.content.Context.MODE_PRIVATE).edit().putBoolean("forceShaky", true).commit()
+        val before = count("image/jpeg")
+        onView(withId(R.id.shutter)).perform(click())
+        waitFor("steady photo saved", 60_000) { count("image/jpeg") > before }
+        waitFor("finished", 20_000) { !shutterBusy() }
+        SystemClock.sleep(1500)
+        assertEquals("exactly one photo", before + 1, count("image/jpeg"))
+        val names = context.contentResolver.query(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI, arrayOf(MediaStore.Images.Media.DISPLAY_NAME),
+            "${MediaStore.Images.Media.DISPLAY_NAME} LIKE ?", arrayOf("%_STEADY%"), null,
+        )?.use { it.count } ?: 0
+        assertTrue("a _STEADY photo (fast shots merged)", names > 0)
+        assertEquals("Steady", ReviewActivity.describe("PROCAM_1_STEADY.jpg").first)
+    }
+
     // ------------------------------------------------------------------ helpers
 
     /** Switches between Simple and Pro with the top-bar button. */

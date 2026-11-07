@@ -149,6 +149,8 @@ class SettingsActivity : Activity() {
             listOf("Take photo", "Zoom", "Volume"), { prefs.volumeKeys }, { prefs.volumeKeys = it }))
         row(Option("Hold shutter for video", "In photo mode, hold the shutter to record a quick video; let go to stop",
             listOf("Off", "On"), { if (prefs.holdForVideo) 1 else 0 }, { prefs.holdForVideo = it == 1 }))
+        row(Option("Shake-proof shutter", "When your hands shake, Auto uses a faster shutter (and merges a few shots to keep it clean) so photos come out sharp",
+            listOf("Off", "On"), { if (prefs.steadyShutter) 1 else 0 }, { prefs.steadyShutter = it == 1 }))
         row(Option("Steady shot", "If your hands are shaking, wait a moment for them to settle before taking the photo",
             listOf("Off", "On"), { if (prefs.steadyShot) 1 else 0 }, { prefs.steadyShot = it == 1 }))
         row(Option("Shutter sound", "May be forced on in some countries",

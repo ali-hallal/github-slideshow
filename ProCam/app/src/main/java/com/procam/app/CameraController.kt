@@ -474,6 +474,7 @@ class CameraController(context: Context, private val listener: Listener) {
                 ?: chars.get(CameraCharacteristics.SENSOR_INFO_WHITE_LEVEL) ?: 1023).toFloat()
             RawBurstCapture(
                 frames = keys.map { rawBurstFrames[it]!! }, w = rawCrop.width(), h = rawCrop.height(),
+                timing = keys.map { it to (rawBurstResults[it]?.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: 0L) },
                 cropLeft = rawCrop.left, cropTop = rawCrop.top, fullW = rawFullW, fullH = rawFullH,
                 cfa = c.cfa, result = first, black = black, white = white, rotation = captureOrientation,
             )
@@ -1336,6 +1337,10 @@ class CameraController(context: Context, private val listener: Listener) {
 
         override fun onCaptureCompleted(s: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
             val ts = result.get(CaptureResult.SENSOR_TIMESTAMP)
+            if (ts != null) {
+                result.get(CaptureResult.SENSOR_EXPOSURE_TIME)?.let { frameExposure[ts] = it }
+                while (frameExposure.size > 32) frameExposure.remove(frameExposure.keys.first())
+            }
             if (ts != null && request.tag == RAW_TAG) {
                 rawResults[ts] = result
                 trimOldest(rawResults)
@@ -1363,10 +1368,25 @@ class CameraController(context: Context, private val listener: Listener) {
     }
 
     private var burstMime = "image/jpeg"
+    // Per-frame timing of the last burst (for gyro blur checks): start of exposure and its length.
+    private val burstTimestamps = mutableListOf<Long>()
+    private val frameExposure = LinkedHashMap<Long, Long>()
+
+    /** Start (ns) and exposure (ns) of each frame of the last burst, in delivery order. */
+    @Volatile var lastBurstTiming: List<Pair<Long, Long>> = emptyList()
+        private set
+
+    /** Camera timestamps share the gyroscope's clock (so per-frame shake can be measured). */
+    val timestampsMatchSensors: Boolean
+        get() = characteristics?.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ==
+            CameraMetadata.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
 
     private fun deliverBurst() {
         val frames = burstFrames.toList()
         val mime = burstMime
+        val fallbackExposure = burstExposure?.second ?: 0L
+        lastBurstTiming = burstTimestamps.map { ts -> ts to (frameExposure[ts] ?: fallbackExposure) }
+        burstTimestamps.clear()
         burstFrames.clear()
         burstExpected = 0
         if (rawBurstMode) {
@@ -1413,6 +1433,7 @@ class CameraController(context: Context, private val listener: Listener) {
         if (burstExpected > 0) {
             burstMime = if (heic) "image/heic" else "image/jpeg"
             burstFrames += bytes
+            burstTimestamps += ts
             if (burstFrames.size >= burstExpected) deliverBurst()
             return
         }
@@ -1659,8 +1680,17 @@ class CameraController(context: Context, private val listener: Listener) {
 /** A RAW zoom burst, cropped to the zoomed view, with what's needed to develop it. */
 class RawBurstCapture(
     val frames: List<ShortArray>, val w: Int, val h: Int,
+    /** Start and length (ns) of each frame's exposure, for gyro blur checks. */
+    val timing: List<Pair<Long, Long>>,
     val cropLeft: Int, val cropTop: Int, val fullW: Int, val fullH: Int,
     val cfa: Int, val result: TotalCaptureResult, val black: FloatArray, val white: Float,
     /** Clockwise degrees to turn the result upright. */
     val rotation: Int,
+)
+
+/** The same burst with only some frames ([keep] = indices). */
+fun RawBurstCapture.only(keep: List<Int>) = RawBurstCapture(
+    frames = keep.map { frames[it] }, w = w, h = h, timing = keep.map { timing[it] },
+    cropLeft = cropLeft, cropTop = cropTop, fullW = fullW, fullH = fullH,
+    cfa = cfa, result = result, black = black, white = white, rotation = rotation,
 )

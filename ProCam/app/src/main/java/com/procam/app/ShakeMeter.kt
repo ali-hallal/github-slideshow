@@ -5,6 +5,8 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.sqrt
 
 /**
@@ -35,8 +37,36 @@ class ShakeMeter(context: Context) : SensorEventListener {
         omega = 0f
     }
 
+    // Recent gyro samples (timestamp ns, rotation speed across the picture rad/s) for per-frame blur.
+    private val historyTs = LongArray(HISTORY)
+    private val historyW = FloatArray(HISTORY)
+    private var historyN = 0
+    private var historyHead = 0
+
+    /**
+     * How far the phone turned (radians, across the picture) between [startNs] and
+     * [startNs] + [durationNs] (camera timestamps, same clock as the gyroscope), or null if the
+     * gyroscope history doesn't cover that time.
+     */
+    @Synchronized
+    fun angleDuring(startNs: Long, durationNs: Long): Float? {
+        if (historyN < 2) return null
+        val end = startNs + max(durationNs, 1L)
+        val ts = LongArray(historyN) { historyTs[(historyHead - historyN + it + HISTORY) % HISTORY] }
+        val ws = FloatArray(historyN) { historyW[(historyHead - historyN + it + HISTORY) % HISTORY] }
+        if (ts.first() > startNs || ts.last() < startNs) return null
+        return turnedDuring(ts, ws, startNs, end)
+    }
+
     override fun onSensorChanged(event: SensorEvent) {
         val (x, y, z) = event.values
+        synchronized(this) {
+            // Turning about the x/y axes moves the picture sideways; a twist (z) blurs the edges, about half as much.
+            historyTs[historyHead] = event.timestamp
+            historyW[historyHead] = sqrt(x * x + y * y) + 0.5f * kotlin.math.abs(z)
+            historyHead = (historyHead + 1) % HISTORY
+            if (historyN < HISTORY) historyN++
+        }
         val w = sqrt(x * x + y * y + z * z)
         val dt = if (lastTimestamp == 0L) 0.02f else ((event.timestamp - lastTimestamp) / 1e9f).coerceIn(0.001f, 0.2f)
         lastTimestamp = event.timestamp
@@ -48,6 +78,30 @@ class ShakeMeter(context: Context) : SensorEventListener {
     override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) = Unit
 
     companion object {
+        /** About 4 s of gyro samples at the game rate. */
+        private const val HISTORY = 256
+
+        /**
+         * Integral of rotation speed [ws] (sampled at [ts]) over [start, end]: piecewise constant
+         * between samples. Pure maths, for tests.
+         */
+        fun turnedDuring(ts: LongArray, ws: FloatArray, start: Long, end: Long): Float {
+            var angle = 0.0
+            for (i in ts.indices) {
+                val a = ts[i]
+                val b = if (i + 1 < ts.size) ts[i + 1] else end
+                val lo = max(a, start)
+                val hi = min(b, end)
+                if (hi > lo) angle += ws[i] * (hi - lo) / 1e9
+            }
+            return angle.toFloat()
+        }
+
+        /** Radians per pixel of a 12 MP-wide photo (the scale blur is judged at). */
+        fun radPerPx(focalMm: Float, sensorWidthMm: Float, zoom: Float): Float =
+            if (focalMm <= 0f || sensorWidthMm <= 0f) 1.2f / REFERENCE_WIDTH_PX / zoom.coerceAtLeast(0.1f)
+            else sensorWidthMm / (focalMm * zoom.coerceAtLeast(0.1f)) / REFERENCE_WIDTH_PX
+
         /** Blur we accept, in pixels of a 12 MP (4000 px wide) photo. */
         private const val BLUR_PX = 2f
         private const val REFERENCE_WIDTH_PX = 4000f
