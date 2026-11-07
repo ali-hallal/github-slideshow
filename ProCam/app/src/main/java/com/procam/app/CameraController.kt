@@ -243,6 +243,41 @@ class CameraController(context: Context, private val listener: Listener) {
     @Volatile var lastStillTiming: Pair<Long, Long>? = null
         private set
 
+    /** The camera reports where optical stabilisation moved the lens (per frame). */
+    @Volatile var oisDataAvailable = false
+        private set
+    /** Time for the sensor to read out top to bottom (ns) of the last photo; 0 if unknown. */
+    @Volatile var lastStillSkewNs = 0L
+        private set
+    private val oisTs = LongArray(OIS_HISTORY)
+    private val oisX = FloatArray(OIS_HISTORY)
+    private val oisY = FloatArray(OIS_HISTORY)
+    private var oisN = 0
+    private var oisHead = 0
+
+    private fun recordOis(result: CaptureResult) {
+        if (!oisDataAvailable) return
+        val samples = try { result.get(CaptureResult.STATISTICS_OIS_SAMPLES) } catch (e: Exception) { null } ?: return
+        synchronized(oisTs) {
+            for (o in samples) {
+                if (oisN > 0 && o.timestamp <= oisTs[(oisHead - 1 + OIS_HISTORY) % OIS_HISTORY]) continue
+                oisTs[oisHead] = o.timestamp
+                oisX[oisHead] = o.xshift
+                oisY[oisHead] = o.yshift
+                oisHead = (oisHead + 1) % OIS_HISTORY
+                if (oisN < OIS_HISTORY) oisN++
+            }
+        }
+    }
+
+    /** Recent lens-shift samples (timestamps ns, x, y in pixels), oldest first. */
+    fun oisSamples(): Triple<LongArray, FloatArray, FloatArray> = synchronized(oisTs) {
+        val start = (oisHead - oisN + OIS_HISTORY) % OIS_HISTORY
+        Triple(LongArray(oisN) { oisTs[(start + it) % OIS_HISTORY] },
+            FloatArray(oisN) { oisX[(start + it) % OIS_HISTORY] },
+            FloatArray(oisN) { oisY[(start + it) % OIS_HISTORY] })
+    }
+
     /** One kept frame, copied out, with its timing and measured shake. */
     class MomentFrame(val frame: MomentBuffer.Frame, val timestamp: Long, val exposureNs: Long, val blurPx: Float?)
 
@@ -541,6 +576,9 @@ class CameraController(context: Context, private val listener: Listener) {
             characteristics = c
             val cp = CameraCaps.from(cameraId, c, manager)
             caps = cp
+            oisDataAvailable = cp.ois && (c.get(CameraCharacteristics.STATISTICS_INFO_AVAILABLE_OIS_DATA_MODES)
+                ?.contains(CameraMetadata.STATISTICS_OIS_DATA_MODE_ON) == true)
+            synchronized(oisTs) { oisN = 0 }
             val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
                 ?: throw IllegalStateException("No stream configuration map")
 
@@ -1073,6 +1111,8 @@ class CameraController(context: Context, private val listener: Listener) {
 
         // ---- optical image stabilisation
         if (c.ois) b.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)
+        // Where the lens moved: what's left of the shake can then be undone (gyro deblur).
+        if (oisDataAvailable) b.set(CaptureRequest.STATISTICS_OIS_DATA_MODE, CameraMetadata.STATISTICS_OIS_DATA_MODE_ON)
 
         // ---- white balance
         val awb = if (c.awbModes.contains(s.wb.awbMode)) s.wb.awbMode else CameraMetadata.CONTROL_AWB_MODE_AUTO
@@ -1087,6 +1127,7 @@ class CameraController(context: Context, private val listener: Listener) {
 
     private val previewCallback = object : CameraCaptureSession.CaptureCallback() {
         override fun onCaptureCompleted(s: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+            recordOis(result)
             if (zslCapable) {
                 val ts = result.get(CaptureResult.SENSOR_TIMESTAMP)
                 val e = result.get(CaptureResult.SENSOR_EXPOSURE_TIME)
@@ -1262,6 +1303,8 @@ class CameraController(context: Context, private val listener: Listener) {
     // ------------------------------------------------------------------ capture
 
     private fun takePictureInternal(deviceOrientation: Int) {
+        lastStillTiming = null
+        lastStillSkewNs = 0L
         val c = caps
         val s = session
         if (c == null || s == null || state != State.PREVIEW) {
@@ -1401,6 +1444,8 @@ class CameraController(context: Context, private val listener: Listener) {
         }
 
         override fun onCaptureCompleted(s: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+            recordOis(result)
+            result.get(CaptureResult.SENSOR_ROLLING_SHUTTER_SKEW)?.let { lastStillSkewNs = it }
             val ts = result.get(CaptureResult.SENSOR_TIMESTAMP)
             if (ts != null) {
                 result.get(CaptureResult.SENSOR_EXPOSURE_TIME)?.let { frameExposure[ts] = it }
@@ -1679,6 +1724,8 @@ class CameraController(context: Context, private val listener: Listener) {
     companion object {
         /** Whether the last camera opened could keep full-size frames (tests, diagnostics). */
         @Volatile var zslLastOpen = false
+        /** About 3 s of lens-shift samples. */
+        private const val OIS_HISTORY = 1024
         private const val TAG = "ProCam"
         private const val RAW_TAG = "raw"
         private const val RAW_BURST_TAG = "rawburst"

@@ -40,6 +40,9 @@ class ShakeMeter(context: Context) : SensorEventListener {
     // Recent gyro samples (timestamp ns, rotation speed across the picture rad/s) for per-frame blur.
     private val historyTs = LongArray(HISTORY)
     private val historyW = FloatArray(HISTORY)
+    // The same samples per axis (rad/s, device axes), for the blur path.
+    private val historyX = FloatArray(HISTORY)
+    private val historyY = FloatArray(HISTORY)
     private var historyN = 0
     private var historyHead = 0
 
@@ -58,12 +61,37 @@ class ShakeMeter(context: Context) : SensorEventListener {
         return turnedDuring(ts, ws, startNs, end)
     }
 
+    /**
+     * How the phone turned during [startNs]..[startNs]+[durationNs]: [steps]+1 points of the
+     * accumulated turn (radians about the device's x and y axes, interleaved x0,y0,x1,y1…), or
+     * null if the gyroscope history doesn't cover that time.
+     */
+    @Synchronized
+    fun pathDuring(startNs: Long, durationNs: Long, steps: Int): FloatArray? {
+        if (historyN < 2 || steps < 1) return null
+        val ts = LongArray(historyN) { historyTs[(historyHead - historyN + it + HISTORY) % HISTORY] }
+        if (ts.first() > startNs || ts.last() < startNs) return null
+        val xs = FloatArray(historyN) { historyX[(historyHead - historyN + it + HISTORY) % HISTORY] }
+        val ys = FloatArray(historyN) { historyY[(historyHead - historyN + it + HISTORY) % HISTORY] }
+        val out = FloatArray(2 * (steps + 1))
+        val dur = max(durationNs, 1L)
+        for (k in 1..steps) {
+            val a = startNs + dur * (k - 1) / steps
+            val b = startNs + dur * k / steps
+            out[2 * k] = out[2 * k - 2] + turnedDuring(ts, xs, a, b)
+            out[2 * k + 1] = out[2 * k - 1] + turnedDuring(ts, ys, a, b)
+        }
+        return out
+    }
+
     override fun onSensorChanged(event: SensorEvent) {
         val (x, y, z) = event.values
         synchronized(this) {
             // Turning about the x/y axes moves the picture sideways; a twist (z) blurs the edges, about half as much.
             historyTs[historyHead] = event.timestamp
             historyW[historyHead] = sqrt(x * x + y * y) + 0.5f * kotlin.math.abs(z)
+            historyX[historyHead] = x
+            historyY[historyHead] = y
             historyHead = (historyHead + 1) % HISTORY
             if (historyN < HISTORY) historyN++
         }

@@ -1759,6 +1759,71 @@ class ProCamTest {
         assertEquals("still one photo", before + 1, count("image/jpeg"))
     }
 
+    @Test
+    fun gyroDeblurUndoesAKnownShake() {
+        val w = 480
+        val h = 360
+        val rnd = java.util.Random(7)
+        val tex = FloatArray(w * h) { rnd.nextFloat() }.also { PortraitProcessor.boxBlur(it, w, h, 1) }
+        val truth = IntArray(w * h) { i ->
+            val x = i % w
+            val y = i / w
+            var v = 50 + 120 * tex[i]
+            if ((x / 30 + y / 30) % 2 == 0 && x < 220) v = 25f
+            if (x > 260 && ((x - 260) / 5) % 3 == 0) v = 230f
+            val c = v.toInt()
+            (0xFF shl 24) or (c shl 16) or (c shl 8) or c
+        }
+        val path = FloatArray(2 * 25) { i -> val t = (i / 2) / 24f; if (i % 2 == 0) 11f * t else 4f * kotlin.math.sin(t * 3f) }
+        val shaken = MotionDeblur.blur(SuperRes.Frame(truth, w, h), path)
+        fun err(p: IntArray): Double {
+            var s = 0.0
+            var n = 0
+            for (y in 20 until h - 20) for (x in 20 until w - 20) { s += abs((p[y * w + x] and 0xFF) - (truth[y * w + x] and 0xFF)); n++ }
+            return s / n
+        }
+        val choice = MotionDeblur.choose(shaken, MotionDeblur.variants(path), w / 2, h / 2, patch = 300)
+        assertTrue("a kernel fits the shaken photo", choice != null)
+        val out = IntArray(w * h)
+        MotionDeblur.deblur(shaken, choice!!.path) { x, y, tw, th, p -> for (yy in 0 until th) System.arraycopy(p, yy * tw, out, (y + yy) * w + x, tw) }
+        assertTrue("sharper: ${err(out)} vs ${err(shaken.px)}", err(out) < err(shaken.px) * 0.85)
+        assertTrue("a photo that didn't shake is left alone", MotionDeblur.choose(SuperRes.Frame(truth, w, h), MotionDeblur.variants(path), w / 2, h / 2, patch = 300) == null)
+    }
+
+    @Test
+    fun oisLeftoverShakeIsFound() {
+        val rnd = java.util.Random(2)
+        val n = 76
+        val cal = FloatArray(2 * n)
+        for (i in 1 until n) {
+            cal[2 * i] = cal[2 * i - 2] + (rnd.nextGaussian() * 2e-4).toFloat()
+            cal[2 * i + 1] = cal[2 * i - 1] + (rnd.nextGaussian() * 2e-4).toFloat()
+        }
+        val calO = FloatArray(2 * n) { i -> val k = i / 2; if (i % 2 == 0) -900f * cal[2 * k + 1] else 900f * cal[2 * k] }
+        val m = 25
+        val g = FloatArray(2 * m) { i -> (if (i % 2 == 0) 0.004f else 0.001f) * (i / 2) / (m - 1) }
+        // The lens follows only up to 0.5 px.
+        val o = FloatArray(2 * m) { i -> val k = i / 2; (if (i % 2 == 0) -900f * g[2 * k + 1] else 900f * g[2 * k]).coerceIn(-0.5f, 0.5f) }
+        val r = MotionDeblur.oisResidual(cal, calO, g, o)!!
+        assertEquals(0.004f - 0.5f / 900, r[2 * m - 2], 5e-5f)
+        assertEquals(0.001f - 0.5f / 900, r[2 * m - 1], 5e-5f)
+        assertTrue("a lens that doesn't follow the gyro isn't trusted",
+            MotionDeblur.oisResidual(cal, FloatArray(2 * n) { rnd.nextGaussian().toFloat() }, g, o) == null)
+    }
+
+    @Test
+    fun shakyPhotoIsDeblurredInTheApp() {
+        context.getSharedPreferences("procam", android.content.Context.MODE_PRIVATE).edit()
+            .putFloat("forceShakePx", 10f).putBoolean("steadyMoment", false).commit()
+        waitForCamera()
+        setSimple(true)
+        val before = count("image/jpeg")
+        onView(withId(R.id.shutter)).perform(click())
+        waitFor("photo saved", 30_000) { count("image/jpeg") > before }
+        waitFor("deblurred", 180_000) { latestImage()?.let { description(it) }?.startsWith("Shake undone") == true }
+        assertEquals("still one photo", before + 1, count("image/jpeg"))
+    }
+
     // ------------------------------------------------------------------ helpers
 
     /** Switches between Simple and Pro with the top-bar button. */

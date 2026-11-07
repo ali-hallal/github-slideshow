@@ -60,6 +60,13 @@ class Prefs(context: Context) {
     val forceLowLight: Boolean get() = sp.getBoolean("forceLowLight", false)
 
     /** Keep the last few full-size frames so a shaky photo can be replaced by the steadiest moment. */
+    /** Undo hand-shake blur in photos using the gyroscope. */
+    var motionDeblur: Boolean
+        get() = sp.getBoolean("motionDeblur", true)
+        set(v) = sp.edit().putBoolean("motionDeblur", v).apply()
+    /** Test hook: treat every photo as shaken along this many pixels (0 = off). */
+    val forceShakePx: Float get() = sp.getFloat("forceShakePx", 0f)
+
     var steadyMoment: Boolean
         get() = sp.getBoolean("steadyMoment", true)
         set(v) = sp.edit().putBoolean("steadyMoment", v).apply()

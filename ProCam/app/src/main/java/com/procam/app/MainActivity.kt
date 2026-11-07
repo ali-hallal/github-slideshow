@@ -1371,12 +1371,17 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private var momentFrames: List<CameraController.MomentFrame>? = null
     private var stillUri: Uri? = null
     private var stillTiming: Pair<Long, Long>? = null
+    /** The photo being saved is a plain single shot (deblur may apply). */
+    private var plainStill = false
+    private var pressRotation = 0
 
     /** At the press: grab the steadiest kept frames from around now, in case the photo shakes. */
     private fun armSteadiestMoment() {
         momentArmed = false
         momentFrames = null
         stillUri = null
+        plainStill = photoIntent("AUTO") && extraCrop <= 1.001f
+        pressRotation = deviceOrientation
         if (!photoIntent("AUTO") || !camera.steadiestMomentAvailable || extraCrop > 1.001f) return
         momentArmed = true
         camera.snapshotSteadiest(MOMENT_FRAMES, MOMENT_WINDOW_NS, MOMENT_AFTER_MS, ::frameBlurPx) { frames ->
@@ -1411,7 +1416,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             "kept frames ${frames.map { it.blurPx?.let { b -> "%.1f".format(Locale.US, b) } }} -> ${if (rescue) "merge kept frames" else "keep photo"}")
         val look = Looks.resolve(prefs)
         if (!rescue) {
-            if (!look.isNatural) applyLookToSaved(uri, look)
+            deblurOrLook(uri, stillTiming, look)
             return
         }
         val roi = subjectSensor()
@@ -1450,6 +1455,109 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             runOnUiThread {
                 enhanceDone(uri, "image/jpeg", if (ok) "Steadied · used the steadiest moment around your press" else "")
                 if (!ok && !look.isNatural) applyLookToSaved(uri, look)
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ undoing shake blur
+
+    /**
+     * How the phone turned during an exposure that the photo shows (radians about the device's
+     * x/y axes, cumulative): the gyroscope, minus what optical stabilisation took out (learnt
+     * from the lens-shift reports). Null if unknown.
+     */
+    private fun shakePath(start: Long, exposureNs: Long): FloatArray? {
+        val c = caps ?: return null
+        if (!camera.timestampsMatchSensors || !shake.available) return null
+        val gyro = shake.pathDuring(start, exposureNs, PATH_STEPS) ?: return null
+        if (!c.ois) return gyro
+        if (!camera.oisDataAvailable) return null
+        val (ots, ox, oy) = camera.oisSamples()
+        val calStart = start - OIS_CAL_NS
+        val calSteps = (OIS_CAL_NS / OIS_CAL_STEP_NS).toInt()
+        val calGyro = shake.pathDuring(calStart, OIS_CAL_NS, calSteps) ?: return null
+        fun oisPath(t0: Long, dur: Long, steps: Int): FloatArray? {
+            val out = FloatArray(2 * (steps + 1))
+            for (k in 0..steps) {
+                val (x, y) = MotionDeblur.sampleAt(ots, ox, oy, t0 + dur * k / steps) ?: return null
+                out[2 * k] = x
+                out[2 * k + 1] = y
+            }
+            return out
+        }
+        val calOis = oisPath(calStart, OIS_CAL_NS, calSteps) ?: return null
+        val ois = oisPath(start, exposureNs, PATH_STEPS) ?: return null
+        return MotionDeblur.oisResidual(calGyro, calOis, gyro, ois)
+    }
+
+    /** A single photo just saved: undo its shake blur if the gyroscope says it shook; then the look. */
+    private fun deblurOrLook(uri: Uri, timing: Pair<Long, Long>?, look: Looks.Look) {
+        val c = caps
+        val forced = prefs.forceShakePx
+        // Rows are read out one after another: judge the shake at the middle row.
+        val skew = camera.lastStillSkewNs
+        val turn = if (!prefs.motionDeblur || c == null) null
+            else if (forced > 0f) null
+            else timing?.takeIf { it.first > 0 && it.second > 0 }?.let { (start, e) -> shakePath(start + skew / 2, e) }
+        // Pixels per radian across a 4000 px wide photo.
+        val pxPerRad4000 = if (c == null) 0f else 1f / ShakeMeter.radPerPx(c.focalLength ?: 0f, c.sensorWidthMm, cameraZoom())
+        val path4000 = when {
+            forced > 0f && prefs.motionDeblur -> MotionDeblur.line(forced, 0.5f)
+            turn != null -> MotionDeblur.pathPx(turn, pxPerRad4000, pressRotation)
+            else -> null
+        }
+        val len = path4000?.let { MotionDeblur.length(it) } ?: 0f
+        Log.i(TAG, "shake blur: ${"%.1f".format(Locale.US, len)} px (4000 px wide)${if (c?.ois == true) " after OIS" else ""}")
+        if (path4000 == null || len < DEBLUR_ABOVE_PX || len > MotionDeblur.MAX_BLUR_PX) {
+            if (!look.isNatural) applyLookToSaved(uri, look)
+            return
+        }
+        val roi = subjectSensor()
+        val quality = prefs.jpegQuality
+        pendingEnhance++
+        thumbnail.alpha = 0.5f
+        thumbProgress.visibility = View.VISIBLE
+        enhancer.execute {
+            var done = false
+            try {
+                val t0 = SystemClock.uptimeMillis()
+                val original = contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: throw IllegalStateException("can't read")
+                val name = contentResolver.query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)
+                    ?.use { if (it.moveToFirst()) it.getString(0) else null } ?: "photo.jpg"
+                val bmp = PortraitProcessor.decode(original, Budget.sideFor(original, 14))
+                val path = MotionDeblur.scaled(path4000, maxOf(bmp.width, bmp.height) / 4000f)
+                val px = IntArray(bmp.width * bmp.height)
+                bmp.getPixels(px, 0, bmp.width, 0, 0, bmp.width, bmp.height)
+                var frame = SuperRes.Frame(px, bmp.width, bmp.height)
+                if (forced > 0f) {
+                    // Test hook: shake the photo with a known shake first, then undo it.
+                    frame = MotionDeblur.blur(frame, path)
+                    bmp.setPixels(frame.px, 0, bmp.width, 0, 0, bmp.width, bmp.height)
+                }
+                val subject = roi?.let { rotateNorm(it, camera.lastCaptureOrientation) }
+                val cx = ((subject?.centerX() ?: 0.5f) * bmp.width).toInt()
+                val cy = ((subject?.centerY() ?: 0.5f) * bmp.height).toInt()
+                val choice = MotionDeblur.choose(frame, MotionDeblur.variants(path), cx, cy)
+                if (choice != null) {
+                    MotionDeblur.deblur(frame, choice.path) { x, y, w, h, p -> synchronized(bmp) { bmp.setPixels(p, 0, w, x, y, w, h) } }
+                    if (!look.isNatural) Looks.apply(bmp, look, seed = name.hashCode().toLong())
+                    val out = java.io.ByteArrayOutputStream(original.size)
+                    bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality.coerceIn(50, 100), out)
+                    if (OriginalStore.get(this, name) == null) OriginalStore.save(this, name, original)
+                    contentResolver.openOutputStream(uri, "wt")?.use { it.write(out.toByteArray()) }
+                    MediaSaver.copyExif(this, uri, original)
+                    MediaSaver.setDescription(this, uri, "Shake undone: ${"%.0f".format(Locale.US, MotionDeblur.length(path))} px blur reversed with the gyroscope" +
+                        if (!look.isNatural) " · Look: ${look.name}" else "")
+                    done = true
+                    Log.i(TAG, "deblurred ${bmp.width}x${bmp.height} (variant ${choice.variant}) in ${SystemClock.uptimeMillis() - t0} ms")
+                } else Log.i(TAG, "deblur: no kernel fits, photo kept")
+                bmp.recycle()
+            } catch (e: Throwable) {
+                Log.e(TAG, "deblur failed (keeping the photo)", e)
+            }
+            runOnUiThread {
+                enhanceDone(uri, "image/jpeg", if (done) "Shake blur undone" else "")
+                if (!done && !look.isNatural) applyLookToSaved(uri, look)
             }
         }
     }
@@ -1637,6 +1745,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         if (mimeType == "image/jpeg" && momentArmed) {
             // The steadiest-moment check decides first (and applies the look itself).
             momentArmed = false
+            plainStill = false
             stillUri = uri
             stillTiming = camera.lastStillTiming
             maybeRescue()
@@ -1644,7 +1753,11 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             return
         }
         val look = Looks.resolve(prefs)
-        if (mimeType == "image/jpeg" && !look.isNatural) applyLookToSaved(uri, look)
+        if (mimeType == "image/jpeg" && plainStill) {
+            plainStill = false
+            deblurOrLook(uri, camera.lastStillTiming, look)
+        } else if (mimeType == "image/jpeg" && !look.isNatural) applyLookToSaved(uri, look)
+        plainStill = false
         loadThumbnail(uri)
     }
 
@@ -3274,6 +3387,12 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         private const val MOMENT_AFTER_MS = 150L
         /** Replace the photo only if it shook more than this (px) and the kept frames were twice as steady. */
         private const val RESCUE_ABOVE_PX = 2f
+        /** Shake blur (px of a 4000 px wide photo) worth undoing. */
+        private const val DEBLUR_ABOVE_PX = 2.5f
+        private const val PATH_STEPS = 24
+        /** Lens shift is learnt against the gyroscope over this long before the photo. */
+        private const val OIS_CAL_NS = 1_500_000_000L
+        private const val OIS_CAL_STEP_NS = 20_000_000L
         /** A tap marks the subject for this long. */
         private const val TAP_SUBJECT_MS = 10_000L
         private const val STEADY_FRAMES = 4

@@ -149,6 +149,8 @@ class SettingsActivity : Activity() {
             listOf("Take photo", "Zoom", "Volume"), { prefs.volumeKeys }, { prefs.volumeKeys = it }))
         row(Option("Hold shutter for video", "In photo mode, hold the shutter to record a quick video; let go to stop",
             listOf("Off", "On"), { if (prefs.holdForVideo) 1 else 0 }, { prefs.holdForVideo = it == 1 }))
+        row(Option("Undo shake blur", "Uses the gyroscope's record of how your hands moved to undo the blur in a shaky photo",
+            listOf("Off", "On"), { if (prefs.motionDeblur) 1 else 0 }, { prefs.motionDeblur = it == 1 }))
         row(Option("Steadiest moment", "Keeps the last moment before you press; if your photo shakes, it's rebuilt from the steadiest frames (phones that support it)",
             listOf("Off", "On"), { if (prefs.steadyMoment) 1 else 0 }, { prefs.steadyMoment = it == 1 }))
         row(Option("Shake-proof shutter", "When your hands shake, Auto uses a faster shutter (and merges a few shots to keep it clean) so photos come out sharp",
