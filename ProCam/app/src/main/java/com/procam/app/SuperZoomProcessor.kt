@@ -124,55 +124,94 @@ class SuperZoomProcessor {
         require(frames.isNotEmpty())
         val t0 = android.os.SystemClock.uptimeMillis()
         val rotation = exifRotation(frames.first())
-        // 1. Align on the centre third, at full resolution.
+        val first = BitmapRegionDecoder.newInstance(frames[0], 0, frames[0].size, false)!!
+        val fullW = first.width
+        val fullH = first.height
+        first.recycle()
+        // 50 MP photos (or a phone short of memory): work at half size, never fail.
+        val sample = if (fullW.toLong() * fullH > MAX_ENHANCE_PIXELS ||
+            fullW.toLong() * fullH * 12 > Budget.available() * 0.7) 2 else 1
+        val opts = BitmapFactory.Options().apply {
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+            inSampleSize = sample
+        }
+        // 1. Align on the centre third.
         val centres = frames.map { bytes ->
-            decodeCentre(bytes, 3f)?.let { bmp ->
+            try {
+                val d = BitmapRegionDecoder.newInstance(bytes, 0, bytes.size, false)!!
+                val rw = d.width / 3
+                val rh = d.height / 3
+                val bmp = d.decodeRegion(Rect((d.width - rw) / 2, (d.height - rh) / 2, (d.width + rw) / 2, (d.height + rh) / 2), opts)
+                d.recycle()
                 val px = IntArray(bmp.width * bmp.height)
                 bmp.getPixels(px, 0, bmp.width, 0, 0, bmp.width, bmp.height)
                 SuperRes.Frame(px, bmp.width, bmp.height).also { bmp.recycle() }
+            } catch (e: Exception) {
+                null
             }
         }
-        val usable = centres.indices.filter { centres[it] != null && centres[it]!!.w == centres.firstNotNullOf { c -> c }.w }
-        require(usable.isNotEmpty()) { "could not decode any frame" }
+        val firstOk = centres.firstNotNullOfOrNull { it } ?: throw IllegalStateException("could not decode any frame")
+        val usable = centres.indices.filter { centres[it]?.let { c -> c.w == firstOk.w && c.h == firstOk.h } == true }
         val order = SuperRes.sharpest(usable.map { centres[it]!! }, KEEP_FRAMES).map { usable[it] }
         val all = SuperRes.offsets(order.map { centres[it]!! }, GRAY_SCALE)
         val typical = all.drop(1).map { it.cost }.sorted().let { if (it.isEmpty()) 0.0 else it[it.size / 2] }
         val good = all.indices.filter { k -> k == 0 || all[k].cost <= max(typical * 3, 4.0) }
         val chosen = good.map { order[it] }
-        val offsets = good.map { all[it].dx to all[it].dy }
-        Log.i(TAG, "enhance: kept ${chosen.size} of ${frames.size}; offsets ${offsets.map { "%.2f,%.2f".format(it.first, it.second) }}")
+        val global = good.map { all[it].dx to all[it].dy }
+        val iterations = if (Runtime.getRuntime().availableProcessors() >= 8) Deconvolve.ITERATIONS else Deconvolve.ITERATIONS / 2
+        Log.i(TAG, "enhance: kept ${chosen.size} of ${frames.size}, sample $sample, offsets ${global.map { "%.2f,%.2f".format(it.first, it.second) }}")
 
-        // 2. Merge tile by tile at full size.
+        // 2. Merge tile by tile (each tile re-aligned locally), feathering the overlaps.
         val decoders = chosen.map { BitmapRegionDecoder.newInstance(frames[it], 0, frames[it].size, false)!! }
         try {
-            val fw = decoders[0].width
-            val fh = decoders[0].height
+            val fw = fullW / sample
+            val fh = fullH / sample
             val out = Bitmap.createBitmap(fw, fh, Bitmap.Config.ARGB_8888)
-            val margin = 16 + offsets.maxOf { max(kotlin.math.abs(it.first), kotlin.math.abs(it.second)) }.roundToInt()
-            val opts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
+            val reach = global.maxOf { max(kotlin.math.abs(it.first), kotlin.math.abs(it.second)) }.roundToInt() + LOCAL_REACH
+            val margin = 16 + reach
+            var localTiles = 0
+            var tiles = 0
             var ty = 0
             while (ty < fh) {
                 val th = min(TILE, fh - ty)
                 var tx = 0
                 while (tx < fw) {
                     val tw = min(TILE, fw - tx)
-                    val region = Rect(max(0, tx - margin), max(0, ty - margin), min(fw, tx + tw + margin), min(fh, ty + th + margin))
-                    val tiles = decoders.map { d ->
-                        val bmp = d.decodeRegion(region, opts)
+                    // This tile's pixels plus an overlap to the right and below (blended by the next tiles).
+                    val ow = min(tw + OVERLAP, fw - tx)
+                    val oh = min(th + OVERLAP, fh - ty)
+                    val region = Rect(max(0, tx - margin), max(0, ty - margin), min(fw, tx + ow + margin), min(fh, ty + oh + margin))
+                    val full = Rect(region.left * sample, region.top * sample, region.right * sample, region.bottom * sample)
+                    val parts = decoders.map { d ->
+                        val bmp = d.decodeRegion(full, opts)
                         val px = IntArray(bmp.width * bmp.height)
                         bmp.getPixels(px, 0, bmp.width, 0, 0, bmp.width, bmp.height)
                         SuperRes.Frame(px, bmp.width, bmp.height).also { bmp.recycle() }
                     }
-                    val rw = tiles[0].w
-                    val rh = tiles[0].h
-                    val motion = IntArray(tiles.size) { k ->
-                        val (dx, dy) = offsets[k]
-                        if (k == 0) 255 else NightProcessor.motionThreshold(tiles[0].px, tiles[k].px, rw, rh, dx.roundToInt(), dy.roundToInt())
+                    val rw = parts[0].w
+                    val rh = parts[0].h
+                    // Local alignment: a slight tilt shifts each region a little differently.
+                    val prepared = SuperRes.prepare(parts[0], GRAY_SCALE)
+                    val offsets = global.mapIndexed { k, g ->
+                        if (k == 0) g
+                        else {
+                            val local = SuperRes.refineNear(prepared, parts[k], g.first, g.second)
+                            if (local.cost >= 0 && kotlin.math.abs(local.dx - g.first) <= LOCAL_REACH &&
+                                kotlin.math.abs(local.dy - g.second) <= LOCAL_REACH
+                            ) {
+                                localTiles++
+                                local.dx to local.dy
+                            } else g
+                        }
                     }
-                    val merged = SuperRes.merge(tiles, offsets, motion, 1f)
-                    SuperRes.sharpen(merged)
-                    // Keep the tile's interior (its margins were only there for the shifts).
-                    out.setPixels(merged.px, (ty - region.top) * merged.w + (tx - region.left), merged.w, tx, ty, tw, th)
+                    tiles++
+                    val motion = IntArray(parts.size) { k ->
+                        val (dx, dy) = offsets[k]
+                        if (k == 0) 255 else NightProcessor.motionThreshold(parts[0].px, parts[k].px, rw, rh, dx.roundToInt(), dy.roundToInt())
+                    }
+                    val merged = SuperRes.merge(parts, offsets, motion, 1f)
+                    Deconvolve.sharpen(merged, iterations = iterations)
+                    blendInto(out, merged, region, tx, ty, ow, oh)
                     tx += TILE
                 }
                 ty += TILE
@@ -186,17 +225,57 @@ class SuperZoomProcessor {
             upright.compress(Bitmap.CompressFormat.JPEG, quality.coerceIn(50, 100), bytes)
             val result = Result(bytes.toByteArray(), chosen.size, upright.width, upright.height, before = frames[chosen[0]])
             upright.recycle()
-            Log.i(TAG, "enhance: ${result.width}x${result.height} from ${chosen.size} frames in ${android.os.SystemClock.uptimeMillis() - t0} ms")
+            Log.i(TAG, "enhance: ${result.width}x${result.height} from ${chosen.size} frames, locally aligned " +
+                "$localTiles of ${tiles * (chosen.size - 1)} tile offsets, in ${android.os.SystemClock.uptimeMillis() - t0} ms")
             return result
         } finally {
             decoders.forEach { it.recycle() }
         }
     }
 
+    /**
+     * Writes the tile's part ([tx], [ty], [w] × [h], in output coordinates) of [merged] (whose top
+     * left is [region]'s) into [out]. Where an earlier tile already wrote (the overlap to the left
+     * or above), the two are cross-faded, so tiles aligned slightly differently join invisibly.
+     */
+    private fun blendInto(out: Bitmap, merged: SuperRes.Frame, region: Rect, tx: Int, ty: Int, w: Int, h: Int) {
+        val mine = IntArray(w * h)
+        // (At half size a decoded region can be a pixel short: repeat the last row/column.)
+        val x0 = tx - region.left
+        for (y in 0 until h) {
+            val sy = (ty + y - region.top).coerceIn(0, merged.h - 1)
+            for (x in 0 until w) mine[y * w + x] = merged.px[sy * merged.w + (x0 + x).coerceIn(0, merged.w - 1)]
+        }
+        if (tx > 0 || ty > 0) {
+            val old = IntArray(w * h)
+            out.getPixels(old, 0, w, tx, ty, w, h)
+            for (y in 0 until h) for (x in 0 until w) {
+                val wx = if (tx > 0) ((x + 0.5f) / OVERLAP).coerceIn(0f, 1f) else 1f
+                val wy = if (ty > 0) ((y + 0.5f) / OVERLAP).coerceIn(0f, 1f) else 1f
+                val a = wx * wy // weight of this tile
+                if (a >= 1f) continue
+                val i = y * w + x
+                val p = mine[i]
+                val q = old[i]
+                val r = (((p shr 16) and 0xFF) * a + ((q shr 16) and 0xFF) * (1 - a)).roundToInt()
+                val g = (((p shr 8) and 0xFF) * a + ((q shr 8) and 0xFF) * (1 - a)).roundToInt()
+                val b = ((p and 0xFF) * a + (q and 0xFF) * (1 - a)).roundToInt()
+                mine[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+            }
+        }
+        out.setPixels(mine, 0, w, tx, ty, w, h)
+    }
+
     companion object {
         private const val TAG = "SuperZoom"
         /** Zoom enhance works on tiles this size (plus margins), to fit in memory. */
         private const val TILE = 1024
+        /** Neighbouring tiles overlap by this much and are cross-faded there. */
+        private const val OVERLAP = 48
+        /** How far (pixels) a tile's local alignment may differ from the whole picture's. */
+        private const val LOCAL_REACH = 2
+        /** Above this, zoom enhance works at half size (50 MP photos). */
+        private const val MAX_ENHANCE_PIXELS = 16_000_000L
         private const val MAX_SIDE = 3000
         /** Enlargement measured to recover real detail from ~6 frames; more would only add pixels. */
         private const val MAX_SCALE = 2f

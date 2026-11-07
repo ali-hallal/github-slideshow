@@ -507,6 +507,18 @@
                 android:contentDescription="@string/last_photo"
                 android:scaleType="centerCrop" />
 
+            <!-- Spins around the thumbnail while a photo is still being made in the background. -->
+            <ProgressBar
+                android:id="@+id/thumbProgress"
+                android:layout_width="64dp"
+                android:layout_height="64dp"
+                android:layout_gravity="start|center_vertical"
+                android:layout_marginStart="30dp"
+                android:contentDescription="Still finishing the last photo"
+                android:indeterminate="true"
+                android:indeterminateTint="@color/accent"
+                android:visibility="gone" />
+
             <com.procam.app.ShutterButton
                 android:id="@+id/shutter"
                 android:layout_width="78dp"

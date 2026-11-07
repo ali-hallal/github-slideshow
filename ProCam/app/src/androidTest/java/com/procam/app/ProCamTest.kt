@@ -1404,6 +1404,59 @@ class ProCamTest {
     }
 
     @Test
+    fun zoomEnhanceHandles50MpAtHalfSize() {
+        // Bigger than 16 MP: worked at half size instead of running out of memory.
+        val w = 5000
+        val h = 3400
+        val rnd = java.util.Random(9)
+        val base = IntArray(w * h) { i -> val v = (90 + 60 * kotlin.math.sin((i % w) / 7.0) * kotlin.math.cos((i / w) / 9.0)).toInt()
+            (0xFF shl 24) or (v shl 16) or (v shl 8) or v }
+        val jpegs = (0 until 3).map {
+            val px = IntArray(w * h) { i -> val v = ((base[i] and 0xFF) + rnd.nextInt(7) - 3).coerceIn(0, 255); (0xFF shl 24) or (v shl 16) or (v shl 8) or v }
+            val bmp = android.graphics.Bitmap.createBitmap(px, w, h, android.graphics.Bitmap.Config.ARGB_8888)
+            java.io.ByteArrayOutputStream().also { o -> bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, o); bmp.recycle() }.toByteArray()
+        }
+        val r = SuperZoomProcessor().enhance(jpegs, 90)
+        Log.i(TAG, "50 MP enhance: ${r.width}x${r.height}")
+        assertEquals(w / 2, r.width)
+        assertEquals(h / 2, r.height)
+    }
+
+    @Test
+    fun deconvolutionSharpensBetterThanUnsharpMask() {
+        val w = 400
+        val h = 300
+        val rnd = java.util.Random(2)
+        val tex = FloatArray(w * h) { rnd.nextFloat() }
+        PortraitProcessor.boxBlur(tex, w, h, 1)
+        val truth = FloatArray(w * h) { i ->
+            var v = 60f + 140f * tex[i]
+            if (((i % w) / 20 + (i / w) / 20) % 2 == 0 && i % w < 200) v = if (v > 128) 220f else 30f
+            v
+        }
+        // Gaussian blur sigma 1 (lens + merge), then a little noise.
+        val k = FloatArray(7) { val d = (it - 3).toFloat(); kotlin.math.exp(-d * d / 2f) }.let { a -> val sum = a.sum(); FloatArray(7) { a[it] / sum } }
+        val t = FloatArray(w * h)
+        val blurred = FloatArray(w * h)
+        for (y in 0 until h) for (x in 0 until w) { var a = 0f; for (j in -3..3) a += k[j + 3] * truth[y * w + (x + j).coerceIn(0, w - 1)]; t[y * w + x] = a }
+        for (y in 0 until h) for (x in 0 until w) { var a = 0f; for (j in -3..3) a += k[j + 3] * t[(y + j).coerceIn(0, h - 1) * w + x]; blurred[y * w + x] = a }
+        val noise = java.util.Random(5)
+        fun frame() = SuperRes.Frame(IntArray(w * h) { i ->
+            val v = (blurred[i] + noise.nextGaussian().toFloat() * 1.5f).toInt().coerceIn(0, 255)
+            (0xFF shl 24) or (v shl 16) or (v shl 8) or v
+        }, w, h)
+        fun err(f: SuperRes.Frame): Double {
+            var e = 0.0
+            for (y in 5 until h - 5) for (x in 5 until w - 5) e += abs((f.px[y * w + x] and 0xFF) - truth[y * w + x])
+            return e / ((w - 10) * (h - 10))
+        }
+        val unsharp = frame().also { SuperRes.sharpen(it) }
+        val deconv = frame().also { Deconvolve.sharpen(it) }
+        Log.i(TAG, "sharpening: blurred ${err(frame())}, unsharp ${err(unsharp)}, deconvolve ${err(deconv)}")
+        assertTrue("deconvolution closer to the truth: ${err(deconv)} vs ${err(unsharp)}", err(deconv) < err(unsharp) * 0.97)
+    }
+
+    @Test
     fun zoomEnhanceCaptureSavesFullSizePhoto() {
         waitForCamera()
         setSimple(true)

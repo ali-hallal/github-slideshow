@@ -76,6 +76,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private lateinit var modeAuto: TextView
     private lateinit var modePro: TextView
     private lateinit var thumbnail: ImageView
+    private lateinit var thumbProgress: View
     private lateinit var shutter: ShutterButton
     private lateinit var btnSwitch: TextView
     private lateinit var countdownText: TextView
@@ -480,6 +481,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         modeAuto = findViewById(R.id.modeAuto)
         modePro = findViewById(R.id.modePro)
         thumbnail = findViewById(R.id.thumbnail)
+        thumbProgress = findViewById(R.id.thumbProgress)
         shutter = findViewById(R.id.shutter)
         btnSwitch = findViewById(R.id.btnSwitch)
         countdownText = findViewById(R.id.countdown)
@@ -1217,7 +1219,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             } else null
             exposure?.let { Log.i(TAG, "super zoom plan: ISO ${it.first} ${Stops.shutterLabel(it.second)}") }
             // Full-resolution shots (video-size frames would be faster but lose detail).
-            camera.takeBurst(deviceOrientation, SUPER_ZOOM_FRAMES, toMemory = true, exposure = exposure, minimalProcessing = true)
+            camera.takeBurst(deviceOrientation, zoomBurstFrames(), toMemory = true, exposure = exposure, minimalProcessing = true)
         } else {
             camera.takePicture(deviceOrientation)
         }
@@ -1741,6 +1743,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private fun applyLookToSaved(uri: Uri, look: Looks.Look) {
         pendingLooks++
         thumbnail.alpha = 0.5f
+        thumbProgress.visibility = View.VISIBLE
         val quality = prefs.jpegQuality
         lookExecutor.execute {
             try {
@@ -1765,7 +1768,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 pendingLooks--
                 if (pendingLooks <= 0) {
                     pendingLooks = 0
-                    if (pendingEnhance == 0) thumbnail.alpha = 1f
+                    if (pendingEnhance == 0) {
+                        thumbnail.alpha = 1f
+                        thumbProgress.visibility = View.GONE
+                    }
                 }
                 if (lastPhoto == uri) loadThumbnail(uri)
             }
@@ -1976,6 +1982,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         shutter.busy = false
         pendingEnhance++
         thumbnail.alpha = 0.5f
+        thumbProgress.visibility = View.VISIBLE
         showGroupStatus("Enhancing zoom photo… you can keep shooting")
     }
 
@@ -1984,6 +1991,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         if (pendingEnhance <= 0) {
             pendingEnhance = 0
             thumbnail.alpha = 1f
+            if (pendingLooks == 0) thumbProgress.visibility = View.GONE
             if (groupStatus.text.startsWith("Enhancing")) groupStatus.visibility = View.GONE
         }
         if (uri != null) onPhotoSaved(uri, mime) else toast(getString(R.string.save_failed))
@@ -2333,10 +2341,17 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         }.start()
     }
 
+    /** Shots in a zoom burst: fewer on slower phones, so holding still and merging stay short. */
+    private fun zoomBurstFrames(): Int {
+        val fast = Runtime.getRuntime().availableProcessors() >= 8 && Runtime.getRuntime().maxMemory() >= 400_000_000L
+        return if (fast) SUPER_ZOOM_FRAMES else SUPER_ZOOM_FRAMES_SLOW
+    }
+
     /** Zoomed in (1.5× or more) within the camera's range: merge a burst for detail, like Super Res Zoom. */
     private fun zoomEnhanceApplies(): Boolean {
         val c = caps ?: return false
-        return prefs.zoomEnhance && !c.isFront && displayZoom() >= ZOOM_ENHANCE_FROM && !settings.raw &&
+        // Needs a camera with full manual control (fast shutter, own processing off) to gain anything.
+        return prefs.zoomEnhance && !c.isFront && c.manualSensor && displayZoom() >= ZOOM_ENHANCE_FROM && !settings.raw &&
             (photoIntent("AUTO") || (prefs.uiPro && settings.cameraAe))
     }
 
@@ -2960,6 +2975,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         private const val MAX_DISPLAY_ZOOM = 100f
         /** Shots taken for super zoom; the sharpest [SuperZoomProcessor.KEEP_FRAMES] are merged. */
         private const val SUPER_ZOOM_FRAMES = 11 // the first is skipped, the sharpest 6 of the other 10 merged
+        private const val SUPER_ZOOM_FRAMES_SLOW = 6 // slower phones: the first skipped, up to 5 merged
         private const val ZOOM_BAR_HIDE_MS = 5000L
         private const val MAX_PENDING_ENHANCE = 2
         private const val HDR_FRAMES = 6

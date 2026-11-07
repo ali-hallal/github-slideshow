@@ -158,6 +158,36 @@ object SuperRes {
         return Offset(bx, by, best)
     }
 
+    /**
+     * Local refinement: the offset of [frame] against [ref] searched only close to a known
+     * ([dx0], [dy0]) — e.g. the whole-picture offset, refined for one region of the picture,
+     * where a slight tilt of the phone shifts things a little differently. Featureless regions
+     * keep the starting offset (cost < 0 marks that).
+     */
+    fun refineNear(ref: Prepared, frame: Frame, dx0: Float, dy0: Float): Offset {
+        if (ref.texture < MIN_TEXTURE) return Offset(dx0, dy0, -1.0)
+        val fl = lumaOf(frame).also { PortraitProcessor.boxBlur(it, frame.w, frame.h, 1) }
+        var best = Double.MAX_VALUE
+        var bx = dx0
+        var by = dy0
+        for ((step, reach) in arrayOf(0.5f to 2, 0.125f to 3)) {
+            val cx0 = bx
+            val cy0 = by
+            for (sy in -reach..reach) for (sx in -reach..reach) {
+                val dx = cx0 + sx * step
+                val dy = cy0 + sy * step
+                val c = subCost(ref.luma, fl, ref.frame.w, ref.frame.h, frame.w, frame.h, dx, dy, ref.window) +
+                    TIE_BREAK * (abs(dx - dx0) + abs(dy - dy0))
+                if (c < best) {
+                    best = c
+                    bx = dx
+                    by = dy
+                }
+            }
+        }
+        return Offset(bx, by, best)
+    }
+
     /** Offsets of all [frames] relative to frames[0], computed in parallel on all CPU cores. */
     fun offsets(frames: List<Frame>, grayScale: Int): List<Offset> {
         val ref = prepare(frames[0], grayScale)
