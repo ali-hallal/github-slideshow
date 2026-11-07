@@ -418,7 +418,8 @@ class CameraController(context: Context, private val listener: Listener) {
                     }
                 }
 
-            main.post { listener.onCameraOpened(cp, previewSize) }
+            previewAspect = previewSize.width.toFloat() / previewSize.height
+        main.post { listener.onCameraOpened(cp, previewSize) }
 
             if (!openLock.tryAcquire(OPEN_WAIT_MS, TimeUnit.MILLISECONDS)) {
                 throw IllegalStateException("Timed out waiting to open camera")
@@ -483,6 +484,7 @@ class CameraController(context: Context, private val listener: Listener) {
         effects?.timelapse = if (output.videoKind == OutputPrefs.VIDEO_TIMELAPSE) TIMELAPSE_FACTOR else 1
         Log.i(TAG, "video: ${size.width}x${size.height} @$fps preview=$previewSize stabilization=$videoStabMode ois=${cp.ois} " +
             "effects=${effects != null} kind=${output.videoKind} slow=${slow?.second}")
+        previewAspect = previewSize.width.toFloat() / previewSize.height
         main.post { listener.onCameraOpened(cp, previewSize) }
         if (!openLock.tryAcquire(OPEN_WAIT_MS, TimeUnit.MILLISECONDS)) throw IllegalStateException("Timed out waiting to open camera")
         opening = true
@@ -984,11 +986,25 @@ class CameraController(context: Context, private val listener: Listener) {
         else Rect(0, 0, area.width(), area.height())
     }
 
-    /** Sensor rectangle → 0..1 rectangle in the (portrait) preview view. Inverse of the tap mapping. */
+    /** Preview width / height (sensor orientation): 4:3, or 16:9 for video. */
+    @Volatile private var previewAspect = 4f / 3f
+
+    /**
+     * Sensor rectangle → 0..1 rectangle in the (portrait) preview view. The preview shows the
+     * centre of the sensor at its own shape (a 16:9 preview crops the 4:3 sensor top and bottom),
+     * so that crop is taken into account. Faces are padded a little: phones report a tight box
+     * (eyes to mouth) that looks too small around a head.
+     */
     private fun sensorToView(c: CameraCaps, frame: Rect, r: Rect): RectF {
-        fun map(px: Int, py: Int): Pair<Float, Float> {
-            var x = (px - frame.left).toFloat() / frame.width()
-            var y = (py - frame.top).toFloat() / frame.height()
+        val sensorAspect = frame.width().toFloat() / frame.height()
+        // Visible fraction of the frame along each sensor axis.
+        val fx = if (previewAspect < sensorAspect) previewAspect / sensorAspect else 1f
+        val fy = if (previewAspect > sensorAspect) sensorAspect / previewAspect else 1f
+        val padX = r.width() * FACE_PAD
+        val padY = r.height() * FACE_PAD
+        fun map(px: Float, py: Float): Pair<Float, Float> {
+            var x = ((px - frame.left) / frame.width() - (1 - fx) / 2) / fx
+            var y = ((py - frame.top) / frame.height() - (1 - fy) / 2) / fy
             repeat((c.sensorOrientation % 360) / 90) {
                 val t = y
                 y = x
@@ -997,8 +1013,8 @@ class CameraController(context: Context, private val listener: Listener) {
             if (c.isFront) x = 1f - x
             return x to y
         }
-        val (x1, y1) = map(r.left, r.top)
-        val (x2, y2) = map(r.right, r.bottom)
+        val (x1, y1) = map(r.left - padX, r.top - padY)
+        val (x2, y2) = map(r.right + padX, r.bottom + padY)
         return RectF(min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
     }
 
@@ -1019,6 +1035,12 @@ class CameraController(context: Context, private val listener: Listener) {
         // With CONTROL_ZOOM_RATIO, regions are relative to the zoomed view; with crop zoom they
         // are in full-sensor coordinates, so map into the crop.
         val frame = sensorFrame(c)
+        // A 16:9 preview shows only the middle of the 4:3 sensor: map into that part.
+        val sensorAspect = frame.width().toFloat() / frame.height()
+        val fx = if (previewAspect < sensorAspect) previewAspect / sensorAspect else 1f
+        val fy = if (previewAspect > sensorAspect) sensorAspect / previewAspect else 1f
+        x = (1 - fx) / 2 + x * fx
+        y = (1 - fy) / 2 + y * fy
         val half = (min(frame.width(), frame.height()) * 0.08f).toInt()
         val cx = frame.left + (x * frame.width()).toInt()
         val cy = frame.top + (y * frame.height()).toInt()
@@ -1424,6 +1446,8 @@ class CameraController(context: Context, private val listener: Listener) {
         private const val FAST_MAX_W = 1920
         private const val FAST_MAX_H = 1440
         private const val VIDEO_FPS = 30
+        /** Face boxes drawn this much larger on each side than the camera reports. */
+        private const val FACE_PAD = 0.25f
         /** Time for the lens to move between focus-bracketed frames. */
         private const val FOCUS_STEP_MS = 180L
         /** Time-lapse: one frame in 15 kept (30 fps camera → 2 frames a second, played 15× faster). */
