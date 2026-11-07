@@ -250,6 +250,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private var mergeHdrStops = 0f
     /** The running merge is Auto's quiet low-light merge (same brightness, less grain). */
     private var mergeIndoor = false
+    /** The running zoom burst is zoom enhance (within the camera's range), not super zoom. */
+    private var zoomEnhancing = false
     // Auto HDR: how many stops darker to shoot right now (0 = off), with hysteresis.
     private var hdrStops = 0f
     private var hdrOnTicks = 0
@@ -1200,10 +1202,12 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         } else if (lowLightApplies()) {
             // Dim room: a few shots merged for less grain, at the normal brightness.
             startLowLight()
-        } else if (extraCrop > 1.01f) {
-            // Super zoom: a short burst, rebuilt into one detailed zoomed photo.
+        } else if (extraCrop > 1.01f || zoomEnhanceApplies()) {
+            // Super zoom (past the camera's maximum) or zoom enhance (zoomed within it): a short
+            // burst, rebuilt into one detailed zoomed photo in the background.
             zoomProcessing = true
-            showGroupStatus("Hold still… super zoom")
+            zoomEnhancing = extraCrop <= 1.01f
+            showGroupStatus(if (zoomEnhancing) "Hold still… zoom enhance" else "Hold still… super zoom")
             val c = caps
             val isoR = c?.isoRange
             val expR = c?.exposureRange
@@ -1212,12 +1216,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 SuperZoomProcessor.plan(liveIso!!, liveExposure!!, safeShutterNs() ?: liveExposure!!, isoR, expR)
             } else null
             exposure?.let { Log.i(TAG, "super zoom plan: ISO ${it.first} ${Stops.shutterLabel(it.second)}") }
-            if (camera.fastBurstAvailable()) {
-                // Fast: video-size frames, cropped as they arrive (~1/3 s for the whole burst).
-                camera.takeFastBurst(deviceOrientation, SUPER_ZOOM_FRAMES, extraCrop, exposure)
-            } else {
-                camera.takeBurst(deviceOrientation, SUPER_ZOOM_FRAMES, toMemory = true, exposure = exposure, minimalProcessing = true)
-            }
+            // Full-resolution shots (video-size frames would be faster but lose detail).
+            camera.takeBurst(deviceOrientation, SUPER_ZOOM_FRAMES, toMemory = true, exposure = exposure, minimalProcessing = true)
         } else {
             camera.takePicture(deviceOrientation)
         }
@@ -1994,10 +1994,13 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private fun processSuperZoom(frames: List<ByteArray>, mimeType: String) {
         val crop = extraCrop
         val quality = prefs.jpegQuality
+        val enhance = zoomEnhancing
+        zoomEnhancing = false
         releaseShutterForBackground()
         enhancer.execute {
             val result = try {
-                superZoom.process(if (frames.size > 3) frames.drop(1) else frames, crop, quality)
+                val burst = if (frames.size > 3) frames.drop(1) else frames
+                if (enhance) superZoom.enhance(burst, quality) else superZoom.process(burst, crop, quality)
             } catch (e: Throwable) {
                 Log.e(TAG, "super zoom failed", e)
                 null
@@ -2018,7 +2021,11 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             runOnUiThread {
                 enhanceDone(
                     uri, if (result != null) "image/jpeg" else mimeType,
-                    if (result != null) "Super zoom · sharpest ${result.merged} of ${frames.size} shots merged" else "Saved at the camera's maximum zoom",
+                    when {
+                        result == null -> "Saved at the camera's maximum zoom"
+                        enhance -> "Zoom enhance · ${result.merged} shots merged for detail"
+                        else -> "Super zoom · sharpest ${result.merged} of ${frames.size} shots merged"
+                    },
                 )
             }
         }
@@ -2324,6 +2331,13 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 toast(if (result != null) "Clean photo · passers-by removed (${result.used} shots)" else "Saved a single shot")
             }
         }.start()
+    }
+
+    /** Zoomed in (1.5× or more) within the camera's range: merge a burst for detail, like Super Res Zoom. */
+    private fun zoomEnhanceApplies(): Boolean {
+        val c = caps ?: return false
+        return prefs.zoomEnhance && !c.isFront && displayZoom() >= ZOOM_ENHANCE_FROM && !settings.raw &&
+            (photoIntent("AUTO") || (prefs.uiPro && settings.cameraAe))
     }
 
     /** Auto in a dim room (not dark enough for Night): merge a few shots quietly. */
@@ -2919,6 +2933,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         private const val REQUEST_CAMERA = 1
         private const val REQUEST_AUDIO = 3
         private const val CLEAN_FRAMES = 7
+        /** Zoom enhance from this zoom (relative to the main lens) up. */
+        private const val ZOOM_ENHANCE_FROM = 1.5f
         private const val TRAILS_FRAMES = 12
         private const val CLOSEUP_FRAMES = 5
         /** Each trails frame up to 1/3 s, back to back: lines without gaps. */

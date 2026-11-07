@@ -681,7 +681,7 @@ class ProCamTest {
     fun photoKindsAreExplained() {
         assertEquals("Portrait", ReviewActivity.describe("PROCAM_1_PORTRAIT.jpg").first)
         assertEquals("Night", ReviewActivity.describe("PROCAM_1_NIGHT.jpg").first)
-        assertEquals("Super zoom", ReviewActivity.describe("PROCAM_1_ZOOM.jpg").first)
+        assertEquals("Zoom", ReviewActivity.describe("PROCAM_1_ZOOM.jpg").first)
         assertEquals("Freeze", ReviewActivity.describe("PROCAM_1_ACTION.jpg").first)
         assertEquals("RAW", ReviewActivity.describe("PROCAM_1.dng").first)
         assertEquals("Photo", ReviewActivity.describe("PROCAM_1.jpg").first)
@@ -1340,6 +1340,83 @@ class ProCamTest {
             "${MediaStore.Images.Media.DISPLAY_NAME} LIKE ?", arrayOf("%_LOWLIGHT%"), null,
         )?.use { it.count } ?: 0
         assertTrue("a _LOWLIGHT photo was saved", names > 0)
+    }
+
+    @Test
+    fun zoomEnhanceMergesFullSizeTilesSeamlessly() {
+        // 6 shots of a detailed scene, each shifted by a fraction of a pixel (hand shake) and noisy,
+        // as JPEGs bigger than one tile: the merge must keep the full size, stitch tiles without
+        // seams, and come out closer to the truth than a single shot.
+        val w = 2300
+        val h = 1700
+        val rnd = java.util.Random(4)
+        val tex = FloatArray((w + 8) * (h + 8)) { rnd.nextFloat() }
+        PortraitProcessor.boxBlur(tex, w + 8, h + 8, 1)
+        fun truth(x: Float, y: Float): Float {
+            val xi = x.toInt().coerceIn(0, w + 6)
+            val yi = y.toInt().coerceIn(0, h + 6)
+            val fx = x - xi
+            val fy = y - yi
+            val a = tex[yi * (w + 8) + xi] * (1 - fx) + tex[yi * (w + 8) + xi + 1] * fx
+            val b = tex[(yi + 1) * (w + 8) + xi] * (1 - fx) + tex[(yi + 1) * (w + 8) + xi + 1] * fx
+            return 50f + 150f * (a * (1 - fy) + b * fy)
+        }
+        val shifts = listOf(0f to 0f, 0.5f to 0.25f, 1.25f to 0.75f, 0.75f to 1.5f, 1.5f to 0.5f, 0.25f to 1.25f, 1f to 1f)
+        val jpegs = shifts.mapIndexed { k, (sx, sy) ->
+            val noise = java.util.Random(k * 31L)
+            val px = IntArray(w * h) { i ->
+                val v = (truth(i % w + 2 + sx, i / w + 2 + sy) + noise.nextGaussian() * 8).toInt().coerceIn(0, 255)
+                (0xFF shl 24) or (v shl 16) or (v shl 8) or v
+            }
+            val bmp = android.graphics.Bitmap.createBitmap(px, w, h, android.graphics.Bitmap.Config.ARGB_8888)
+            java.io.ByteArrayOutputStream().also { bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 95, it); bmp.recycle() }.toByteArray()
+        }
+        val result = SuperZoomProcessor().enhance(jpegs, 95)
+        assertEquals("full width", w, result.width)
+        assertEquals("full height", h, result.height)
+        val out = android.graphics.BitmapFactory.decodeByteArray(result.jpeg, 0, result.jpeg.size)
+        // The merge is aligned to the sharpest shot (its "before"): compare with that shot's view.
+        val ref = jpegs.indexOfFirst { it === result.before }.coerceAtLeast(0)
+        val (rx, ry) = shifts[ref]
+        val single = android.graphics.BitmapFactory.decodeByteArray(jpegs[ref], 0, jpegs[ref].size)
+        fun err(b: android.graphics.Bitmap): Double {
+            var e = 0.0
+            var n = 0
+            for (y in 40 until h - 40 step 3) for (x in 40 until w - 40 step 3) {
+                e += abs((b.getPixel(x, y) and 0xFF) - truth(x + 2f + rx, y + 2f + ry)); n++
+            }
+            return e / n
+        }
+        // Seams: the merged picture across a tile border is as good as inside a tile.
+        fun errAt(b: android.graphics.Bitmap, x0: Int): Double {
+            var e = 0.0
+            var n = 0
+            for (y in 100 until h - 100) for (x in x0 - 3..x0 + 3) {
+                e += abs((b.getPixel(x, y) and 0xFF) - truth(x + 2f + rx, y + 2f + ry)); n++
+            }
+            return e / n
+        }
+        val merged = err(out)
+        val one = err(single)
+        Log.i(TAG, "zoom enhance: single $one -> merged $merged; at tile border ${errAt(out, 1024)} vs inside ${errAt(out, 600)}")
+        assertTrue("merged closer to the truth: $merged vs $one", merged < one * 0.85)
+        assertTrue("no seam at the tile border", errAt(out, 1024) < errAt(out, 600) * 1.3 + 0.5)
+    }
+
+    @Test
+    fun zoomEnhanceCaptureSavesFullSizePhoto() {
+        waitForCamera()
+        setSimple(true)
+        Prefs(context).zoomEnhance = true
+        onView(withContentDescription("Zoom 2×")).perform(click())
+        SystemClock.sleep(800)
+        val before = count("image/jpeg")
+        onView(withId(R.id.shutter)).perform(click())
+        waitFor("zoom photo saved", 120_000) { count("image/jpeg") > before }
+        val uri = latestImage()!!
+        var name = ""
+        context.contentResolver.query(uri, arrayOf(MediaStore.Images.Media.DISPLAY_NAME), null, null, null)?.use { if (it.moveToFirst()) name = it.getString(0) }
+        assertTrue("a _ZOOM photo: $name", name.contains("_ZOOM"))
     }
 
     // ------------------------------------------------------------------ helpers

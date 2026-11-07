@@ -111,8 +111,92 @@ class SuperZoomProcessor {
         return result
     }
 
+    /**
+     * Zoom enhance (like the Pixel's Super Res Zoom) for zoomed photos within the camera's range:
+     * the burst is already zoomed by the camera, so the frames are merged at their full size. Hand
+     * shake offsets every frame by a fraction of a pixel, so merging them recovers detail that one
+     * enlarged frame doesn't have, and removes noise.
+     *
+     * Full 12 MP frames x 6 don't fit in an app's memory at once, so the shots are aligned once
+     * (on the centre), then merged tile by tile straight from the JPEGs and stitched together.
+     */
+    fun enhance(frames: List<ByteArray>, quality: Int): Result {
+        require(frames.isNotEmpty())
+        val t0 = android.os.SystemClock.uptimeMillis()
+        val rotation = exifRotation(frames.first())
+        // 1. Align on the centre third, at full resolution.
+        val centres = frames.map { bytes ->
+            decodeCentre(bytes, 3f)?.let { bmp ->
+                val px = IntArray(bmp.width * bmp.height)
+                bmp.getPixels(px, 0, bmp.width, 0, 0, bmp.width, bmp.height)
+                SuperRes.Frame(px, bmp.width, bmp.height).also { bmp.recycle() }
+            }
+        }
+        val usable = centres.indices.filter { centres[it] != null && centres[it]!!.w == centres.firstNotNullOf { c -> c }.w }
+        require(usable.isNotEmpty()) { "could not decode any frame" }
+        val order = SuperRes.sharpest(usable.map { centres[it]!! }, KEEP_FRAMES).map { usable[it] }
+        val all = SuperRes.offsets(order.map { centres[it]!! }, GRAY_SCALE)
+        val typical = all.drop(1).map { it.cost }.sorted().let { if (it.isEmpty()) 0.0 else it[it.size / 2] }
+        val good = all.indices.filter { k -> k == 0 || all[k].cost <= max(typical * 3, 4.0) }
+        val chosen = good.map { order[it] }
+        val offsets = good.map { all[it].dx to all[it].dy }
+        Log.i(TAG, "enhance: kept ${chosen.size} of ${frames.size}; offsets ${offsets.map { "%.2f,%.2f".format(it.first, it.second) }}")
+
+        // 2. Merge tile by tile at full size.
+        val decoders = chosen.map { BitmapRegionDecoder.newInstance(frames[it], 0, frames[it].size, false)!! }
+        try {
+            val fw = decoders[0].width
+            val fh = decoders[0].height
+            val out = Bitmap.createBitmap(fw, fh, Bitmap.Config.ARGB_8888)
+            val margin = 16 + offsets.maxOf { max(kotlin.math.abs(it.first), kotlin.math.abs(it.second)) }.roundToInt()
+            val opts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
+            var ty = 0
+            while (ty < fh) {
+                val th = min(TILE, fh - ty)
+                var tx = 0
+                while (tx < fw) {
+                    val tw = min(TILE, fw - tx)
+                    val region = Rect(max(0, tx - margin), max(0, ty - margin), min(fw, tx + tw + margin), min(fh, ty + th + margin))
+                    val tiles = decoders.map { d ->
+                        val bmp = d.decodeRegion(region, opts)
+                        val px = IntArray(bmp.width * bmp.height)
+                        bmp.getPixels(px, 0, bmp.width, 0, 0, bmp.width, bmp.height)
+                        SuperRes.Frame(px, bmp.width, bmp.height).also { bmp.recycle() }
+                    }
+                    val rw = tiles[0].w
+                    val rh = tiles[0].h
+                    val motion = IntArray(tiles.size) { k ->
+                        val (dx, dy) = offsets[k]
+                        if (k == 0) 255 else NightProcessor.motionThreshold(tiles[0].px, tiles[k].px, rw, rh, dx.roundToInt(), dy.roundToInt())
+                    }
+                    val merged = SuperRes.merge(tiles, offsets, motion, 1f)
+                    SuperRes.sharpen(merged)
+                    // Keep the tile's interior (its margins were only there for the shifts).
+                    out.setPixels(merged.px, (ty - region.top) * merged.w + (tx - region.left), merged.w, tx, ty, tw, th)
+                    tx += TILE
+                }
+                ty += TILE
+            }
+            var upright = out
+            if (rotation != 0) {
+                upright = Bitmap.createBitmap(out, 0, 0, fw, fh, Matrix().apply { postRotate(rotation.toFloat()) }, true)
+                out.recycle()
+            }
+            val bytes = ByteArrayOutputStream(frames[chosen[0]].size)
+            upright.compress(Bitmap.CompressFormat.JPEG, quality.coerceIn(50, 100), bytes)
+            val result = Result(bytes.toByteArray(), chosen.size, upright.width, upright.height, before = frames[chosen[0]])
+            upright.recycle()
+            Log.i(TAG, "enhance: ${result.width}x${result.height} from ${chosen.size} frames in ${android.os.SystemClock.uptimeMillis() - t0} ms")
+            return result
+        } finally {
+            decoders.forEach { it.recycle() }
+        }
+    }
+
     companion object {
         private const val TAG = "SuperZoom"
+        /** Zoom enhance works on tiles this size (plus margins), to fit in memory. */
+        private const val TILE = 1024
         private const val MAX_SIDE = 3000
         /** Enlargement measured to recover real detail from ~6 frames; more would only add pixels. */
         private const val MAX_SCALE = 2f

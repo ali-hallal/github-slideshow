@@ -514,7 +514,7 @@ class ReviewActivity : Activity() {
             name.contains("_TRAILS") -> "Light trails" to "Shots stacked so moving lights draw lines"
             name.contains("_CLEAN") -> "Clean" to "People and cars passing through removed · shots combined over 3 s"
             name.contains("_SILKY") -> "Silky" to "Shots blended so moving things become smooth streaks"
-            name.contains("_ZOOM") -> "Super zoom" to "Built from a burst for more detail than digital zoom"
+            name.contains("_ZOOM") -> "Zoom" to "Built from a burst for more detail than digital zoom"
             name.contains("_ACTION") -> "Freeze" to "The sharpest moment around your press"
             name.contains("_ORIGINAL") -> "Original" to "Saved without ProCam's enhancement"
             name.endsWith(".dng", ignoreCase = true) -> "RAW" to "Unprocessed sensor data, for editing apps"

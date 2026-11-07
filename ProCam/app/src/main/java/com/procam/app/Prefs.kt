@@ -36,6 +36,11 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("levelVideo", false)
         set(v) = sp.edit().putBoolean("levelVideo", v).apply()
 
+    /** Zoomed photos are merged from a burst for more detail. */
+    var zoomEnhance: Boolean
+        get() = sp.getBoolean("zoomEnhance", true)
+        set(v) = sp.edit().putBoolean("zoomEnhance", v).apply()
+
     /** Auto merges a few shots in dim light for less grain. */
     var lowLightMerge: Boolean
         get() = sp.getBoolean("lowLightMerge", true)
