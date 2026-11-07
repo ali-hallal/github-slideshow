@@ -26,6 +26,11 @@ class Prefs(context: Context) {
         get() = sp.getInt("videoKind", OutputPrefs.VIDEO_NORMAL)
         set(v) = sp.edit().putInt("videoKind", v).apply()
 
+    /** Last slow-motion failure on this phone (shown in diagnostics), or null. */
+    var slowMotionProblem: String?
+        get() = sp.getString("slowMotionProblem", null)
+        set(v) = sp.edit().putString("slowMotionProblem", v).apply()
+
     /** Keep the horizon level in videos. */
     var levelVideo: Boolean
         get() = sp.getBoolean("levelVideo", false)

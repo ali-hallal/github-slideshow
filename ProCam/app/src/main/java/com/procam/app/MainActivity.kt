@@ -1812,6 +1812,17 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         camera.startRecording(deviceOrientation, hasAudioPermission())
     }
 
+    override fun onSlowMotionFailed(reason: String) {
+        prefs.slowMotionProblem = reason
+        if (prefs.videoKind == OutputPrefs.VIDEO_SLOWMO) prefs.videoKind = OutputPrefs.VIDEO_NORMAL
+        toast("Slow motion couldn't start on this phone · switched to normal video. Settings → Send diagnostics helps us fix it.")
+        if (resumed && hasCameraPermission() && videoMode) {
+            caps = null
+            startCamera()
+        }
+        refreshUi()
+    }
+
     override fun onRecordingStarted(withSound: Boolean) {
         videoStarting = false
         if (quickVideo && quickVideoReleased) {

@@ -171,9 +171,10 @@ data class CameraCaps(
                 val sizes = map.highSpeedVideoSizes.filter { it.width * 9 == it.height * 16 && it.width <= 1920 }
                     .sortedByDescending { it.width }
                 for (size in sizes) {
-                    val fps = map.getHighSpeedVideoFpsRangesFor(size)
-                        .filter { it.lower == it.upper && it.upper in 120..240 }
-                        .maxOfOrNull { it.upper } ?: continue
+                    // 120 fps (4× slower) where offered: the most widely recordable; else up to 240.
+                    val rates = map.getHighSpeedVideoFpsRangesFor(size)
+                        .filter { it.lower == it.upper && it.upper in 120..240 }.map { it.upper }
+                    val fps = (if (120 in rates) 120 else rates.minOrNull()) ?: continue
                     return size to fps
                 }
                 null

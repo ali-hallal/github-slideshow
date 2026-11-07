@@ -69,6 +69,8 @@ class CameraController(context: Context, private val listener: Listener) {
         fun onCameraError(message: String)
         /** Video recording started ([withSound] = microphone is recording too). */
         fun onRecordingStarted(withSound: Boolean) {}
+        /** Slow motion couldn't be set up on this camera ([reason] for diagnostics); video should fall back. */
+        fun onSlowMotionFailed(reason: String) {}
         /** Video recording ended; [uri] is the saved video, or null if it couldn't be saved. */
         fun onRecordingStopped(uri: Uri?) {}
     }
@@ -458,8 +460,22 @@ class CameraController(context: Context, private val listener: Listener) {
         val previewSize = if (slow != null) size else pickPreviewSize(map.getOutputSizes(SurfaceTexture::class.java), size)
         texture.setDefaultBufferSize(previewSize.width, previewSize.height)
         previewSurface = Surface(texture)
-        val rec = VideoRecorder(appContext, size, fps, captureRate = slow?.second)
+        val rec = try {
+            VideoRecorder(appContext, size, fps, captureRate = slow?.second)
+        } catch (e: Exception) {
+            if (slow == null) throw e
+            slowMotionFailed("recorder: ${e.javaClass.simpleName}: ${e.message}", e)
+            return
+        }
         videoRecorder = rec
+        // High speed: preview alone may only run at (30, fps) on some phones; recording uses fps fixed.
+        slowPreviewFps = slow?.let { (sz, f) ->
+            try {
+                map.getHighSpeedVideoFpsRangesFor(sz).firstOrNull { it.lower == 30 && it.upper == f }
+            } catch (e: Exception) {
+                null
+            } ?: Range(f, f)
+        }
         videoSize = size
         // Looks, level horizon and time-lapse go through the GPU on the way to the encoder
         // (not slow motion: high-speed sessions only take the preview and the encoder).
@@ -495,7 +511,10 @@ class CameraController(context: Context, private val listener: Listener) {
                 }
             }
 
-            override fun onConfigureFailed(s: CameraCaptureSession) = postError("This camera can't record video here")
+            override fun onConfigureFailed(s: CameraCaptureSession) {
+                if (slowMotion) slowMotionFailed("high-speed session refused", null)
+                else postError("This camera can't record video here")
+            }
         }
         try {
             val target = effects?.inputSurface ?: rec.surface
@@ -505,7 +524,8 @@ class CameraController(context: Context, private val listener: Listener) {
             ))
         } catch (e: Exception) {
             Log.e(TAG, "createVideoSession", e)
-            postError("Failed to start video: ${e.message}")
+            if (slowMotion) slowMotionFailed("session: ${e.javaClass.simpleName}: ${e.message}", e)
+            else postError("Failed to start video: ${e.message}")
         }
     }
 
@@ -526,6 +546,11 @@ class CameraController(context: Context, private val listener: Listener) {
             // Time-lapse and slow motion have no sound (it wouldn't match the picture's speed).
             val sound = audio && output.videoKind == OutputPrefs.VIDEO_NORMAL
             val ok = rec.start(jpegOrientation(c, deviceOrientation), sound, location)
+            if (!ok && slowMotion) {
+                main.post { listener.onRecordingStopped(null) }
+                slowMotionFailed("recorder would not start", null)
+                return@post
+            }
             if (!ok) {
                 postError("Couldn't start recording")
                 main.post { listener.onRecordingStopped(null) }
@@ -707,6 +732,10 @@ class CameraController(context: Context, private val listener: Listener) {
         val s = session ?: return
         try {
             val rec = videoRecorder
+            if (rec != null && slowMotion) {
+                repeatSlowMotion(s, rec)
+                return
+            }
             if (rec != null) {
                 val d = device ?: return
                 val surface = previewSurface ?: return
@@ -720,11 +749,7 @@ class CameraController(context: Context, private val listener: Listener) {
                 if (b.get(CaptureRequest.CONTROL_AF_MODE) == CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE &&
                     caps?.afModes?.contains(CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO) == true
                 ) b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
-                if (slowMotion && s is android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession) {
-                    s.setRepeatingBurst(s.createHighSpeedRequestList(b.build()), previewCallback, handler)
-                } else {
-                    s.setRepeatingRequest(b.build(), previewCallback, handler)
-                }
+                s.setRepeatingRequest(b.build(), previewCallback, handler)
                 return
             }
             val b = previewBuilder() ?: return
@@ -734,6 +759,42 @@ class CameraController(context: Context, private val listener: Listener) {
         } catch (e: Exception) {
             Log.w(TAG, "updateRepeating", e)
         }
+    }
+
+    /**
+     * Slow motion: a minimal request, as high-speed sessions only accept a few controls (frame
+     * rate, auto exposure/focus/white balance, zoom). Any problem falls back to normal video.
+     */
+    private fun repeatSlowMotion(s: CameraCaptureSession, rec: VideoRecorder) {
+        try {
+            val d = device ?: return
+            val c = caps ?: return
+            val surface = previewSurface ?: return
+            val hs = s as? android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession
+                ?: throw IllegalStateException("not a high-speed session")
+            val b = d.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
+            b.addTarget(surface)
+            if (rec.recording) b.addTarget(rec.surface)
+            b.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+            b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
+            b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, if (rec.recording) videoFps else slowPreviewFps ?: videoFps)
+            if (c.afModes.contains(CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)) {
+                b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+            }
+            val zoom = settings.zoom.coerceIn(c.zoomRange.lower, c.zoomRange.upper)
+            if (c.zoomRatioApi && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) b.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoom)
+            else if (zoom > 1.001f) b.set(CaptureRequest.SCALER_CROP_REGION, cropRegion(c, zoom))
+            hs.setRepeatingBurst(hs.createHighSpeedRequestList(b.build()), previewCallback, handler)
+        } catch (e: Exception) {
+            slowMotionFailed("request: ${e.javaClass.simpleName}: ${e.message}", e)
+        }
+    }
+
+    private var slowPreviewFps: Range<Int>? = null
+
+    private fun slowMotionFailed(reason: String, e: Throwable?) {
+        Log.e(TAG, "slow motion failed: $reason", e)
+        main.post { listener.onSlowMotionFailed(reason) }
     }
 
     private fun previewBuilder(): CaptureRequest.Builder? {
@@ -945,7 +1006,7 @@ class CameraController(context: Context, private val listener: Listener) {
 
     private fun focusAtInternal(nx: Float, ny: Float) {
         val c = caps ?: return
-        if (session == null) return
+        if (session == null || slowMotion) return
         // Map portrait view coordinates onto the (landscape) sensor.
         var x = nx.coerceIn(0f, 1f)
         var y = ny.coerceIn(0f, 1f)
@@ -978,6 +1039,7 @@ class CameraController(context: Context, private val listener: Listener) {
 
     private fun sendAfTrigger(trigger: Int) {
         val s = session ?: return
+        if (slowMotion) return
         try {
             val b = previewBuilder() ?: return
             b.set(CaptureRequest.CONTROL_AF_TRIGGER, trigger)

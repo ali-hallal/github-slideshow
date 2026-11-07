@@ -73,6 +73,12 @@ object Diagnostics {
                 appendLine("  manual exposure=${caps.manualSensor} RAW=${caps.raw} OIS=${caps.ois} flash=${caps.hasFlash}")
                 appendLine("  zoom ${caps.zoomRange} (ratio API ${caps.zoomRatioApi}) · lens stops ${caps.lensStops} · multi-camera ${caps.multiCamera} [$physical]")
                 appendLine("  ISO ${caps.isoRange} · shutter ${caps.exposureRange} ns · focal ${caps.focalLength} mm · f/${caps.aperture} · sensor width ${caps.sensorWidthMm} mm")
+                appendLine("  slow motion: ${caps.slowMotion?.let { "${it.first.width}x${it.first.height} @ ${it.second} fps" } ?: "not offered"}")
+                try {
+                    val map = c.get(android.hardware.camera2.CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                    map?.highSpeedVideoSizes?.forEach { sz -> appendLine("    high speed $sz: ${map.getHighSpeedVideoFpsRangesFor(sz).joinToString()}") }
+                } catch (_: Exception) {
+                }
                 appendLine("  faces mode ${caps.faceDetectMode} · face priority ${caps.facePriorityScene} · min focus ${caps.minFocusDistance}")
                 appendLine("  max JPEG ${maxSize(ImageFormat.JPEG)} · max YUV ${maxSize(ImageFormat.YUV_420_888)} · max RAW ${maxSize(ImageFormat.RAW_SENSOR)}")
             } catch (e: Exception) {
