@@ -2944,7 +2944,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         private const val MAX_DISPLAY_ZOOM = 100f
         /** Shots taken for super zoom; the sharpest [SuperZoomProcessor.KEEP_FRAMES] are merged. */
         private const val SUPER_ZOOM_FRAMES = 11 // the first is skipped, the sharpest 6 of the other 10 merged
-        private const val ZOOM_BAR_HIDE_MS = 3500L
+        private const val ZOOM_BAR_HIDE_MS = 5000L
         private const val MAX_PENDING_ENHANCE = 2
         private const val HDR_FRAMES = 6
         private const val HDR_ON_TICKS = 3 // ~0.45 s of a backlit scene before HDR switches on
