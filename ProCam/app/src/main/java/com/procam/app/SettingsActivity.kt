@@ -122,6 +122,15 @@ class SettingsActivity : Activity() {
             listOf("Off", "On"), { if (prefs.level) 1 else 0 }, { prefs.level = it == 1 }))
         row(Option("Zoom enhance", "From 1.5× zoom, photos are merged from several shots for more detail (takes a moment)",
             listOf("Off", "On"), { if (prefs.zoomEnhance) 1 else 0 }, { prefs.zoomEnhance = it == 1 }))
+        row(Option("AI detail (super zoom)", "An on-device AI restores edges and texture in super zoom photos (takes a few seconds, in the background)",
+            listOf("Off", "From halfway into super zoom", "All super zoom"), { prefs.aiDetail.coerceIn(0, 2) }, { prefs.aiDetail = it }))
+        list.addView(TextView(this).apply {
+            text = "Test AI speed on this phone"
+            textSize = 14f
+            setTextColor(getColor(R.color.accent))
+            setPadding(dp(24), dp(12), dp(24), dp(12))
+            setOnClickListener { testAiSpeed() }
+        })
         row(Option("Zoom detail from RAW", "Zoom enhance merges the sensor's raw data (more detail, less noise) where the phone allows it",
             listOf("Off", "On"), { if (prefs.rawZoom) 1 else 0 }, { prefs.rawZoom = it == 1 }))
         row(Option("Low-light merge", "In dim rooms, Auto merges a few shots for cleaner, less grainy photos",
@@ -167,6 +176,13 @@ class SettingsActivity : Activity() {
             setTextColor(getColor(R.color.white))
             setPadding(dp(24), dp(16), dp(24), dp(16))
             setOnClickListener { startActivity(android.content.Intent(this@SettingsActivity, WelcomeActivity::class.java)) }
+        })
+        list.addView(TextView(this).apply {
+            text = "Open-source licences"
+            textSize = 16f
+            setTextColor(getColor(R.color.white))
+            setPadding(dp(24), dp(16), dp(24), dp(16))
+            setOnClickListener { showLicences() }
         })
         list.addView(TextView(this).apply {
             text = "Reset all settings"
@@ -281,6 +297,34 @@ class SettingsActivity : Activity() {
             }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    private fun testAiSpeed() {
+        Toast.makeText(this, "Testing the AI…", Toast.LENGTH_SHORT).show()
+        Thread {
+            val message = try {
+                val (ms, photoSeconds) = AiUpscaler.speedTest(this)
+                "Enlarged a 256×192 test picture in $ms ms.\n\nA typical super zoom photo would take about " +
+                    String.format(java.util.Locale.US, "%.0f", photoSeconds) + " s on this phone (in the background; you can keep shooting)."
+            } catch (e: Throwable) {
+                android.util.Log.e("ProCam", "AI speed test", e)
+                "The AI couldn't run on this phone: ${e.message}"
+            }
+            android.util.Log.i("ProCam", "AI speed test: $message")
+            runOnUiThread {
+                android.app.AlertDialog.Builder(this).setTitle("AI speed").setMessage(message).setPositiveButton("OK", null).show()
+            }
+        }.start()
+    }
+
+    private fun showLicences() {
+        val text = try {
+            "AI detail model: compact Real-ESRGAN (realesr-general-x4v3 and realesr-general-wdn-x4v3), " +
+                "blended, pruned and quantized for ProCam.\n\n" + assets.open("LICENSE-Real-ESRGAN.txt").bufferedReader().readText()
+        } catch (e: Exception) {
+            "Licence text unavailable"
+        }
+        android.app.AlertDialog.Builder(this).setTitle("Open-source licences").setMessage(text).setPositiveButton("OK", null).show()
     }
 
     private fun sendDiagnostics() {

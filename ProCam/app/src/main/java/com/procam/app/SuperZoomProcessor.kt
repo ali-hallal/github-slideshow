@@ -30,7 +30,7 @@ class SuperZoomProcessor {
      * @param crop how much further than the camera's own zoom (e.g. 3 = the centre third).
      * Blocking: call off the main thread.
      */
-    fun process(frames: List<ByteArray>, crop: Float, quality: Int): Result {
+    fun process(frames: List<ByteArray>, crop: Float, quality: Int, ai: AiUpscaler? = null): Result {
         require(frames.isNotEmpty())
         val rotation = exifRotation(frames.first())
         // 1. Full-resolution centre crops.
@@ -44,14 +44,14 @@ class SuperZoomProcessor {
             }
         }
         require(crops.isNotEmpty()) { "could not decode any frame" }
-        return processFrames(crops, rotation, quality, frames.size)
+        return processFrames(crops, rotation, quality, frames.size, ai)
     }
 
     /**
      * The merge itself, from frames already cropped and converted to pixels (fast bursts arrive
      * like this). [rotation] = clockwise degrees to make the result upright.
      */
-    fun processFrames(crops: List<SuperRes.Frame>, rotation: Int, quality: Int, taken: Int = crops.size): Result {
+    fun processFrames(crops: List<SuperRes.Frame>, rotation: Int, quality: Int, taken: Int = crops.size, ai: AiUpscaler? = null): Result {
         require(crops.isNotEmpty())
         val t0 = android.os.SystemClock.uptimeMillis()
         val w0 = crops[0].w
@@ -74,11 +74,20 @@ class SuperZoomProcessor {
             if (k == 0) 255 else NightProcessor.motionThreshold(frames[0].px, frames[k].px, w0, h0, dx.roundToInt(), dy.roundToInt())
         }
         Log.i(TAG, "kept ${frames.size} of $taken frames; offsets ${all.map { "%.2f,%.2f (%.0f)".format(it.dx, it.dy, it.cost) }}")
-        // Shift-and-add onto a finer grid (2-3x, aiming for ~3000 px), then sharpen.
-        val scale = (MAX_SIDE.toFloat() / max(w0, h0)).coerceIn(1f, MAX_SCALE)
-        val merged = SuperRes.merge(frames, offsets, motion, scale)
+        val merged: SuperRes.Frame
+        val scale: Float
+        if (ai != null) {
+            // AI detail: merge at the frames' own size (clean, no noise), then the network enlarges it.
+            scale = (AI_MAX_SIDE.toFloat() / max(w0, h0)).coerceIn(1f, 4f)
+            val clean = SuperRes.merge(frames, offsets, motion, 1f)
+            merged = ai.upscale(clean, (w0 * scale).roundToInt(), (h0 * scale).roundToInt())
+        } else {
+            // Shift-and-add onto a finer grid (2-3x, aiming for ~3000 px), then sharpen.
+            scale = (MAX_SIDE.toFloat() / max(w0, h0)).coerceIn(1f, MAX_SCALE)
+            merged = SuperRes.merge(frames, offsets, motion, scale)
+        }
         val t3 = android.os.SystemClock.uptimeMillis()
-        SuperRes.sharpen(merged)
+        if (ai == null) SuperRes.sharpen(merged)
         val t4 = android.os.SystemClock.uptimeMillis()
 
         var out = Bitmap.createBitmap(merged.px, merged.w, merged.h, Bitmap.Config.ARGB_8888)
@@ -277,6 +286,8 @@ class SuperZoomProcessor {
         /** Above this, zoom enhance works at half size (50 MP photos). */
         private const val MAX_ENHANCE_PIXELS = 16_000_000L
         private const val MAX_SIDE = 3000
+        /** With AI detail: up to 4× the crop, about 12 MP. */
+        private const val AI_MAX_SIDE = 4000
         /** Enlargement measured to recover real detail from ~6 frames; more would only add pixels. */
         private const val MAX_SCALE = 2f
         /** Frames merged out of the burst (the sharpest ones). */

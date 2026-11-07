@@ -4,6 +4,10 @@ plugins {
 }
 
 android {
+    // The AI model is memory-mapped straight from the APK: keep it uncompressed.
+    androidResources {
+        noCompress += "tflite"
+    }
     namespace = "com.procam.app"
     compileSdk = 35
 
@@ -46,6 +50,8 @@ android {
 }
 
 dependencies {
+    // On-device AI detail for super zoom (model: edited compact Real-ESRGAN, assets/procam_sr_x4.tflite).
+    implementation("org.tensorflow:tensorflow-lite:2.17.0")
     implementation("androidx.exifinterface:exifinterface:1.3.7")
     // On-device face detection (bundled model, works offline, no Play Services needed).
     implementation("com.google.mlkit:face-detection:16.1.7")

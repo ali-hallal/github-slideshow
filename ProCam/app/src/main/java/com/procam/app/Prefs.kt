@@ -41,6 +41,11 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("zoomEnhance", true)
         set(v) = sp.edit().putBoolean("zoomEnhance", v).apply()
 
+    /** AI detail for super zoom: [AI_OFF], [AI_HALFWAY] (from halfway into super zoom) or [AI_ALL_SUPER]. */
+    var aiDetail: Int
+        get() = sp.getInt("aiDetail", AI_HALFWAY)
+        set(v) = sp.edit().putInt("aiDetail", v).apply()
+
     /** Zoom enhance merges the sensor's RAW frames where the camera offers them. */
     var rawZoom: Boolean
         get() = sp.getBoolean("rawZoom", true)
@@ -234,4 +239,10 @@ class Prefs(context: Context) {
 
     private inline fun <reified T : Enum<T>> enumOr(name: String?, default: T): T =
         enumValues<T>().firstOrNull { it.name == name } ?: default
+
+    companion object {
+        const val AI_OFF = 0
+        const val AI_HALFWAY = 1
+        const val AI_ALL_SUPER = 2
+    }
 }

@@ -1565,6 +1565,86 @@ class ProCamTest {
     }
 
     @Test
+    fun aiUpscalerRestoresDetailWithoutSeams() {
+        // A detailed scene, shrunk 4× (as a far super zoom sees it), then enlarged back 4×.
+        val w = 400
+        val h = 300
+        val rnd = java.util.Random(5)
+        val tex = FloatArray(w * h) { rnd.nextFloat() }
+        PortraitProcessor.boxBlur(tex, w, h, 2)
+        val truth = IntArray(w * h) { i ->
+            val x = i % w
+            val y = i / w
+            var v = 70f + 260f * (tex[i] - 0.5f) + 60f
+            if ((x / 24 + y / 24) % 2 == 0 && x < 200) v = if (v > 128) 215f else 40f
+            val g = v.toInt().coerceIn(0, 255)
+            (0xFF shl 24) or ((g * 0.9).toInt() shl 16) or (g shl 8) or ((g * 0.8).toInt())
+        }
+        val big = android.graphics.Bitmap.createBitmap(truth, w, h, android.graphics.Bitmap.Config.ARGB_8888)
+        val smallBmp = PortraitProcessor.shrink(big, w / 4, h / 4)
+        val small = IntArray((w / 4) * (h / 4)).also { smallBmp.getPixels(it, 0, w / 4, 0, 0, w / 4, h / 4) }
+        val bilinear = android.graphics.Bitmap.createScaledBitmap(smallBmp, w, h, true)
+        val bl = IntArray(w * h).also { bilinear.getPixels(it, 0, w, 0, 0, w, h) }
+        val t0 = SystemClock.uptimeMillis()
+        val ai = AiUpscaler(context).use { it.upscale(SuperRes.Frame(small, w / 4, h / 4), w, h) }
+        val ms = SystemClock.uptimeMillis() - t0
+        assertEquals(w, ai.w)
+        assertEquals(h, ai.h)
+        fun err(a: IntArray, x0: Int, x1: Int): Double {
+            var e = 0.0
+            var n = 0
+            for (y in 8 until h - 8) for (x in x0 until x1) {
+                e += abs(((a[y * w + x] shr 8) and 0xFF) - ((truth[y * w + x] shr 8) and 0xFF)); n++
+            }
+            return e / n
+        }
+        val eAi = err(ai.px, 8, w - 8)
+        val eBl = err(bl, 8, w - 8)
+        // Seams: pieces join every 52 input pixels = 208 output pixels.
+        val seam = err(ai.px, 204, 212)
+        val inside = err(ai.px, 150, 190)
+        Log.i(TAG, "ai upscale: error AI $eAi vs bilinear $eBl; at seam $seam vs inside $inside; $ms ms")
+        fun edges(a: IntArray): Double {
+            var e = 0.0
+            for (y in 8 until h - 8) for (x in 8 until w - 9) e += abs(((a[y * w + x + 1] shr 8) and 0xFF) - ((a[y * w + x] shr 8) and 0xFF))
+            return e
+        }
+        val sharpAi = edges(ai.px) / edges(truth)
+        val sharpBl = edges(bl) / edges(truth)
+        Log.i(TAG, "ai upscale: edge strength vs truth AI $sharpAi, bilinear $sharpBl")
+        assertTrue("AI restores edges: $sharpAi vs $sharpBl", sharpAi > sharpBl * 1.1)
+        assertTrue("and stays about as accurate: $eAi vs $eBl", eAi < eBl * 1.15)
+        assertTrue("no seam: $seam vs $inside", seam < inside * 1.4 + 1)
+    }
+
+    @Test
+    fun aiSpeedTestRuns() {
+        val (ms, photo) = AiUpscaler.speedTest(context)
+        Log.i(TAG, "AI speed test: $ms ms; super zoom photo about $photo s")
+        assertTrue(ms > 0)
+    }
+
+    @Test
+    fun superZoomUsesAiDetail() {
+        waitForCamera()
+        setSimple(true)
+        Prefs(context).aiDetail = Prefs.AI_ALL_SUPER
+        onView(withContentDescription("Zoom 1×")).perform(click())
+        onView(withId(R.id.zoomDial)).perform(dragAcross(0.95f, 0.05f))
+        var hw = 0f
+        var v = 0f
+        activityRule.scenario.onActivity { val d = it.findViewById<ZoomDial>(R.id.zoomDial); hw = d.hardwareMax; v = d.value }
+        if (v <= hw * 1.01f && visible(R.id.zoomBar)) onView(withId(R.id.zoomDial)).perform(dragAcross(0.95f, 0.05f))
+        assertTrue("the zoom readout says AI: ${text(R.id.zoomIndicator)}", text(R.id.zoomIndicator).contains("AI"))
+        AiUpscaler.lastRunMs = 0
+        val before = count("image/jpeg")
+        onView(withId(R.id.shutter)).perform(click())
+        waitFor("super zoom photo saved", 180_000) { count("image/jpeg") > before }
+        assertTrue("the AI ran", AiUpscaler.lastRunMs > 0)
+        Log.i(TAG, "super zoom AI took ${AiUpscaler.lastRunMs} ms")
+    }
+
+    @Test
     fun zoomEnhanceCaptureSavesFullSizePhoto() {
         waitForCamera()
         setSimple(true)

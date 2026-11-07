@@ -372,6 +372,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     override fun onDestroy() {
+        enhancer.execute { ai?.close() }
         lookExecutor.shutdown()
         sound.release()
         groupShutter.close()
@@ -1080,8 +1081,30 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         zoomDial.setValue(cameraZoom())
     }
 
-    private fun zoomIndicatorText(): String =
-        if (extraCrop > 1.001f) "${Stops.zoomLabel(displayZoom())} ✦\nSuper zoom" else Stops.zoomLabel(displayZoom())
+    private fun zoomIndicatorText(): String = when {
+        extraCrop > 1.001f && aiFor(extraCrop) -> "${Stops.zoomLabel(displayZoom())} ✦\nSuper zoom · AI"
+        extraCrop > 1.001f -> "${Stops.zoomLabel(displayZoom())} ✦\nSuper zoom"
+        else -> Stops.zoomLabel(displayZoom())
+    }
+
+    /**
+     * AI detail applies to super zoom by [crop] (how far past the camera's maximum): from halfway
+     * into super zoom (2× past it, on the zoom dial's log scale), or all of it, per Settings.
+     */
+    private fun aiFor(crop: Float): Boolean = when (prefs.aiDetail) {
+        Prefs.AI_HALFWAY -> crop >= AI_HALFWAY_CROP
+        Prefs.AI_ALL_SUPER -> crop > 1.01f
+        else -> false
+    }
+
+    /** Loaded on first use, on the background thread (about 0.1 s), and kept. */
+    private var ai: AiUpscaler? = null
+    private fun aiUpscaler(): AiUpscaler? = ai ?: try {
+        AiUpscaler(this).also { ai = it }
+    } catch (e: Throwable) {
+        Log.e(TAG, "AI model unavailable", e)
+        null
+    }
 
     private val hideZoomIndicator = Runnable { zoomIndicator.animate().alpha(0f).setDuration(200).withEndAction { zoomIndicator.visibility = View.GONE }.start() }
 
@@ -2013,7 +2036,11 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         enhancer.execute {
             val result = try {
                 val burst = if (frames.size > 3) frames.drop(1) else frames
-                if (enhance) superZoom.enhance(burst, quality) else superZoom.process(burst, crop, quality)
+                when {
+                    enhance -> superZoom.enhance(burst, quality)
+                    aiFor(crop) -> superZoom.process(burst, crop, quality, ai = aiUpscaler())
+                    else -> superZoom.process(burst, crop, quality)
+                }
             } catch (e: Throwable) {
                 Log.e(TAG, "super zoom failed", e)
                 null
@@ -2037,6 +2064,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                     when {
                         result == null -> "Saved at the camera's maximum zoom"
                         enhance -> "Zoom enhance · ${result.merged} shots merged for detail"
+                        aiFor(crop) -> "Super zoom · AI detail · ${result.merged} shots merged"
                         else -> "Super zoom · sharpest ${result.merged} of ${frames.size} shots merged"
                     },
                 )
@@ -2994,6 +3022,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         private const val REQUEST_CAMERA = 1
         private const val REQUEST_AUDIO = 3
         private const val CLEAN_FRAMES = 7
+        /** "Halfway into super zoom": super zoom reaches 4× past the camera's maximum; halfway on a log scale is 2×. */
+        private const val AI_HALFWAY_CROP = 2f
         /** Zoom enhance from this zoom (relative to the main lens) up. */
         private const val ZOOM_ENHANCE_FROM = 1.5f
         private const val TRAILS_FRAMES = 12
