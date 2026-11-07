@@ -122,6 +122,8 @@ class SettingsActivity : Activity() {
             listOf("Off", "On"), { if (prefs.level) 1 else 0 }, { prefs.level = it == 1 }))
         row(Option("Zoom enhance", "From 1.5× zoom, photos are merged from several shots for more detail (takes a moment)",
             listOf("Off", "On"), { if (prefs.zoomEnhance) 1 else 0 }, { prefs.zoomEnhance = it == 1 }))
+        row(Option("Zoom detail from RAW", "Zoom enhance merges the sensor's raw data (more detail, less noise) where the phone allows it",
+            listOf("Off", "On"), { if (prefs.rawZoom) 1 else 0 }, { prefs.rawZoom = it == 1 }))
         row(Option("Low-light merge", "In dim rooms, Auto merges a few shots for cleaner, less grainy photos",
             listOf("Off", "On"), { if (prefs.lowLightMerge) 1 else 0 }, { prefs.lowLightMerge = it == 1 }))
         row(Option("Auto HDR", "In Auto, balance bright skies and dark subjects automatically (shows an HDR badge)",

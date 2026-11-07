@@ -69,6 +69,12 @@ class CameraController(context: Context, private val listener: Listener) {
         fun onCameraError(message: String)
         /** Video recording started ([withSound] = microphone is recording too). */
         fun onRecordingStarted(withSound: Boolean) {}
+        /**
+         * RAW zoom burst done: the RAW frames (cropped to the zoomed view) with what's needed to
+         * develop them, plus the JPEGs of the same shots (fallback, and the tone to match).
+         * [capture] is null if the RAW frames didn't all arrive (then use the JPEGs).
+         */
+        fun onRawBurst(capture: RawBurstCapture?, jpegs: List<ByteArray>) {}
         /** Slow motion couldn't be set up on this camera ([reason] for diagnostics); video should fall back. */
         fun onSlowMotionFailed(reason: String) {}
         /** Video recording ended; [uri] is the saved video, or null if it couldn't be saved. */
@@ -113,6 +119,16 @@ class CameraController(context: Context, private val listener: Listener) {
     private var burstMinimal = false
     private var burstIntervalMs = 0L
     private var burstFocus: FloatArray? = null
+    // RAW zoom burst
+    private var rawBurstMode = false
+    private var rawCrop = Rect()
+    private var rawFullW = 0
+    private var rawFullH = 0
+    private val rawBurstFrames = LinkedHashMap<Long, ShortArray>()
+    private val rawBurstResults = LinkedHashMap<Long, TotalCaptureResult>()
+    private var rawBurstJpegs: List<ByteArray>? = null
+    private var rawBurstCount = 0
+    @Volatile private var lastPhysicalId: String? = null
     // Fast bursts: a video-size YUV stream (no JPEG encode/decode), centre-cropped on arrival.
     private var yuvReader: ImageReader? = null
     // Video
@@ -368,6 +384,105 @@ class CameraController(context: Context, private val listener: Listener) {
             if (burstFocus != null) stillCount = burstFocus!!.size.coerceAtMost(MAX_BURST)
             takePictureInternal(deviceOrientation)
         }
+    }
+
+    /** RAW zoom bursts are possible here (RAW stream in the session, colour filter known). */
+    fun rawBurstAvailable() = rawInSession && rawReader != null && (caps?.cfa ?: -1) in 0..3
+
+    /**
+     * Zoom burst in RAW + JPEG: each RAW frame is cropped to what the zoom shows (RAW always covers
+     * the active lens's whole sensor). Result in [Listener.onRawBurst].
+     */
+    fun takeRawZoomBurst(deviceOrientation: Int, count: Int, exposure: Pair<Int, Long>?) {
+        val h = handler
+        if (h == null) {
+            main.post { listener.onCaptureFinished(false) }
+            return
+        }
+        h.post {
+            val raw = rawReader
+            val c = caps
+            if (raw == null || c == null) {
+                main.post { listener.onCaptureFinished(false) }
+                return@post
+            }
+            // Which lens the RAW comes from, and how much of it the zoom shows.
+            val lensScale = lastPhysicalId?.let { c.physicalScale[it] } ?: 1f
+            val crop = (settings.zoom / lensScale).coerceAtLeast(1f)
+            rawFullW = raw.width
+            rawFullH = raw.height
+            val cw = ((raw.width / crop).toInt() and 1.inv()).coerceAtLeast(64)
+            val ch = ((raw.height / crop).toInt() and 1.inv()).coerceAtLeast(64)
+            val left = ((raw.width - cw) / 2) and 1.inv()
+            val top = ((raw.height - ch) / 2) and 1.inv()
+            rawCrop = Rect(left, top, left + cw, top + ch)
+            Log.i(TAG, "raw zoom burst: lens $lastPhysicalId (x$lensScale), zoom ${settings.zoom}, crop $rawCrop of ${raw.width}x${raw.height}")
+            rawBurstMode = true
+            rawBurstFrames.clear()
+            rawBurstResults.clear()
+            rawBurstJpegs = null
+            // As many RAW frames as fit in memory next to the merge (2 bytes per raw pixel each).
+            val frameBytes = cw.toLong() * ch * 2
+            val fit = ((Budget.available() * 0.5 - 160_000_000L) / frameBytes).toInt()
+            stillCount = count.coerceAtMost(fit.coerceAtLeast(3)).coerceIn(1, MAX_BURST)
+            rawBurstCount = stillCount
+            stillToMemory = true
+            burstToYuv = false
+            burstExposure = exposure
+            burstMinimal = true
+            burstIntervalMs = 0L
+            burstFocus = null
+            takePictureInternal(deviceOrientation)
+        }
+    }
+
+    private fun copyRawCrop(image: Image): ShortArray {
+        val plane = image.planes[0]
+        val buf = plane.buffer.order(java.nio.ByteOrder.nativeOrder())
+        val rowStride = plane.rowStride
+        val pixelStride = plane.pixelStride
+        val r = rawCrop
+        val out = ShortArray(r.width() * r.height())
+        val shorts = buf.asShortBuffer()
+        for (y in 0 until r.height()) {
+            val rowStart = ((r.top + y) * rowStride + r.left * pixelStride) / 2
+            if (pixelStride == 2) {
+                shorts.position(rowStart)
+                shorts.get(out, y * r.width(), r.width())
+            } else {
+                for (x in 0 until r.width()) out[y * r.width() + x] = shorts.get(rowStart + x * pixelStride / 2)
+            }
+        }
+        return out
+    }
+
+    /** Hands over the RAW burst once the JPEGs, RAW frames and their results have all arrived. */
+    private fun maybeDeliverRawBurst(force: Boolean = false) {
+        val jpegs = rawBurstJpegs ?: return
+        val complete = rawBurstFrames.size >= rawBurstCount && rawBurstFrames.keys.all { rawBurstResults.containsKey(it) }
+        if (!complete && !force) return
+        rawBurstMode = false
+        val keys = rawBurstFrames.keys.filter { rawBurstResults.containsKey(it) }.sorted()
+        val c = caps
+        val chars = characteristics
+        val capture = if (keys.size >= 2 && c != null && chars != null) {
+            val first = rawBurstResults[keys[0]]!!
+            val pattern = chars.get(CameraCharacteristics.SENSOR_BLACK_LEVEL_PATTERN)
+            val black = first.get(CaptureResult.SENSOR_DYNAMIC_BLACK_LEVEL)
+                ?: FloatArray(4) { i -> (pattern?.getOffsetForIndex(i and 1, i shr 1) ?: 64).toFloat() }
+            val white = (first.get(CaptureResult.SENSOR_DYNAMIC_WHITE_LEVEL)
+                ?: chars.get(CameraCharacteristics.SENSOR_INFO_WHITE_LEVEL) ?: 1023).toFloat()
+            RawBurstCapture(
+                frames = keys.map { rawBurstFrames[it]!! }, w = rawCrop.width(), h = rawCrop.height(),
+                cropLeft = rawCrop.left, cropTop = rawCrop.top, fullW = rawFullW, fullH = rawFullH,
+                cfa = c.cfa, result = first, black = black, white = white, rotation = captureOrientation,
+            )
+        } else null
+        Log.i(TAG, "raw zoom burst: ${keys.size} raw frames of $rawBurstCount, ${jpegs.size} JPEGs" + if (capture == null) " (using JPEGs)" else "")
+        rawBurstFrames.clear()
+        rawBurstResults.clear()
+        rawBurstJpegs = null
+        main.post { listener.onRawBurst(capture, jpegs) }
     }
 
     // ------------------------------------------------------------------ open / close
@@ -639,6 +754,10 @@ class CameraController(context: Context, private val listener: Listener) {
         rawReader = null
         effects?.release()
         effects = null
+        rawBurstMode = false
+        rawBurstFrames.clear()
+        rawBurstResults.clear()
+        rawBurstJpegs = null
         slowMotion = false
         videoRecorder?.release()
         videoRecorder = null
@@ -934,6 +1053,9 @@ class CameraController(context: Context, private val listener: Listener) {
                 else -> Unit
             }
 
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                result.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID)?.let { lastPhysicalId = it }
+            }
             val now = SystemClock.uptimeMillis()
             if (now - lastStatsAt >= STATS_INTERVAL_MS) {
                 lastStatsAt = now
@@ -1121,6 +1243,12 @@ class CameraController(context: Context, private val listener: Listener) {
                 b.addTarget(raw.surface)
                 b.setTag(RAW_TAG)
             }
+            if (rawBurstMode && rawInSession && raw != null) {
+                b.addTarget(raw.surface)
+                b.setTag(RAW_BURST_TAG)
+                // Lens corner darkening isn't corrected in RAW: ask for the correction map.
+                b.set(CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE, CameraMetadata.STATISTICS_LENS_SHADING_MAP_MODE_ON)
+            }
             applySettings(b, still = true)
             val override = burstExposure
             if (override != null && caps?.manualSensor == true) {
@@ -1213,6 +1341,10 @@ class CameraController(context: Context, private val listener: Listener) {
                 trimOldest(rawResults)
                 tryWriteDng(ts)
             }
+            if (ts != null && request.tag == RAW_BURST_TAG) {
+                rawBurstResults[ts] = result
+                maybeDeliverRawBurst()
+            }
             if (--pendingStills <= 0) finishCapture(true)
         }
 
@@ -1237,6 +1369,13 @@ class CameraController(context: Context, private val listener: Listener) {
         val mime = burstMime
         burstFrames.clear()
         burstExpected = 0
+        if (rawBurstMode) {
+            // RAW zoom burst: wait for the RAW frames too (at most a moment).
+            rawBurstJpegs = frames
+            maybeDeliverRawBurst()
+            handler?.postDelayed({ if (rawBurstJpegs != null) maybeDeliverRawBurst(force = true) }, RAW_WAIT_MS)
+            return
+        }
         main.post { listener.onBurstCaptured(frames, mime) }
     }
 
@@ -1342,6 +1481,17 @@ class CameraController(context: Context, private val listener: Listener) {
         } catch (e: Exception) {
             null
         } ?: return
+        if (rawBurstMode || rawBurstJpegs != null) {
+            try {
+                rawBurstFrames[image.timestamp] = copyRawCrop(image)
+            } catch (e: Exception) {
+                Log.w(TAG, "raw crop", e)
+            } finally {
+                image.close()
+            }
+            maybeDeliverRawBurst()
+            return
+        }
         rawImages[image.timestamp] = image
         while (rawImages.size > 2) {
             val oldest = rawImages.keys.first()
@@ -1436,6 +1586,9 @@ class CameraController(context: Context, private val listener: Listener) {
     companion object {
         private const val TAG = "ProCam"
         private const val RAW_TAG = "raw"
+        private const val RAW_BURST_TAG = "rawburst"
+        /** After the JPEGs, wait at most this long for missing RAW frames. */
+        private const val RAW_WAIT_MS = 3000L
         private const val STANDARD_PIXELS = 12_600_000L
         private const val AE_LOCK_DELAY_MS = 700L
         private const val MAX_BURST = 16
@@ -1502,3 +1655,12 @@ class CameraController(context: Context, private val listener: Listener) {
         private const val STATS_INTERVAL_MS = 200L
     }
 }
+
+/** A RAW zoom burst, cropped to the zoomed view, with what's needed to develop it. */
+class RawBurstCapture(
+    val frames: List<ShortArray>, val w: Int, val h: Int,
+    val cropLeft: Int, val cropTop: Int, val fullW: Int, val fullH: Int,
+    val cfa: Int, val result: TotalCaptureResult, val black: FloatArray, val white: Float,
+    /** Clockwise degrees to turn the result upright. */
+    val rotation: Int,
+)

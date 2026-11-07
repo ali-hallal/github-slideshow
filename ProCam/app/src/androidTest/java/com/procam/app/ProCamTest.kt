@@ -1457,6 +1457,114 @@ class ProCamTest {
     }
 
     @Test
+    fun rawMergeBeatsSingleFrame() {
+        val w = 200
+        val h = 160
+        val rnd = java.util.Random(7)
+        val tex = FloatArray((w + 20) * (h + 20)) { rnd.nextFloat() }.also { PortraitProcessor.boxBlur(it, w + 20, h + 20, 1) }
+        fun t(x: Float, y: Float): Float {
+            val xi = kotlin.math.floor(x).toInt().coerceIn(0, w + 18)
+            val yi = kotlin.math.floor(y).toInt().coerceIn(0, h + 18)
+            val fx = x - xi
+            val fy = y - yi
+            val a = tex[yi * (w + 20) + xi] * (1 - fx) + tex[yi * (w + 20) + xi + 1] * fx
+            val b = tex[(yi + 1) * (w + 20) + xi] * (1 - fx) + tex[(yi + 1) * (w + 20) + xi + 1] * fx
+            return a * (1 - fy) + b * fy
+        }
+        fun scene(c: Int, x: Float, y: Float): Float {
+            val d = t(x + 5, y + 5)
+            return when (c) { 0 -> 0.15f + 0.6f * d; 1 -> 0.2f + 0.6f * d; else -> 0.1f + 0.5f * d }
+        }
+        val offs = listOf(0f to 0f, 0.5f to 0.25f, 1.25f to 0.75f, 0.75f to 1.5f, 1.5f to 0.5f, 0.25f to 1.25f)
+        val frames = offs.mapIndexed { k, (dx, dy) ->
+            val nz = java.util.Random(100L + k)
+            ShortArray(w * h) { i ->
+                val x = i % w
+                val y = i / w
+                val v = scene(RawMerge.channel(0, x, y), x - dx, y - dy)
+                (64f + v * 959f + nz.nextGaussian().toFloat() * 22f).toInt().coerceIn(0, 1023).toShort()
+            }
+        }
+        val ident = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f)
+        fun burst(fr: List<ShortArray>, o: List<Pair<Float, Float>>) =
+            RawMerge.Burst(fr, w, h, 0, o, FloatArray(4) { 64f }, 1023f, floatArrayOf(1f, 1f, 1f), ident, null, null)
+        fun err(out: FloatArray, s: Float): Double {
+            val ow = (w * s).toInt()
+            val oh = (h * s).toInt()
+            var e = 0.0
+            var n = 0
+            for (y in (8 * s).toInt() until oh - (8 * s).toInt()) for (x in (8 * s).toInt() until ow - (8 * s).toInt()) for (c in 0..2) {
+                e += abs(out[(y * ow + x) * 3 + c] - scene(c, (x + 0.5f) / s - 0.5f, (y + 0.5f) / s - 0.5f)); n++
+            }
+            return e / n * 255
+        }
+        // Alignment from the green previews.
+        val previews = frames.map { RawMerge.greenPreview(burst(frames, offs), it) }
+        val found = SuperRes.offsets(previews, 1).map { (it.dx * 2) to (it.dy * 2) }
+        val single2 = err(RawMerge.mergeRegion(burst(listOf(frames[0]), listOf(0f to 0f)), 2f, 0, 0, 2 * w, 2 * h), 2f)
+        val merged2 = err(RawMerge.mergeRegion(burst(frames, found), 2f, 0, 0, 2 * w, 2 * h), 2f)
+        val single1 = err(RawMerge.mergeRegion(burst(listOf(frames[0]), listOf(0f to 0f)), 1f, 0, 0, w, h), 1f)
+        val merged1 = err(RawMerge.mergeRegion(burst(frames, found), 1f, 0, 0, w, h), 1f)
+        Log.i(TAG, "raw merge: offsets $found; 1x $single1 -> $merged1; 2x $single2 -> $merged2")
+        assertTrue("1x: merged better than one frame ($merged1 vs $single1)", merged1 < single1 * 0.9)
+        assertTrue("2x: merged better than one frame ($merged2 vs $single2)", merged2 < single2 * 0.8)
+    }
+
+    @Test
+    fun colourAndToneMatchTheCamera() {
+        val rnd = java.util.Random(3)
+        val truth = floatArrayOf(1.15f, -0.1f, -0.05f, -0.05f, 1.1f, -0.05f, 0f, -0.2f, 1.2f)
+        val ours = FloatArray(1200) { rnd.nextFloat() * 0.6f + 0.05f }
+        val theirs = FloatArray(1200) { i -> val k = i / 3; val c = i % 3
+            truth[c * 3] * ours[k * 3] + truth[c * 3 + 1] * ours[k * 3 + 1] + truth[c * 3 + 2] * ours[k * 3 + 2] }
+        val m = RawMerge.fitColour(ours, theirs)
+        for (i in 0 until 9) assertEquals("colour matrix [$i]", truth[i], m[i], 0.02f)
+        val lin = FloatArray(200) { 0.001f * Math.pow(1.04, it.toDouble()).toFloat() }
+        val tone = RawMerge.ToneFit(lin, FloatArray(200) { RawMerge.linearToSrgb(lin[it] * 1.8f).toFloat() })
+        assertEquals(RawMerge.linearToSrgb(0.36f).toFloat(), tone.apply(0.2f), 3f)
+    }
+
+    @Test
+    fun rawZoomPhotoLooksLikeTheCamerasOwn() {
+        assumeTrue("needs RAW", backCameraHas(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_RAW))
+        waitForCamera()
+        setSimple(true)
+        Prefs(context).zoomEnhance = true
+        Prefs(context).rawZoom = true
+        onView(withContentDescription("Zoom 2×")).perform(click())
+        SystemClock.sleep(800)
+        val before = count("image/jpeg")
+        val started = System.currentTimeMillis()
+        onView(withId(R.id.shutter)).perform(click())
+        waitFor("zoom photo saved", 150_000) { count("image/jpeg") > before }
+        assertTrue("the RAW path made it", RawZoomProcessor.lastSucceededAt >= started)
+        val uri = latestImage()!!
+        var name = ""
+        context.contentResolver.query(uri, arrayOf(MediaStore.Images.Media.DISPLAY_NAME), null, null, null)?.use { if (it.moveToFirst()) name = it.getString(0) }
+        val original = OriginalStore.get(context, name)!!
+        fun means(b: android.graphics.Bitmap): DoubleArray {
+            val m = DoubleArray(3)
+            var n = 0
+            for (y in 0 until b.height step 4) for (x in 0 until b.width step 4) {
+                val p = b.getPixel(x, y)
+                m[0] += (p shr 16) and 0xFF; m[1] += (p shr 8) and 0xFF; m[2] += p and 0xFF; n++
+            }
+            return DoubleArray(3) { m[it] / n }
+        }
+        fun small(bytes: ByteArray) = android.graphics.ImageDecoder.decodeBitmap(android.graphics.ImageDecoder.createSource(java.nio.ByteBuffer.wrap(bytes))) { d, info, _ ->
+            d.allocator = android.graphics.ImageDecoder.ALLOCATOR_SOFTWARE
+            d.setTargetSampleSize(maxOf(1, maxOf(info.size.width, info.size.height) / 400))
+        }
+        val ours = means(android.graphics.ImageDecoder.decodeBitmap(android.graphics.ImageDecoder.createSource(context.contentResolver, uri)) { d, info, _ ->
+            d.allocator = android.graphics.ImageDecoder.ALLOCATOR_SOFTWARE
+            d.setTargetSampleSize(maxOf(1, maxOf(info.size.width, info.size.height) / 400))
+        })
+        val camera = means(small(original.readBytes()))
+        Log.i(TAG, "raw zoom colours: ours ${ours.toList()} vs camera ${camera.toList()}")
+        for (c in 0..2) assertEquals("channel $c brightness close to the camera's", camera[c], ours[c], 25.0)
+    }
+
+    @Test
     fun zoomEnhanceCaptureSavesFullSizePhoto() {
         waitForCamera()
         setSimple(true)

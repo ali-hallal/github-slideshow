@@ -115,6 +115,10 @@ data class CameraCaps(
     val edgeModes: IntArray,
     /** Slow motion this camera can record: (video size, frames per second), or null. */
     val slowMotion: Pair<android.util.Size, Int>? = null,
+    /** Logical multi-camera: each physical lens's field of view relative to this camera's (zoom it covers at 1×). */
+    val physicalScale: Map<String, Float> = emptyMap(),
+    /** Bayer layout of RAW frames (CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT), -1 if none. */
+    val cfa: Int = -1,
 ) {
     val isFront get() = facing == CameraCharacteristics.LENS_FACING_FRONT
     val canManualFocus get() = manualSensor && minFocusDistance > 0f
@@ -160,7 +164,21 @@ data class CameraCaps(
                 noiseReductionModes = c.get(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES) ?: IntArray(0),
                 edgeModes = c.get(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES) ?: IntArray(0),
                 slowMotion = slowMotion(c, capabilities),
+                physicalScale = physicalScales(c, manager),
+                cfa = c.get(CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT) ?: -1,
             )
+        }
+
+        private fun physicalScales(c: CameraCharacteristics, manager: CameraManager): Map<String, Float> {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return emptyMap()
+            val main = fieldOfViewScale(c) ?: return emptyMap()
+            return c.physicalCameraIds.mapNotNull { pid ->
+                try {
+                    fieldOfViewScale(manager.getCameraCharacteristics(pid))?.let { pid to it / main }
+                } catch (e: Exception) {
+                    null
+                }
+            }.toMap()
         }
 
         /** Best slow-motion setting: 1080p (else 720p) at the highest fixed rate up to 240 fps. */

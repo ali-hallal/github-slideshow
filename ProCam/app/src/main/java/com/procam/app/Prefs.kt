@@ -41,6 +41,11 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("zoomEnhance", true)
         set(v) = sp.edit().putBoolean("zoomEnhance", v).apply()
 
+    /** Zoom enhance merges the sensor's RAW frames where the camera offers them. */
+    var rawZoom: Boolean
+        get() = sp.getBoolean("rawZoom", true)
+        set(v) = sp.edit().putBoolean("rawZoom", v).apply()
+
     /** Auto merges a few shots in dim light for less grain. */
     var lowLightMerge: Boolean
         get() = sp.getBoolean("lowLightMerge", true)

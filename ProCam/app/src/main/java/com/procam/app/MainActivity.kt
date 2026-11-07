@@ -1218,8 +1218,13 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 SuperZoomProcessor.plan(liveIso!!, liveExposure!!, safeShutterNs() ?: liveExposure!!, isoR, expR)
             } else null
             exposure?.let { Log.i(TAG, "super zoom plan: ISO ${it.first} ${Stops.shutterLabel(it.second)}") }
-            // Full-resolution shots (video-size frames would be faster but lose detail).
-            camera.takeBurst(deviceOrientation, zoomBurstFrames(), toMemory = true, exposure = exposure, minimalProcessing = true)
+            if (zoomEnhancing && prefs.rawZoom && camera.rawBurstAvailable()) {
+                // Best: merge the sensor's RAW frames (JPEGs come along as fallback and for the look).
+                camera.takeRawZoomBurst(deviceOrientation, zoomBurstFrames(), exposure)
+            } else {
+                // Full-resolution JPEG shots (video-size frames would be faster but lose detail).
+                camera.takeBurst(deviceOrientation, zoomBurstFrames(), toMemory = true, exposure = exposure, minimalProcessing = true)
+            }
         } else {
             camera.takePicture(deviceOrientation)
         }
@@ -2035,6 +2040,47 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                         else -> "Super zoom · sharpest ${result.merged} of ${frames.size} shots merged"
                     },
                 )
+            }
+        }
+    }
+
+    private val rawZoom = RawZoomProcessor()
+
+    override fun onRawBurst(capture: RawBurstCapture?, jpegs: List<ByteArray>) {
+        if (!zoomProcessing) return
+        if (capture == null) {
+            // RAW didn't come through: the JPEG merge.
+            processSuperZoom(jpegs, "image/jpeg")
+            return
+        }
+        val quality = prefs.jpegQuality
+        zoomEnhancing = false
+        releaseShutterForBackground()
+        enhancer.execute {
+            var how = "RAW"
+            val result = try {
+                rawZoom.process(capture, jpegs, capture.rotation, quality)
+            } catch (e: Throwable) {
+                Log.e(TAG, "raw zoom failed, using the JPEG merge", e)
+                how = "JPEG"
+                try {
+                    superZoom.enhance(if (jpegs.size > 3) jpegs.drop(1) else jpegs, quality)
+                } catch (e2: Throwable) {
+                    Log.e(TAG, "zoom enhance failed", e2)
+                    null
+                }
+            }
+            val uri = if (result != null) {
+                val name = "${MediaSaver.newBaseName()}_ZOOM.jpg"
+                result.before?.let { OriginalStore.save(this, name, it) }
+                MediaSaver.save(this, name, "image/jpeg", writer = { it.write(result.jpeg) },
+                    afterWrite = { u -> MediaSaver.copyExif(this, u, jpegs.first()) })
+            } else {
+                MediaSaver.save(this, "${MediaSaver.newBaseName()}.jpg", "image/jpeg", writer = { it.write(jpegs.first()) })
+            }
+            runOnUiThread {
+                enhanceDone(uri, "image/jpeg",
+                    if (result != null) "Zoom enhance · ${result.merged} $how shots merged for detail" else "Saved a single shot")
             }
         }
     }
