@@ -1432,7 +1432,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 val name = contentResolver.query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)
                     ?.use { if (it.moveToFirst()) it.getString(0) else null } ?: "photo.jpg"
                 val iterations = if (Runtime.getRuntime().availableProcessors() >= 8) Deconvolve.ITERATIONS else Deconvolve.ITERATIONS / 2
-                val merged = TileMerge.merge(frames.map { TileMerge.YuvSource(it.frame) }, roi, MOMENT_FRAMES, iterations)
+                val merged = TileMerge.merge(rollingCorrected(frames, roi), roi, MOMENT_FRAMES, iterations)
                 var bmp = merged.bitmap
                 if (rotation != 0) {
                     bmp = android.graphics.Bitmap.createBitmap(merged.bitmap, 0, 0, merged.bitmap.width, merged.bitmap.height,
@@ -1456,6 +1456,49 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 enhanceDone(uri, "image/jpeg", if (ok) "Steadied · used the steadiest moment around your press" else "")
                 if (!ok && !look.isNatural) applyLookToSaved(uri, look)
             }
+        }
+    }
+
+    /**
+     * The kept frames as merge sources, each row put back where the phone's turning during
+     * readout moved it (rolling shutter). Which way the gyroscope's axes run on the sensor is
+     * settled by trying each and keeping what lines the frames up best; uncorrected if nothing
+     * helps or nothing is known.
+     */
+    private fun rollingCorrected(frames: List<CameraController.MomentFrame>, roi: RectF?): List<TileMerge.Source> {
+        val plain = frames.map { TileMerge.YuvSource(it.frame) }
+        val c = caps ?: return plain
+        val skew = camera.frameSkewNs
+        if (skew <= 0 || !camera.timestampsMatchSensors || !shake.available || frames.size < 2) return plain
+        val w = plain[0].width
+        val h = plain[0].height
+        val pxPerRad = maxOf(w, h) / 4000f / ShakeMeter.radPerPx(c.focalLength ?: 0f, c.sensorWidthMm, cameraZoom())
+        val paths = frames.map { f ->
+            shake.pathDuring(f.timestamp + f.exposureNs / 2, skew, 16)?.let { MotionDeblur.pathPx(it, pxPerRad, c.sensorOrientation) }
+                ?: return plain
+        }
+        if (paths.all { RollingShutter.extent(RollingShutter.rowShifts(it, 2)) < 1f }) return plain
+        return try {
+            var best = plain
+            var bestCost = TileMerge.alignmentCost(plain, roi)
+            val baseline = bestCost
+            var chosen = -1
+            for (v in 0 until 4) {
+                val sources = frames.indices.map { k ->
+                    TileMerge.YuvSource(frames[k].frame, RollingShutter.rowShifts(MotionDeblur.variants(paths[k])[v], h))
+                }
+                val cost = TileMerge.alignmentCost(sources, roi)
+                if (cost < bestCost * 0.97) {
+                    bestCost = cost
+                    best = sources
+                    chosen = v
+                }
+            }
+            Log.i(TAG, "rolling shutter: skew ${skew / 1000} µs, alignment cost %.2f -> %.2f (variant $chosen)".format(Locale.US, baseline, bestCost))
+            best
+        } catch (e: Exception) {
+            Log.w(TAG, "rolling shutter correction skipped", e)
+            plain
         }
     }
 

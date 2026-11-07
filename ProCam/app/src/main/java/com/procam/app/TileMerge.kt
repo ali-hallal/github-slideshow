@@ -51,7 +51,12 @@ object TileMerge {
     }
 
     /** A raw YUV frame kept by the camera (steadiest moment), converted region by region. */
-    class YuvSource(private val f: MomentBuffer.Frame) : Source {
+    /**
+     * A raw YUV frame kept by the camera (steadiest moment), converted region by region.
+     * [rowShift] (dx, dy per sensor row, interleaved): rolling-shutter correction — where each
+     * row's content really is, read from there instead.
+     */
+    class YuvSource(private val f: MomentBuffer.Frame, private val rowShift: FloatArray? = null) : Source {
         override val width get() = f.width and 1.inv()
         override val height get() = f.height and 1.inv()
         override fun region(r: Rect, sample: Int): SuperRes.Frame {
@@ -59,11 +64,13 @@ object TileMerge {
             val h = r.height() / sample
             val out = IntArray(w * h)
             for (yy in 0 until h) {
-                val y = (r.top + yy * sample).coerceIn(0, height - 1)
+                val row = (r.top + yy * sample).coerceIn(0, height - 1)
+                val sx = rowShift?.let { Math.round(it[2 * row]) } ?: 0
+                val y = rowShift?.let { (row + Math.round(it[2 * row + 1])).coerceIn(0, height - 1) } ?: row
                 val yBase = y * f.yRow
                 val uvBase = (y / 2) * f.uvRow
                 for (xx in 0 until w) {
-                    val x = (r.left + xx * sample).coerceIn(0, width - 1)
+                    val x = (r.left + xx * sample + sx).coerceIn(0, width - 1)
                     val l = f.y[yBase + x * f.yPix].toInt() and 0xFF
                     val uvi = uvBase + (x / 2) * f.uvPix
                     val u = (f.u[uvi].toInt() and 0xFF) - 128
@@ -79,6 +86,23 @@ object TileMerge {
     }
 
     class Result(val bitmap: Bitmap, val used: Int, val reference: Int)
+
+    /**
+     * How well [sources] line up on the subject (mean alignment cost against the first; lower
+     * is better) — for choosing between corrections of the same frames.
+     */
+    fun alignmentCost(sources: List<Source>, roi: RectF?, sample: Int = 2): Double {
+        val fullW = sources[0].width
+        val fullH = sources[0].height
+        val rw = max(64, fullW / 3)
+        val rh = max(64, fullH / 3)
+        val cx = ((roi?.centerX() ?: 0.5f) * fullW).roundToInt().coerceIn(rw / 2, fullW - rw / 2)
+        val cy = ((roi?.centerY() ?: 0.5f) * fullH).roundToInt().coerceIn(rh / 2, fullH - rh / 2)
+        val area = Rect(cx - rw / 2, cy - rh / 2, cx + rw / 2, cy + rh / 2)
+        val parts = sources.map { it.region(area, sample) }
+        val offsets = SuperRes.offsets(parts, GRAY_SCALE, null)
+        return offsets.drop(1).map { it.cost }.average()
+    }
 
     /**
      * Merges [sources] (same size). [roi] = subject in 0..1 coordinates of the frames, or null.

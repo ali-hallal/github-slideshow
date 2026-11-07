@@ -246,6 +246,9 @@ class CameraController(context: Context, private val listener: Listener) {
     /** The camera reports where optical stabilisation moved the lens (per frame). */
     @Volatile var oisDataAvailable = false
         private set
+    /** Readout time (ns) of the stream's frames (rolling shutter); 0 if unknown. */
+    @Volatile var frameSkewNs = 0L
+        private set
     /** Time for the sensor to read out top to bottom (ns) of the last photo; 0 if unknown. */
     @Volatile var lastStillSkewNs = 0L
         private set
@@ -1128,6 +1131,7 @@ class CameraController(context: Context, private val listener: Listener) {
     private val previewCallback = object : CameraCaptureSession.CaptureCallback() {
         override fun onCaptureCompleted(s: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
             recordOis(result)
+            result.get(CaptureResult.SENSOR_ROLLING_SHUTTER_SKEW)?.let { frameSkewNs = it }
             if (zslCapable) {
                 val ts = result.get(CaptureResult.SENSOR_TIMESTAMP)
                 val e = result.get(CaptureResult.SENSOR_EXPOSURE_TIME)

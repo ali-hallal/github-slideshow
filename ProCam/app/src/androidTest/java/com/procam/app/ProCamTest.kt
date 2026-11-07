@@ -836,7 +836,9 @@ class ProCamTest {
         assertTrue("photo/video switch hidden while recording", !visible(R.id.captureSwitch))
         SystemClock.sleep(3500)
         val secs = text(R.id.recTime).substringAfterLast(':').trim().toIntOrNull() ?: -1
-        assertTrue("timer counts: ${text(R.id.recTime)}", secs in 3..8)
+        // A stalled emulator can make the wait longer than asked: compare with the time really passed.
+        val passed = ((SystemClock.uptimeMillis() - startedAt) / 1000).toInt()
+        assertTrue("timer counts: ${text(R.id.recTime)} after $passed s", secs in 3..passed + 3)
         val recordedFor = SystemClock.uptimeMillis() - startedAt
         onView(withId(R.id.shutter)).perform(click())
         waitFor("video saved", 15_000) { videoCount() > before }
@@ -1822,6 +1824,33 @@ class ProCamTest {
         waitFor("photo saved", 30_000) { count("image/jpeg") > before }
         waitFor("deblurred", 180_000) { latestImage()?.let { description(it) }?.startsWith("Shake undone") == true }
         assertEquals("still one photo", before + 1, count("image/jpeg"))
+    }
+
+    @Test
+    fun rollingShutterRowsPutBack() {
+        val w = 800
+        val h = 600
+        val rnd = java.util.Random(4)
+        val tex = FloatArray(w * h) { rnd.nextFloat() }.also { PortraitProcessor.boxBlur(it, w, h, 2) }
+        // While each frame was read out, the phone turned: rows shifted line by line, differently per frame.
+        val paths = listOf(floatArrayOf(-4f, 0f, 4f, 0f), floatArrayOf(5f, -2f, -5f, 2f), floatArrayOf(-2f, 3f, 2f, -3f))
+        val frames = paths.map { p ->
+            val sh = RollingShutter.rowShifts(p, h)
+            val y = ByteArray(w * h) { i ->
+                val x = i % w
+                val r = i / w
+                val sx = (x - kotlin.math.round(sh[2 * r]).toInt()).coerceIn(0, w - 1)
+                val sy = (r - kotlin.math.round(sh[2 * r + 1]).toInt()).coerceIn(0, h - 1)
+                (40 + 180 * tex[sy * w + sx]).toInt().toByte()
+            }
+            val uv = ByteArray((w / 2) * (h / 2)) { 128.toByte() }
+            MomentBuffer.Frame(w, h, y, uv, uv.copyOf(), w, 1, w / 2, 1)
+        }
+        val plain = TileMerge.alignmentCost(frames.map { TileMerge.YuvSource(it) }, null)
+        val fixed = TileMerge.alignmentCost(frames.indices.map { TileMerge.YuvSource(frames[it], RollingShutter.rowShifts(paths[it], h)) }, null)
+        assertTrue("rows put back line up: $fixed vs $plain", fixed < plain * 0.3)
+        val wrong = TileMerge.alignmentCost(frames.indices.map { TileMerge.YuvSource(frames[it], RollingShutter.rowShifts(MotionDeblur.variants(paths[it])[1], h)) }, null)
+        assertTrue("the wrong way round is worse, so it's never chosen: $wrong vs $plain", wrong > plain)
     }
 
     // ------------------------------------------------------------------ helpers
