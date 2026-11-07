@@ -830,6 +830,7 @@ class ProCamTest {
         assertTrue("photo modes make way for video", !visible(R.id.intentScroll))
         assertTrue("hint explains recording", text(R.id.intentHint).contains("red button"))
         val before = videoCount()
+        val pressedAt = SystemClock.uptimeMillis()
         onView(withId(R.id.shutter)).perform(click())
         waitFor("recording started") { visible(R.id.recTime) }
         val startedAt = SystemClock.uptimeMillis()
@@ -837,8 +838,9 @@ class ProCamTest {
         SystemClock.sleep(3500)
         val secs = text(R.id.recTime).substringAfterLast(':').trim().toIntOrNull() ?: -1
         // A stalled emulator can make the wait longer than asked: compare with the time really passed.
-        val passed = ((SystemClock.uptimeMillis() - startedAt) / 1000).toInt()
-        assertTrue("timer counts: ${text(R.id.recTime)} after $passed s", secs in 3..passed + 3)
+        // (The recording can start well before the test notices it: bound it by the press.)
+        val passed = ((SystemClock.uptimeMillis() - pressedAt) / 1000).toInt()
+        assertTrue("timer counts: ${text(R.id.recTime)} after $passed s", secs in 3..passed + 1)
         val recordedFor = SystemClock.uptimeMillis() - startedAt
         onView(withId(R.id.shutter)).perform(click())
         waitFor("video saved", 15_000) { videoCount() > before }
@@ -1816,13 +1818,18 @@ class ProCamTest {
     @Test
     fun shakyPhotoIsDeblurredInTheApp() {
         context.getSharedPreferences("procam", android.content.Context.MODE_PRIVATE).edit()
-            .putFloat("forceShakePx", 10f).putBoolean("steadyMoment", false).commit()
+            .putFloat("forceShakePx", 10f).putBoolean("steadyMoment", false)
+            .putBoolean("autoHdr", false).putBoolean("lowLightMerge", false).commit()
         waitForCamera()
         setSimple(true)
         val before = count("image/jpeg")
         onView(withId(R.id.shutter)).perform(click())
         waitFor("photo saved", 30_000) { count("image/jpeg") > before }
-        waitFor("deblurred", 180_000) { latestImage()?.let { description(it) }?.startsWith("Shake undone") == true }
+        try {
+            waitFor("deblurred", 180_000) { latestImage()?.let { description(it) }?.startsWith("Shake undone") == true }
+        } catch (e: AssertionError) {
+            throw AssertionError("${e.message}; description=${latestImage()?.let { description(it) }}; log:\n" + appLog("shake blur|deblur|steadiest|plan"), e)
+        }
         assertEquals("still one photo", before + 1, count("image/jpeg"))
     }
 
@@ -1854,6 +1861,14 @@ class ProCamTest {
     }
 
     // ------------------------------------------------------------------ helpers
+
+    /** The app's recent log lines matching [pattern] (for failure messages). */
+    private fun appLog(pattern: String): String {
+        val pfd = InstrumentationRegistry.getInstrumentation().uiAutomation.executeShellCommand("logcat -d -v time -t 400 ProCam:V *:S")
+        val text = android.os.ParcelFileDescriptor.AutoCloseInputStream(pfd).bufferedReader().readText()
+        val re = Regex(pattern, RegexOption.IGNORE_CASE)
+        return text.lines().filter { re.containsMatchIn(it) }.takeLast(30).joinToString("\n")
+    }
 
     /** Switches between Simple and Pro with the top-bar button. */
     private fun setSimple(simple: Boolean) {
