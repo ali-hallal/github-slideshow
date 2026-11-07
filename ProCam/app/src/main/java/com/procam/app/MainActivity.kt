@@ -238,6 +238,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     // Video
     /** The camera is currently open for video (it reopens when switching between photo and video). */
     private var openedForVideo = false
+    /** The camera is keeping full-size frames for the steadiest moment. */
+    private var openedZsl = false
     private var openedKind = OutputPrefs.VIDEO_NORMAL
     private var recording = false
     private var recordingStartedAt = 0L
@@ -438,7 +440,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         Log.i(TAG, "startCamera index=$cameraIndex id=$id ids=$cameraIds extra lenses=$extraLenses")
         openedForVideo = videoMode
         openedKind = prefs.videoKind
-        camera.open(id, texture, settings, prefs.output().copy(video = openedForVideo))
+        openedZsl = zslWanted()
+        camera.open(id, texture, settings, prefs.output().copy(video = openedForVideo, zsl = openedZsl))
     }
 
     // ------------------------------------------------------------------ setup
@@ -581,6 +584,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 if (textureView.width == 0 || textureView.height == 0) return false
                 overlay.showFocus(e.x, e.y)
                 camera.focusAt(unzoomX(e.x), unzoomY(e.y))
+                rememberTap(unzoomX(e.x), unzoomY(e.y))
                 showBadge("FOCUS POINT")
                 return true
             }
@@ -589,6 +593,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 if (textureView.width == 0 || textureView.height == 0) return
                 overlay.showFocus(e.x, e.y)
                 camera.lockAt(unzoomX(e.x), unzoomY(e.y))
+                rememberTap(unzoomX(e.x), unzoomY(e.y))
                 showBadge("AE/AF LOCK")
                 haptic(textureView, HapticFeedbackConstants.LONG_PRESS)
             }
@@ -1253,6 +1258,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         } else {
             // A normal photo: never slower than the hands can hold right now.
             val plan = steadyPlan()
+            if (plan?.burst != true) armSteadiestMoment()
             when {
                 plan == null -> camera.takePicture(deviceOrientation)
                 !plan.burst -> {
@@ -1290,6 +1296,162 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         Log.i(TAG, "steady burst: $STEADY_FRAMES x ISO ${plan.iso} ${Stops.shutterLabel(plan.exposureNs)} (auto wanted ${liveExposure?.let { Stops.shutterLabel(it) }})")
         showGroupStatus("Shaky hands · taking a few fast shots")
         camera.takeBurst(deviceOrientation, STEADY_FRAMES, toMemory = true, exposure = plan.iso to plan.exposureNs)
+    }
+
+    // ------------------------------------------------------------------ the subject (for merges)
+
+    private var lastTap: android.graphics.PointF? = null
+    private var lastTapAt = 0L
+
+    private fun rememberTap(nx: Float, ny: Float) {
+        lastTap = android.graphics.PointF(nx, ny)
+        lastTapAt = SystemClock.uptimeMillis()
+    }
+
+    /**
+     * What the photo is about, for aligning and picking frames: a point tapped in the last
+     * 10 s, else the biggest face, else null (= the centre / most detailed part).
+     * In 0..1 coordinates of the camera's sensor.
+     */
+    private fun subjectSensor(): android.graphics.RectF? {
+        val c = caps ?: return null
+        val view = lastTap?.takeIf { SystemClock.uptimeMillis() - lastTapAt < TAP_SUBJECT_MS }?.let {
+            android.graphics.RectF(it.x - 0.08f, it.y - 0.06f, it.x + 0.08f, it.y + 0.06f)
+        } ?: lastFaces.maxByOrNull { it.width() * it.height() }?.let { RectF(it) }
+        return view?.let { viewToSensor(it, c) }
+    }
+
+    /** Portrait view 0..1 → sensor 0..1 (as tap-to-focus maps points). */
+    private fun viewToSensor(r: RectF, c: CameraCaps): RectF {
+        fun map(px: Float, py: Float): Pair<Float, Float> {
+            var x = px.coerceIn(0f, 1f)
+            var y = py.coerceIn(0f, 1f)
+            if (c.isFront) x = 1f - x
+            repeat((c.sensorOrientation % 360) / 90) {
+                val t = x
+                x = y
+                y = 1f - t
+            }
+            return x to y
+        }
+        val (x1, y1) = map(r.left, r.top)
+        val (x2, y2) = map(r.right, r.bottom)
+        return RectF(minOf(x1, x2), minOf(y1, y2), maxOf(x1, x2), maxOf(y1, y2))
+    }
+
+    /** A 0..1 rectangle of the sensor picture → of the picture turned [degrees] clockwise. */
+    private fun rotateNorm(r: RectF, degrees: Int): RectF {
+        fun map(x: Float, y: Float): Pair<Float, Float> = when (((degrees % 360) + 360) % 360) {
+            90 -> (1f - y) to x
+            180 -> (1f - x) to (1f - y)
+            270 -> y to (1f - x)
+            else -> x to y
+        }
+        val (x1, y1) = map(r.left, r.top)
+        val (x2, y2) = map(r.right, r.bottom)
+        return RectF(minOf(x1, x2), minOf(y1, y2), maxOf(x1, x2), maxOf(y1, y2))
+    }
+
+    /**
+     * The subject in a JPEG's own pixel layout: sensor orientation if it's turned upright by its
+     * EXIF tag, upright if the camera already turned its pixels.
+     */
+    private fun subjectForJpeg(jpeg: ByteArray?, sensor: RectF?): RectF? {
+        if (sensor == null || jpeg == null) return sensor
+        val exif = SuperZoomProcessor.exifRotation(jpeg)
+        return if (exif == 0 && camera.lastCaptureOrientation != 0) rotateNorm(sensor, camera.lastCaptureOrientation) else sensor
+    }
+
+    // ------------------------------------------------------------------ steadiest moment
+
+    /** Keep full-size frames (where the phone can) in photo modes other than Freeze (which has its own buffer). */
+    private fun zslWanted() = prefs.steadyMoment && !videoMode && !(simple && prefs.intent == "FREEZE")
+
+    private var momentArmed = false
+    private var momentFrames: List<CameraController.MomentFrame>? = null
+    private var stillUri: Uri? = null
+    private var stillTiming: Pair<Long, Long>? = null
+
+    /** At the press: grab the steadiest kept frames from around now, in case the photo shakes. */
+    private fun armSteadiestMoment() {
+        momentArmed = false
+        momentFrames = null
+        stillUri = null
+        if (!photoIntent("AUTO") || !camera.steadiestMomentAvailable || extraCrop > 1.001f) return
+        momentArmed = true
+        camera.snapshotSteadiest(MOMENT_FRAMES, MOMENT_WINDOW_NS, MOMENT_AFTER_MS, ::frameBlurPx) { frames ->
+            momentFrames = frames
+            maybeRescue()
+        }
+    }
+
+    /** Blur (px of a 12 MP photo) from the phone's movement during an exposure, or null if unknown. */
+    private fun frameBlurPx(start: Long, exposureNs: Long): Float? {
+        val c = caps ?: return null
+        if (!camera.timestampsMatchSensors || !shake.available) return null
+        val angle = shake.angleDuring(start, exposureNs) ?: return null
+        return angle / ShakeMeter.radPerPx(c.focalLength ?: 0f, c.sensorWidthMm, cameraZoom()) / if (c.ois) 4f else 1f
+    }
+
+    /**
+     * Once both the photo and the kept frames are in: if the photo shook and the kept frames
+     * were much steadier, replace it with those frames merged (subject-locked); else keep it.
+     */
+    private fun maybeRescue() {
+        val uri = stillUri ?: return
+        val frames = momentFrames ?: return
+        stillUri = null
+        momentFrames = null
+        val (start, exposure) = stillTiming ?: (0L to 0L)
+        val stillBlur = if (start > 0) frameBlurPx(start, exposure) else null
+        val best = frames.firstOrNull()?.blurPx
+        val rescue = frames.size >= 2 && (prefs.forceMomentRescue ||
+            (stillBlur != null && best != null && stillBlur > RESCUE_ABOVE_PX && best < stillBlur * 0.5f))
+        Log.i(TAG, "steadiest moment: photo blur ${stillBlur?.let { "%.1f".format(Locale.US, it) }} px, " +
+            "kept frames ${frames.map { it.blurPx?.let { b -> "%.1f".format(Locale.US, b) } }} -> ${if (rescue) "merge kept frames" else "keep photo"}")
+        val look = Looks.resolve(prefs)
+        if (!rescue) {
+            if (!look.isNatural) applyLookToSaved(uri, look)
+            return
+        }
+        val roi = subjectSensor()
+        val rotation = camera.lastCaptureOrientation
+        val quality = prefs.jpegQuality
+        pendingEnhance++
+        thumbnail.alpha = 0.5f
+        thumbProgress.visibility = View.VISIBLE
+        enhancer.execute {
+            var ok = false
+            try {
+                val original = contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: throw IllegalStateException("can't read")
+                val name = contentResolver.query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)
+                    ?.use { if (it.moveToFirst()) it.getString(0) else null } ?: "photo.jpg"
+                val iterations = if (Runtime.getRuntime().availableProcessors() >= 8) Deconvolve.ITERATIONS else Deconvolve.ITERATIONS / 2
+                val merged = TileMerge.merge(frames.map { TileMerge.YuvSource(it.frame) }, roi, MOMENT_FRAMES, iterations)
+                var bmp = merged.bitmap
+                if (rotation != 0) {
+                    bmp = android.graphics.Bitmap.createBitmap(merged.bitmap, 0, 0, merged.bitmap.width, merged.bitmap.height,
+                        Matrix().apply { postRotate(rotation.toFloat()) }, true)
+                    merged.bitmap.recycle()
+                }
+                if (!look.isNatural) Looks.apply(bmp, look, seed = name.hashCode().toLong())
+                val out = java.io.ByteArrayOutputStream(original.size)
+                bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality.coerceIn(50, 100), out)
+                bmp.recycle()
+                if (OriginalStore.get(this, name) == null) OriginalStore.save(this, name, original)
+                contentResolver.openOutputStream(uri, "wt")?.use { it.write(out.toByteArray()) }
+                MediaSaver.copyExif(this, uri, original)
+                MediaSaver.setDescription(this, uri, "Steadiest moment: ${merged.used} steady frames merged" +
+                    if (!look.isNatural) " · Look: ${look.name}" else "")
+                ok = true
+            } catch (e: Throwable) {
+                Log.e(TAG, "steadiest moment failed (keeping the photo)", e)
+            }
+            runOnUiThread {
+                enhanceDone(uri, "image/jpeg", if (ok) "Steadied · used the steadiest moment around your press" else "")
+                if (!ok && !look.isNatural) applyLookToSaved(uri, look)
+            }
+        }
     }
 
     /** Frames to keep from a burst: drop those the phone moved during (gyroscope), at least [minKeep]. */
@@ -1472,6 +1634,15 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     override fun onPhotoSaved(uri: Uri, mimeType: String) {
         if (mimeType == "image/x-adobe-dng" && lastPhoto != null) return
         lastPhoto = uri
+        if (mimeType == "image/jpeg" && momentArmed) {
+            // The steadiest-moment check decides first (and applies the look itself).
+            momentArmed = false
+            stillUri = uri
+            stillTiming = camera.lastStillTiming
+            maybeRescue()
+            loadThumbnail(uri)
+            return
+        }
         val look = Looks.resolve(prefs)
         if (mimeType == "image/jpeg" && !look.isNatural) applyLookToSaved(uri, look)
         loadThumbnail(uri)
@@ -1868,7 +2039,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
 
     /** Reopens the camera when switching between photos and video (they use different setups). */
     private fun syncVideo() {
-        if (videoMode == openedForVideo || !resumed || !hasCameraPermission()) return
+        if ((videoMode == openedForVideo && zslWanted() == openedZsl) || !resumed || !hasCameraPermission()) return
         if (recording) camera.stopRecording()
         caps = null
         readout.text = ""
@@ -2081,12 +2252,13 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             if (groupStatus.text.startsWith("Enhancing")) groupStatus.visibility = View.GONE
         }
         if (uri != null) onPhotoSaved(uri, mime) else toast(getString(R.string.save_failed))
-        toast(message)
+        if (message.isNotEmpty()) toast(message)
     }
 
     /** Super zoom from full-resolution JPEGs (phones without the fast stream). */
     private fun processSuperZoom(frames: List<ByteArray>, mimeType: String) {
         val timingForZoom = camera.lastBurstTiming
+        val roiSensor = subjectSensor()
         val crop = extraCrop
         val quality = prefs.jpegQuality
         val enhance = zoomEnhancing
@@ -2099,7 +2271,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 val skip = if (frames.size > 3) 1 else 0
                 val burst = keepSteady(frames.drop(skip), timing.drop(skip), minKeep = 3)
                 when {
-                    enhance -> superZoom.enhance(burst, quality)
+                    enhance -> superZoom.enhance(burst, quality, roi = subjectForJpeg(burst.firstOrNull(), roiSensor))
                     aiFor(crop) -> superZoom.process(burst, crop, quality, ai = aiUpscaler())
                     else -> superZoom.process(burst, crop, quality)
                 }
@@ -2146,18 +2318,19 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         val quality = prefs.jpegQuality
         zoomEnhancing = false
         releaseShutterForBackground()
+        val roiSensor = subjectSensor()
         // Drop the RAW frames the phone moved during (by the gyroscope).
         val steady = keepSteadyIndices(capture.timing, minKeep = 3)
         val raw = if (steady.size < capture.frames.size) capture.only(steady) else capture
         enhancer.execute {
             var how = "RAW"
             val result = try {
-                rawZoom.process(raw, jpegs, capture.rotation, quality)
+                rawZoom.process(raw, jpegs, capture.rotation, quality, roi = roiSensor)
             } catch (e: Throwable) {
                 Log.e(TAG, "raw zoom failed, using the JPEG merge", e)
                 how = "JPEG"
                 try {
-                    superZoom.enhance(if (jpegs.size > 3) jpegs.drop(1) else jpegs, quality)
+                    superZoom.enhance(if (jpegs.size > 3) jpegs.drop(1) else jpegs, quality, roi = subjectForJpeg(jpegs.firstOrNull(), roiSensor))
                 } catch (e2: Throwable) {
                     Log.e(TAG, "zoom enhance failed", e2)
                     null
@@ -2555,9 +2728,10 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         )
         val iso = nightIso
         val quality = prefs.jpegQuality
+        val roiUpright = subjectSensor()?.let { rotateNorm(it, camera.lastCaptureOrientation) }
         Thread {
             val result = try {
-                night.process(frames, iso, quality, silky, hdrStops = hdr, lift = !indoor)
+                night.process(frames, iso, quality, silky, hdrStops = hdr, lift = !indoor, roi = roiUpright)
             } catch (e: Throwable) {
                 Log.e(TAG, "night merge failed", e)
                 null
@@ -3094,6 +3268,14 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         private const val REQUEST_CAMERA = 1
         private const val REQUEST_AUDIO = 3
         private const val CLEAN_FRAMES = 7
+        /** Steadiest moment: frames merged, how far back from the press they may be, wait after the press. */
+        private const val MOMENT_FRAMES = 3
+        private const val MOMENT_WINDOW_NS = 600_000_000L
+        private const val MOMENT_AFTER_MS = 150L
+        /** Replace the photo only if it shook more than this (px) and the kept frames were twice as steady. */
+        private const val RESCUE_ABOVE_PX = 2f
+        /** A tap marks the subject for this long. */
+        private const val TAP_SUBJECT_MS = 10_000L
         private const val STEADY_FRAMES = 4
         /** Test hook: pretend the hands only hold 1/500 s. */
         private const val FORCED_SHAKY_SAFE_NS = 2_000_000L

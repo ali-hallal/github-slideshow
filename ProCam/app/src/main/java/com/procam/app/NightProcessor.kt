@@ -20,6 +20,9 @@ import kotlin.math.roundToInt
  */
 class NightProcessor {
 
+    /** Subject of the current merge (0..1 of the upright photo), or null. */
+    private var subject: android.graphics.RectF? = null
+
     /** [before]: for HDR, what a normal photo would have looked like (for the review screen). */
     class Result(val jpeg: ByteArray, val merged: Int, val reference: Int, val before: ByteArray? = null)
 
@@ -29,7 +32,10 @@ class NightProcessor {
      * @param silky Silky (long-exposure look): keep motion instead of rejecting it, so moving water,
      *   clouds and lights blur into streaks while the aligned still parts stay sharp; no shadow lift.
      */
-    fun process(frames: List<ByteArray>, iso: Int, quality: Int, silky: Boolean = false, hdrStops: Float = 0f, lift: Boolean = true): Result {
+    /** [roi]: the subject (0..1 of the upright photo) to align on and judge sharpness by, or null. */
+    fun process(frames: List<ByteArray>, iso: Int, quality: Int, silky: Boolean = false, hdrStops: Float = 0f, lift: Boolean = true,
+                roi: android.graphics.RectF? = null): Result {
+        subject = roi
         require(frames.isNotEmpty())
         val perPixel = if (silky) BYTES_PER_PIXEL_SILKY else BYTES_PER_PIXEL
         val side = Budget.sideFor(frames[0], perPixel)
@@ -53,7 +59,8 @@ class NightProcessor {
             bmp.recycle()
             s
         }
-        val refIndex = smalls.indices.maxByOrNull { smalls[it].sharpness() } ?: 0
+        // Reference: the frame where the subject (or the whole picture) is sharpest.
+        val refIndex = smalls.indices.maxByOrNull { smalls[it].sharpness(subject) } ?: 0
         val refBmp = PortraitProcessor.decode(frames[refIndex], side)
         val w = refBmp.width
         val h = refBmp.height
@@ -89,7 +96,7 @@ class NightProcessor {
                 val fp = framePx!!
                 bmp.getPixels(fp, 0, w, 0, 0, w, h)
                 bmp.recycle()
-                val (dx, dy) = refine(refPx, fp, w, h, coarse.first, coarse.second)
+                val (dx, dy) = refine(refPx, fp, w, h, coarse.first, coarse.second, roi = subject)
                 val t = if (silky) 255 else motionThreshold(refPx, fp, w, h, dx, dy)
                 Log.i(TAG, "frame $i offset ($dx, $dy), motion threshold $t")
                 accumulate(refPx, fp, w, h, dx, dy, t, sumR!!, sumG!!, sumB!!, sumW, isReference = false, sumL = sumL, sumSq = sumSq)
@@ -136,13 +143,20 @@ class NightProcessor {
 
     /** A small greyscale image used for alignment. */
     class Gray(val w: Int, val h: Int, val v: IntArray) {
-        fun sharpness(): Double {
+        /** Mean edge strength, within [roi] (0..1) if given. */
+        fun sharpness(roi: android.graphics.RectF? = null): Double {
             var sum = 0L
-            for (y in 1 until h - 1) for (x in 1 until w - 1) {
+            val x0 = max(1, ((roi?.left ?: 0f) * w).toInt())
+            val x1 = min(w - 1, ((roi?.right ?: 1f) * w).toInt())
+            val y0 = max(1, ((roi?.top ?: 0f) * h).toInt())
+            val y1 = min(h - 1, ((roi?.bottom ?: 1f) * h).toInt())
+            var n = 0
+            for (y in y0 until y1) for (x in x0 until x1) {
                 val i = y * w + x
                 sum += abs(4 * v[i] - v[i - 1] - v[i + 1] - v[i - w] - v[i + w])
+                n++
             }
-            return sum.toDouble() / (w * h)
+            return if (n == 0) 0.0 else sum.toDouble() / n
         }
 
         fun half(): Gray {
@@ -420,30 +434,43 @@ class NightProcessor {
          * Final alignment at full resolution: tries shifts within ±[range] px of the coarse
          * result on a sparse grid of pixels.
          */
-        fun refine(refPx: IntArray, framePx: IntArray, w: Int, h: Int, cx: Int, cy: Int, range: Int = 3): Pair<Int, Int> {
+        fun refine(
+            refPx: IntArray, framePx: IntArray, w: Int, h: Int, cx: Int, cy: Int, range: Int = 3,
+            /** Subject (0..1) to line up exactly; else the middle 60 %. */
+            roi: android.graphics.RectF? = null,
+        ): Pair<Int, Int> {
             var best = Long.MAX_VALUE
             var bx = cx
             var by = cy
-            val x0 = w / 5
-            val y0 = h / 5
+            // At least ~1/8 of the picture, so a small subject still has enough to match.
+            val r = roi?.let {
+                val cw = max(it.width(), 0.125f)
+                val ch = max(it.height(), 0.125f)
+                android.graphics.RectF(it.centerX() - cw / 2, it.centerY() - ch / 2, it.centerX() + cw / 2, it.centerY() + ch / 2)
+            }
+            val x0 = r?.let { (it.left * w).toInt().coerceIn(0, w - 2) } ?: (w / 5)
+            val y0 = r?.let { (it.top * h).toInt().coerceIn(0, h - 2) } ?: (h / 5)
+            val x1 = r?.let { (it.right * w).toInt().coerceIn(x0 + 1, w) } ?: (w - w / 5)
+            val y1 = r?.let { (it.bottom * h).toInt().coerceIn(y0 + 1, h) } ?: (h - h / 5)
+            val stepPx = if (r != null) 2 else 3
             for (dy in cy - range..cy + range) for (dx in cx - range..cx + range) {
                 var sad = 0L
                 var count = 0
                 var y = y0
-                while (y < h - y0) {
+                while (y < y1) {
                     val fy = y + dy
                     if (fy in 0 until h) {
                         var x = x0
-                        while (x < w - x0) {
+                        while (x < x1) {
                             val fx = x + dx
                             if (fx in 0 until w) {
                                 sad += abs(luma(refPx[y * w + x]) - luma(framePx[fy * w + fx]))
                                 count++
                             }
-                            x += 3
+                            x += stepPx
                         }
                     }
-                    y += 3
+                    y += stepPx
                 }
                 if (count == 0) continue
                 val score = sad * 1024 / count

@@ -1714,6 +1714,51 @@ class ProCamTest {
         assertEquals("Steady", ReviewActivity.describe("PROCAM_1_STEADY.jpg").first)
     }
 
+    @Test
+    fun mergeLocksOntoTheSubject() {
+        // The subject sways differently from the background: with the subject given, frames line up on it.
+        val w = 800
+        val h = 600
+        val rnd = java.util.Random(5)
+        val bgTex = FloatArray(w * h) { rnd.nextFloat() }.also { PortraitProcessor.boxBlur(it, w, h, 2) }
+        val subTex = FloatArray(w * h) { rnd.nextFloat() }.also { PortraitProcessor.boxBlur(it, w, h, 1) }
+        val bgShift = listOf(0 to 0, 2 to -1, -1 to 2, 3 to 1)
+        val subShift = listOf(0 to 0, -9 to 6, 8 to -7, -5 to -10)
+        val frames = (0 until 4).map { k ->
+            SuperRes.Frame(IntArray(w * h) { i ->
+                val x = i % w
+                val y = i / w
+                val sx = x + subShift[k].first
+                val sy = y + subShift[k].second
+                val v = if (sx in 300 until 500 && sy in 200 until 400) 30 + 200 * subTex[sy * w + sx]
+                else 40 + 170 * bgTex[(y + bgShift[k].second).coerceIn(0, h - 1) * w + (x + bgShift[k].first).coerceIn(0, w - 1)]
+                val c = v.toInt().coerceIn(0, 255)
+                (0xFF shl 24) or (c shl 16) or (c shl 8) or c
+            }, w, h)
+        }
+        val locked = SuperRes.offsets(frames, 2, SuperRes.Window(320, 220, 160, 160))
+        for (k in 1 until 4) {
+            assertEquals("subject x, frame $k", -subShift[k].first.toFloat(), locked[k].dx, 0.5f)
+            assertEquals("subject y, frame $k", -subShift[k].second.toFloat(), locked[k].dy, 0.5f)
+        }
+        val free = SuperRes.offsets(frames, 2, null)
+        assertTrue("without a subject, the background wins", abs(free[3].dx + 3f) < 1.5f)
+    }
+
+    @Test
+    fun steadiestMomentReplacesAShakyPhoto() {
+        context.getSharedPreferences("procam", android.content.Context.MODE_PRIVATE).edit().putBoolean("forceMomentRescue", true).commit()
+        waitForCamera()
+        setSimple(true)
+        SystemClock.sleep(1500)
+        assumeTrue("this camera can't stream full-size frames at video rate", CameraController.zslLastOpen)
+        val before = count("image/jpeg")
+        onView(withId(R.id.shutter)).perform(click())
+        waitFor("photo saved", 30_000) { count("image/jpeg") > before }
+        waitFor("steadied", 120_000) { latestImage()?.let { description(it) }?.startsWith("Steadiest moment") == true }
+        assertEquals("still one photo", before + 1, count("image/jpeg"))
+    }
+
     // ------------------------------------------------------------------ helpers
 
     /** Switches between Simple and Pro with the top-bar button. */

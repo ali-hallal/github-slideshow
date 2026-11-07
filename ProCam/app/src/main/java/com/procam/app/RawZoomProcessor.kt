@@ -19,7 +19,8 @@ import kotlin.math.roundToInt
  */
 class RawZoomProcessor {
 
-    fun process(capture: RawBurstCapture, jpegs: List<ByteArray>, rotation: Int, quality: Int): SuperZoomProcessor.Result {
+    /** [roi]: the subject (0..1 of the zoomed view, sensor orientation) to align on, or null. */
+    fun process(capture: RawBurstCapture, jpegs: List<ByteArray>, rotation: Int, quality: Int, roi: android.graphics.RectF? = null): SuperZoomProcessor.Result {
         val t0 = android.os.SystemClock.uptimeMillis()
         val result = capture.result
         val wbVec = result.get(CaptureResult.COLOR_CORRECTION_GAINS)
@@ -35,8 +36,14 @@ class RawZoomProcessor {
 
         // 1. Sharpest frames and their sub-pixel offsets, from green-only previews.
         val previews = capture.frames.map { RawMerge.greenPreview(prelim, it) }
-        val order = SuperRes.sharpest(previews, KEEP)
-        val found = SuperRes.offsets(order.map { previews[it] }, 1)
+        val window = roi?.let { r ->
+            val pw = previews[0].w
+            val ph = previews[0].h
+            SuperRes.clampWindow(SuperRes.Window((r.left * pw).roundToInt(), (r.top * ph).roundToInt(),
+                (r.width() * pw).roundToInt(), (r.height() * ph).roundToInt()), pw, ph)
+        }
+        val order = SuperRes.sharpest(previews, KEEP, window)
+        val found = SuperRes.offsets(order.map { previews[it] }, 1, window)
         val typical = found.drop(1).map { it.cost }.sorted().let { if (it.isEmpty()) 0.0 else it[it.size / 2] }
         val good = found.indices.filter { k -> k == 0 || found[k].cost <= max(typical * 3, 4.0) }
         val frames = good.map { capture.frames[order[it]] }

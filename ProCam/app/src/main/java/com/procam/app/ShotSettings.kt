@@ -66,6 +66,8 @@ data class OutputPrefs(
     val stabilize: Boolean = true,
     /** Video kind: [VIDEO_NORMAL], [VIDEO_TIMELAPSE] or [VIDEO_SLOWMO]. */
     val videoKind: Int = VIDEO_NORMAL,
+    /** Keep the last few full-size frames (steadiest moment around the press), where the phone can. */
+    val zsl: Boolean = false,
 ) {
     companion object {
         const val VIDEO_NORMAL = 0

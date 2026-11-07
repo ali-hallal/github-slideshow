@@ -59,6 +59,14 @@ class Prefs(context: Context) {
     /** Test hook: treat every Auto scene as dim (used by automated tests only). */
     val forceLowLight: Boolean get() = sp.getBoolean("forceLowLight", false)
 
+    /** Keep the last few full-size frames so a shaky photo can be replaced by the steadiest moment. */
+    var steadyMoment: Boolean
+        get() = sp.getBoolean("steadyMoment", true)
+        set(v) = sp.edit().putBoolean("steadyMoment", v).apply()
+
+    /** Test hook: always replace the photo with the kept frames merged (automated tests only). */
+    val forceMomentRescue: Boolean get() = sp.getBoolean("forceMomentRescue", false)
+
     /** Auto never uses a slower shutter than the hands can hold (faster shutter, higher ISO, merged). */
     var steadyShutter: Boolean
         get() = sp.getBoolean("steadyShutter", true)

@@ -45,28 +45,12 @@ class MomentBuffer(private val capacity: Int = 10) {
     /** Copies [image] into the ring (reusing the slot's arrays when the size matches). */
     fun add(image: Image) {
         val f = slots[next]
-        val planes = image.planes
-        f.width = image.width
-        f.height = image.height
-        f.y = copyPlane(planes[0].buffer, f.y)
-        f.u = copyPlane(planes[1].buffer, f.u)
-        f.v = copyPlane(planes[2].buffer, f.v)
-        f.yRow = planes[0].rowStride
-        f.yPix = planes[0].pixelStride
-        f.uvRow = planes[1].rowStride
-        f.uvPix = planes[1].pixelStride
+        copyInto(image, f)
         f.sequence = ++sequence
         next = (next + 1) % capacity
         if (count < capacity) count++
     }
 
-    private fun copyPlane(buf: java.nio.ByteBuffer, reuse: ByteArray): ByteArray {
-        buf.rewind()
-        val n = buf.remaining()
-        val out = if (reuse.size == n) reuse else ByteArray(n)
-        buf.get(out)
-        return out
-    }
 
     /** The newest frame's sequence number (0 if empty). */
     val latestSequence get() = if (count == 0) 0L else slots[(next - 1 + capacity) % capacity].sequence
@@ -91,6 +75,28 @@ class MomentBuffer(private val capacity: Int = 10) {
     }
 
     companion object {
+        /** Copies [image]'s planes into [f] (reusing its arrays when the size matches). */
+        fun copyInto(image: Image, f: Frame) {
+            val planes = image.planes
+            f.width = image.width
+            f.height = image.height
+            f.y = copyPlane(planes[0].buffer, f.y)
+            f.u = copyPlane(planes[1].buffer, f.u)
+            f.v = copyPlane(planes[2].buffer, f.v)
+            f.yRow = planes[0].rowStride
+            f.yPix = planes[0].pixelStride
+            f.uvRow = planes[1].rowStride
+            f.uvPix = planes[1].pixelStride
+        }
+
+        private fun copyPlane(buf: java.nio.ByteBuffer, reuse: ByteArray): ByteArray {
+            buf.rewind()
+            val n = buf.remaining()
+            val out = if (reuse.size == n) reuse else ByteArray(n)
+            buf.get(out)
+            return out
+        }
+
         /** Mean absolute Laplacian of the luma in the central area, sampled sparsely. */
         fun sharpness(f: Frame): Double {
             var sum = 0L

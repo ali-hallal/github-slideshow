@@ -22,18 +22,25 @@ object SuperRes {
 
     class Frame(val px: IntArray, val w: Int, val h: Int)
 
-    /** Lucky imaging: indices of the [keep] sharpest frames, sharpest first. */
-    fun sharpest(frames: List<Frame>, keep: Int): List<Int> =
-        frames.indices.sortedByDescending { sharpness(frames[it]) }.take(keep)
+    /**
+     * Lucky imaging: indices of the [keep] sharpest frames, sharpest first. With [roi], sharpness
+     * is judged on the subject only (a sharp face matters more than a sharp background).
+     */
+    fun sharpest(frames: List<Frame>, keep: Int, roi: Window? = null): List<Int> =
+        frames.indices.sortedByDescending { sharpness(frames[it], roi) }.take(keep)
 
-    /** Mean absolute Laplacian of luma on a sparse grid: higher = sharper. */
-    fun sharpness(f: Frame): Double {
+    /** Mean absolute Laplacian of luma on a sparse grid (within [roi] if given): higher = sharper. */
+    fun sharpness(f: Frame, roi: Window? = null): Double {
         var sum = 0L
         var n = 0
-        var y = 1
-        while (y < f.h - 1) {
-            var x = 1
-            while (x < f.w - 1) {
+        val x0 = max(1, roi?.x ?: 1)
+        val y0 = max(1, roi?.y ?: 1)
+        val x1 = min(f.w - 1, roi?.let { it.x + it.w } ?: (f.w - 1))
+        val y1 = min(f.h - 1, roi?.let { it.y + it.h } ?: (f.h - 1))
+        var y = y0
+        while (y < y1) {
+            var x = x0
+            while (x < x1) {
                 val i = y * f.w + x
                 sum += abs(4 * l(f.px[i]) - l(f.px[i - 1]) - l(f.px[i + 1]) - l(f.px[i - f.w]) - l(f.px[i + f.w]))
                 n++
@@ -76,12 +83,35 @@ object SuperRes {
         val frame: Frame, val gray: NightProcessor.Gray, val luma: FloatArray, val window: Window,
         /** Mean edge strength in the window (luma levels). */
         val texture: Double,
+        /** True when [window] is the subject: the coarse search then looks only around it too. */
+        val subject: Boolean = false,
     )
 
-    fun prepare(f: Frame, grayScale: Int): Prepared {
+    /**
+     * [roi]: the subject (face, tapped point). Alignment is then measured on it, so the subject is
+     * what lines up exactly — unless it's featureless, then the most detailed patch is used.
+     */
+    fun prepare(f: Frame, grayScale: Int, roi: Window? = null): Prepared {
         val luma = lumaOf(f).also { PortraitProcessor.boxBlur(it, f.w, f.h, 1) }
+        val subject = roi?.let { clampWindow(it, f.w, f.h) }
+        if (subject != null) {
+            val tex = textureIn(luma, f.w, subject)
+            if (tex >= MIN_TEXTURE) return Prepared(f, gray(f, grayScale), luma, subject, tex, subject = true)
+        }
         val win = detailedWindow(luma, f.w, f.h)
         return Prepared(f, gray(f, grayScale), luma, win, textureIn(luma, f.w, win))
+    }
+
+    /** [r] limited to the picture (with a margin for shifts) and to at most 1.5 × WINDOW square. */
+    fun clampWindow(r: Window, w: Int, h: Int): Window? {
+        val margin = 8
+        val size = min(WINDOW * 3 / 2, min(w, h) - 2 * margin)
+        if (size < 16) return null
+        val cw = min(max(r.w, 32), size)
+        val ch = min(max(r.h, 32), size)
+        val cx = (r.x + r.w / 2).coerceIn(margin + cw / 2, w - margin - cw / 2)
+        val cy = (r.y + r.h / 2).coerceIn(margin + ch / 2, h - margin - ch / 2)
+        return Window(cx - cw / 2, cy - ch / 2, cw, ch)
     }
 
     private fun textureIn(luma: FloatArray, w: Int, win: Window): Double {
@@ -131,7 +161,18 @@ object SuperRes {
     fun offset(ref: Prepared, frame: Frame, grayScale: Int): Offset {
         // A featureless patch (sky, wall) can't be aligned: every shift matches. Don't wander.
         if (ref.texture < MIN_TEXTURE) return Offset(0f, 0f, 0.0)
-        val coarse = NightProcessor.align(ref.gray, gray(frame, grayScale))
+        val frameGray = gray(frame, grayScale)
+        // Subject-locked: search only around the subject, so a subject that moved differently
+        // from the background (a swaying person, a passing car) is what gets matched.
+        val coarse = if (ref.subject) {
+            val w = ref.window
+            val m = max(32 / grayScale, max(w.w, w.h) / 4 / grayScale)
+            val x0 = (w.x / grayScale - m).coerceAtLeast(0)
+            val y0 = (w.y / grayScale - m).coerceAtLeast(0)
+            val x1 = ((w.x + w.w) / grayScale + m).coerceAtMost(ref.gray.w)
+            val y1 = ((w.y + w.h) / grayScale + m).coerceAtMost(ref.gray.h)
+            NightProcessor.align(crop(ref.gray, x0, y0, x1, y1), crop(frameGray, x0, y0, min(x1, frameGray.w), min(y1, frameGray.h)))
+        } else NightProcessor.align(ref.gray, frameGray)
         // align() reports shifts in units of ALIGN_SCALE pixels of the grey copy's source.
         var bx = (coarse.first.toFloat() / NightProcessor.ALIGN_SCALE * grayScale).roundToInt().toFloat()
         var by = (coarse.second.toFloat() / NightProcessor.ALIGN_SCALE * grayScale).roundToInt().toFloat()
@@ -188,9 +229,19 @@ object SuperRes {
         return Offset(bx, by, best)
     }
 
+    private fun crop(g: NightProcessor.Gray, x0: Int, y0: Int, x1: Int, y1: Int): NightProcessor.Gray {
+        val w = max(1, x1 - x0)
+        val h = max(1, y1 - y0)
+        val v = IntArray(w * h)
+        for (y in 0 until h) for (x in 0 until w) {
+            v[y * w + x] = g.v[(y0 + y).coerceIn(0, g.h - 1) * g.w + (x0 + x).coerceIn(0, g.w - 1)]
+        }
+        return NightProcessor.Gray(w, h, v)
+    }
+
     /** Offsets of all [frames] relative to frames[0], computed in parallel on all CPU cores. */
-    fun offsets(frames: List<Frame>, grayScale: Int): List<Offset> {
-        val ref = prepare(frames[0], grayScale)
+    fun offsets(frames: List<Frame>, grayScale: Int, roi: Window? = null): List<Offset> {
+        val ref = prepare(frames[0], grayScale, roi)
         val pool = java.util.concurrent.Executors.newFixedThreadPool(threads())
         try {
             val jobs = frames.indices.map { k ->

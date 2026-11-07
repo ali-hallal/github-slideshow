@@ -154,6 +154,9 @@ class CameraController(context: Context, private val listener: Listener) {
     private var precaptureFrames = 0
     private var usedPrecapture = false
     private var captureOrientation = 0
+
+    /** JPEG orientation (clockwise degrees from sensor to upright) of the last capture. */
+    val lastCaptureOrientation get() = captureOrientation
     private var lastStatsAt = 0L
     private val rawImages = LinkedHashMap<Long, Image>()
     private val rawResults = LinkedHashMap<Long, TotalCaptureResult>()
@@ -226,6 +229,49 @@ class CameraController(context: Context, private val listener: Listener) {
             momentPressSeq = moments.latestSequence
             momentAfter = MOMENT_AFTER
         }
+    }
+
+    // ------------------------------------------------------------------ steadiest moment (ZSL)
+
+    private val zslRing = ArrayDeque<Image>()
+    @Volatile private var zslCapable = false
+
+    /** The last few full-size frames are being kept (steadiest-moment capture is possible). */
+    val steadiestMomentAvailable get() = zslCapable && yuvInSession
+
+    /** Timing (start, exposure ns) of the last single photo, for judging its shake. */
+    @Volatile var lastStillTiming: Pair<Long, Long>? = null
+        private set
+
+    /** One kept frame, copied out, with its timing and measured shake. */
+    class MomentFrame(val frame: MomentBuffer.Frame, val timestamp: Long, val exposureNs: Long, val blurPx: Float?)
+
+    /**
+     * After [delayMs] (to include frames just after the press), copies the [count] steadiest kept
+     * frames from the last [windowNs] (by [blurOf](start, exposure) → pixels of blur), steadiest
+     * first, to [done] on the main thread. Empty if none.
+     */
+    fun snapshotSteadiest(count: Int, windowNs: Long, delayMs: Long, blurOf: (Long, Long) -> Float?, done: (List<MomentFrame>) -> Unit) {
+        val h = handler ?: return main.post { done(emptyList()) }.let { }
+        h.postDelayed({
+            val newest = zslRing.lastOrNull()?.timestamp ?: 0L
+            val candidates = zslRing.filter { newest - it.timestamp <= windowNs }.map { img ->
+                val e = frameExposure[img.timestamp] ?: 33_000_000L
+                Triple(img, e, blurOf(img.timestamp, e))
+            }.sortedBy { it.third ?: Float.MAX_VALUE }.take(count)
+            val out = candidates.mapNotNull { (img, e, blur) ->
+                try {
+                    val f = MomentBuffer.Frame()
+                    MomentBuffer.copyInto(img, f)
+                    MomentFrame(f, img.timestamp, e, blur)
+                } catch (ex: Exception) {
+                    Log.w(TAG, "moment copy", ex)
+                    null
+                }
+            }
+            Log.i(TAG, "steadiest moment: ${zslRing.size} kept, picked ${out.map { "%.1f".format(it.blurPx ?: -1f) }} px blur")
+            main.post { done(out) }
+        }, delayMs)
     }
 
     /** True when fast (video-size) bursts are available in the current session. */
@@ -524,15 +570,23 @@ class CameraController(context: Context, private val listener: Listener) {
                     }
             }
 
-            map.getOutputSizes(ImageFormat.YUV_420_888)
-                ?.filter { it.width <= FAST_MAX_W && it.height <= FAST_MAX_H }
+            val yuvSizes = map.getOutputSizes(ImageFormat.YUV_420_888)
                 ?.filter { abs(it.width.toFloat() / it.height - jpegSize.width.toFloat() / jpegSize.height) < 0.02f }
-                ?.maxByOrNull { it.width.toLong() * it.height }
+                .orEmpty()
+            // Steadiest moment: full-size frames at video rate, if the phone can stream them.
+            val zslSize = if (output.zsl) yuvSizes
+                .filter { it.width.toLong() * it.height >= jpegSize.width.toLong() * jpegSize.height * 6 / 10 }
+                .filter { (try { map.getOutputMinFrameDuration(ImageFormat.YUV_420_888, it) } catch (e: Exception) { Long.MAX_VALUE }) <= ZSL_MAX_FRAME_NS }
+                .maxByOrNull { it.width.toLong() * it.height } else null
+            zslCapable = zslSize != null
+            zslLastOpen = zslCapable
+            (zslSize ?: yuvSizes.filter { it.width <= FAST_MAX_W && it.height <= FAST_MAX_H }.maxByOrNull { it.width.toLong() * it.height })
                 ?.let { size ->
-                    yuvReader = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 4).apply {
+                    yuvReader = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, if (zslSize != null) ZSL_RING + 3 else 4).apply {
                         setOnImageAvailableListener({ onYuvAvailable(it) }, handler)
                     }
                 }
+            Log.i(TAG, "steadiest moment: ${if (zslSize != null) "full-size frames $zslSize" else if (output.zsl) "not possible (no full-size stream at video rate)" else "off"}")
 
             previewAspect = previewSize.width.toFloat() / previewSize.height
         main.post { listener.onCameraOpened(cp, previewSize) }
@@ -747,6 +801,9 @@ class CameraController(context: Context, private val listener: Listener) {
         synchronized(yuvFrames) { yuvFrames.clear() }
         moments.clear()
         momentAfter = 0
+        zslRing.forEach { it.close() }
+        zslRing.clear()
+        zslCapable = false
         rawImages.values.forEach { it.close() }
         rawImages.clear()
         rawResults.clear()
@@ -876,7 +933,7 @@ class CameraController(context: Context, private val listener: Listener) {
             }
             val b = previewBuilder() ?: return
             val yuv = yuvReader
-            if (momentEnabled && yuvInSession && yuv != null) b.addTarget(yuv.surface)
+            if ((momentEnabled || zslCapable) && yuvInSession && yuv != null) b.addTarget(yuv.surface)
             s.setRepeatingRequest(b.build(), previewCallback, handler)
         } catch (e: Exception) {
             Log.w(TAG, "updateRepeating", e)
@@ -1030,6 +1087,14 @@ class CameraController(context: Context, private val listener: Listener) {
 
     private val previewCallback = object : CameraCaptureSession.CaptureCallback() {
         override fun onCaptureCompleted(s: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+            if (zslCapable) {
+                val ts = result.get(CaptureResult.SENSOR_TIMESTAMP)
+                val e = result.get(CaptureResult.SENSOR_EXPOSURE_TIME)
+                if (ts != null && e != null) {
+                    frameExposure[ts] = e
+                    while (frameExposure.size > 32) frameExposure.remove(frameExposure.keys.first())
+                }
+            }
             when (state) {
                 State.WAIT_PRECAPTURE -> {
                     val ae = result.get(CaptureResult.CONTROL_AE_STATE)
@@ -1430,6 +1495,7 @@ class CameraController(context: Context, private val listener: Listener) {
             image.close()
         }
         val heic = reader.imageFormat == ImageFormat.HEIC
+        if (burstExpected <= 0) lastStillTiming = ts to (frameExposure[ts] ?: burstExposure?.second ?: 0L)
         if (burstExpected > 0) {
             burstMime = if (heic) "image/heic" else "image/jpeg"
             burstFrames += bytes
@@ -1458,6 +1524,12 @@ class CameraController(context: Context, private val listener: Listener) {
         } catch (e: Exception) {
             null
         } ?: return
+        if (yuvExpected <= 0 && zslCapable && !momentEnabled) {
+            // Steadiest moment: hold the last few frames (no copy); the oldest goes back to the camera.
+            zslRing.addLast(image)
+            while (zslRing.size > ZSL_RING) zslRing.removeFirst().close()
+            return
+        }
         try {
             if (yuvExpected <= 0) {
                 if (momentEnabled) onMomentFrame(image)
@@ -1605,6 +1677,8 @@ class CameraController(context: Context, private val listener: Listener) {
     }
 
     companion object {
+        /** Whether the last camera opened could keep full-size frames (tests, diagnostics). */
+        @Volatile var zslLastOpen = false
         private const val TAG = "ProCam"
         private const val RAW_TAG = "raw"
         private const val RAW_BURST_TAG = "rawburst"
@@ -1620,6 +1694,9 @@ class CameraController(context: Context, private val listener: Listener) {
         private const val FAST_MAX_W = 1920
         private const val FAST_MAX_H = 1440
         private const val VIDEO_FPS = 30
+        /** Steadiest moment: frames kept (~0.2 s at 30 fps), and the slowest frame rate accepted. */
+        private const val ZSL_RING = 6
+        private const val ZSL_MAX_FRAME_NS = 41_700_000L
         /** Face boxes drawn this much larger on each side than the camera reports. */
         private const val FACE_PAD = 0.25f
         /** Time for the lens to move between focus-bracketed frames. */
