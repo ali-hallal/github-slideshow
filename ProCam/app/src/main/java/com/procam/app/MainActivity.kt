@@ -1381,6 +1381,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         momentFrames = null
         stillUri = null
         plainStill = photoIntent("AUTO") && extraCrop <= 1.001f
+        MotionDeblur.note = "armed plain=$plainStill zsl=${camera.steadiestMomentAvailable}"
         pressRotation = deviceOrientation
         if (!photoIntent("AUTO") || !camera.steadiestMomentAvailable || extraCrop > 1.001f) return
         momentArmed = true
@@ -1414,6 +1415,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             (stillBlur != null && best != null && stillBlur > RESCUE_ABOVE_PX && best < stillBlur * 0.5f))
         Log.i(TAG, "steadiest moment: photo blur ${stillBlur?.let { "%.1f".format(Locale.US, it) }} px, " +
             "kept frames ${frames.map { it.blurPx?.let { b -> "%.1f".format(Locale.US, b) } }} -> ${if (rescue) "merge kept frames" else "keep photo"}")
+        MotionDeblur.note += " | moment rescue=$rescue"
         val look = Looks.resolve(prefs)
         if (!rescue) {
             deblurOrLook(uri, stillTiming, look)
@@ -1551,6 +1553,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         }
         val len = path4000?.let { MotionDeblur.length(it) } ?: 0f
         Log.i(TAG, "shake blur: ${"%.1f".format(Locale.US, len)} px (4000 px wide)${if (c?.ois == true) " after OIS" else ""}")
+        MotionDeblur.note += " | shake ${"%.1f".format(Locale.US, len)} px forced=$forced timing=$timing turn=${turn != null}"
+
         if (path4000 == null || len < DEBLUR_ABOVE_PX || len > MotionDeblur.MAX_BLUR_PX) {
             if (!look.isNatural) applyLookToSaved(uri, look)
             return
@@ -1593,10 +1597,15 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                         if (!look.isNatural) " · Look: ${look.name}" else "")
                     done = true
                     Log.i(TAG, "deblurred ${bmp.width}x${bmp.height} (variant ${choice.variant}) in ${SystemClock.uptimeMillis() - t0} ms")
-                } else Log.i(TAG, "deblur: no kernel fits, photo kept")
+                    MotionDeblur.note += " | deblurred"
+                } else {
+                    Log.i(TAG, "deblur: no kernel fits, photo kept")
+                    MotionDeblur.note += " | no kernel fits"
+                }
                 bmp.recycle()
             } catch (e: Throwable) {
                 Log.e(TAG, "deblur failed (keeping the photo)", e)
+                MotionDeblur.note += " | failed: $e"
             }
             runOnUiThread {
                 enhanceDone(uri, "image/jpeg", if (done) "Shake blur undone" else "")
@@ -1796,6 +1805,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             return
         }
         val look = Looks.resolve(prefs)
+        MotionDeblur.note += " | saved $mimeType plain=$plainStill"
         if (mimeType == "image/jpeg" && plainStill) {
             plainStill = false
             deblurOrLook(uri, camera.lastStillTiming, look)

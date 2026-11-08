@@ -411,6 +411,8 @@ object MotionDeblur {
     private fun lumaOf(p: Int) = 0.299f * ((p shr 16) and 0xFF) + 0.587f * ((p shr 8) and 0xFF) + 0.114f * (p and 0xFF)
 
     private const val TAG = "ProCam"
+    /** The last decisions made for a photo (diagnostics, tests). */
+    @Volatile var note = ""
     /** Where diagnostics go (replaceable off the phone). */
     var log: (String) -> Unit = { android.util.Log.i(TAG, it) }
     const val ITERATIONS = 10

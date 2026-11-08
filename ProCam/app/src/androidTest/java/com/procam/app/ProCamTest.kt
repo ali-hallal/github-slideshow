@@ -1828,7 +1828,7 @@ class ProCamTest {
         try {
             waitFor("deblurred", 180_000) { latestImage()?.let { description(it) }?.startsWith("Shake undone") == true }
         } catch (e: AssertionError) {
-            throw AssertionError("${e.message}; description=${latestImage()?.let { description(it) }}; log:\n" + appLog("shake blur|deblur|steadiest|plan"), e)
+            throw AssertionError("${e.message}; description=${latestImage()?.let { description(it) }}; app: ${MotionDeblur.note}", e)
         }
         assertEquals("still one photo", before + 1, count("image/jpeg"))
     }
