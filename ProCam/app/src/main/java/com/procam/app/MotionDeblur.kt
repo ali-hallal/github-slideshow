@@ -316,6 +316,7 @@ object MotionDeblur {
         val gain = before / scores[best]
         log("deblur: before %.4f, candidates %s -> %d (gain %.3f)".format(
             before, scores.joinToString { "%.4f".format(it) }, best, gain))
+        note += " | crispness gain %.3f".format(gain)
         return if (gain >= MIN_GAIN) Choice(candidates[best], best, gain) else null
     }
 
@@ -424,9 +425,10 @@ object MotionDeblur {
     private const val PRIOR_MARGIN = 0.005
     /**
      * Deblurring a photo that wasn't blurred that way makes it far less crisp (ratio ~0.7); a
-     * right kernel keeps it about as crisp while sharpening (~1.0). Below this, leave it alone.
+     * right kernel keeps it about as crisp while sharpening (~1.0; a little less on smooth,
+     * low-detail pictures). Below the midpoint, leave it alone.
      */
-    const val MIN_GAIN = 0.95
+    const val MIN_GAIN = 0.87
     /** Longer blur than this (px) can't be undone well; such photos are left alone. */
     const val MAX_BLUR_PX = 40f
     /** The lens shift must follow the gyroscope this well (R²) to be trusted. */
