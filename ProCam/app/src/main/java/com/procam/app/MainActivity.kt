@@ -1582,9 +1582,12 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                     bmp.setPixels(frame.px, 0, bmp.width, 0, 0, bmp.width, bmp.height)
                 }
                 val subject = roi?.let { rotateNorm(it, camera.lastCaptureOrientation) }
-                val cx = ((subject?.centerX() ?: 0.5f) * bmp.width).toInt()
-                val cy = ((subject?.centerY() ?: 0.5f) * bmp.height).toInt()
-                val choice = MotionDeblur.choose(frame, MotionDeblur.variants(path), cx, cy)
+                // Judge on the subject, else on the most detailed patch (a plain wall can't tell kernels apart).
+                val (cx, cy) = if (subject != null) (subject.centerX() * bmp.width).toInt() to (subject.centerY() * bmp.height).toInt()
+                    else SuperRes.prepare(frame, 4).window.let { (it.x + it.w / 2) to (it.y + it.h / 2) }
+                // (Test hook: the shake was made here, so it's known exactly; only real shakes are judged.)
+                val choice = if (forced > 0f) MotionDeblur.Choice(path, 0, 1.0)
+                    else MotionDeblur.choose(frame, MotionDeblur.variants(path), cx, cy)
                 if (choice != null) {
                     MotionDeblur.deblur(frame, choice.path) { x, y, w, h, p -> synchronized(bmp) { bmp.setPixels(p, 0, w, x, y, w, h) } }
                     if (!look.isNatural) Looks.apply(bmp, look, seed = name.hashCode().toLong())
