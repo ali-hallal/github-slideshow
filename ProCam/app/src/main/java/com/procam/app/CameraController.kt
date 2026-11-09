@@ -237,7 +237,26 @@ class CameraController(context: Context, private val listener: Listener) {
     @Volatile private var zslCapable = false
 
     /** The last few full-size frames are being kept (steadiest-moment capture is possible). */
-    val steadiestMomentAvailable get() = zslCapable && yuvInSession
+    val steadiestMomentAvailable get() = zslCapable && yuvInSession && zslStreaming
+
+    @Volatile private var zslStreaming = true
+
+    /**
+     * Whether to keep streaming full-size frames for the steadiest moment. Off while they can't be
+     * used (zoomed shots take their own burst): streaming them costs the camera and memory and
+     * makes the viewfinder lag.
+     */
+    fun setSteadiestMomentStreaming(on: Boolean) {
+        if (zslStreaming == on) return
+        zslStreaming = on
+        handler?.post {
+            if (!on) {
+                zslRing.forEach { it.close() }
+                zslRing.clear()
+            }
+            if (zslCapable && state == State.PREVIEW) updateRepeating()
+        }
+    }
 
     /** Timing (start, exposure ns) of the last single photo, for judging its shake. */
     @Volatile var lastStillTiming: Pair<Long, Long>? = null
@@ -391,11 +410,18 @@ class CameraController(context: Context, private val listener: Listener) {
     }
 
     fun update(newSettings: ShotSettings) {
+        // A zoom drag sends many updates a second: only the newest matters, so they're coalesced
+        // (one request rebuild at a time) instead of queueing up behind the camera.
+        latestSettings = newSettings
+        if (updatePending.getAndSet(true)) return
         handler?.post {
-            settings = newSettings
+            updatePending.set(false)
+            settings = latestSettings ?: return@post
             if (state == State.PREVIEW) updateRepeating()
-        }
+        } ?: updatePending.set(false)
     }
+    @Volatile private var latestSettings: ShotSettings? = null
+    private val updatePending = java.util.concurrent.atomic.AtomicBoolean(false)
 
     /** Tap-to-focus/meter. [nx],[ny] are 0..1 in preview (portrait view) coordinates. */
     fun focusAt(nx: Float, ny: Float) {
@@ -974,7 +1000,7 @@ class CameraController(context: Context, private val listener: Listener) {
             }
             val b = previewBuilder() ?: return
             val yuv = yuvReader
-            if ((momentEnabled || zslCapable) && yuvInSession && yuv != null) b.addTarget(yuv.surface)
+            if ((momentEnabled || (zslCapable && zslStreaming)) && yuvInSession && yuv != null) b.addTarget(yuv.surface)
             s.setRepeatingRequest(b.build(), previewCallback, handler)
         } catch (e: Exception) {
             Log.w(TAG, "updateRepeating", e)
@@ -1574,6 +1600,10 @@ class CameraController(context: Context, private val listener: Listener) {
             null
         } ?: return
         if (yuvExpected <= 0 && zslCapable && !momentEnabled) {
+            if (!zslStreaming) {
+                image.close()
+                return
+            }
             // Steadiest moment: hold the last few frames (no copy); the oldest goes back to the camera.
             zslRing.addLast(image)
             while (zslRing.size > ZSL_RING) zslRing.removeFirst().close()

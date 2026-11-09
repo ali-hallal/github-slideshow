@@ -1860,6 +1860,58 @@ class ProCamTest {
         assertTrue("the wrong way round is worse, so it's never chosen: $wrong vs $plain", wrong > plain)
     }
 
+    @Test
+    fun zoomMergeHandlesATiltAndBeatsOneFrame() {
+        // 5 frames of a detailed scene at 1/3 resolution, hand-shake offsets, the phone turning
+        // a little between them (old one-offset-per-frame merge doubles the picture), noise.
+        val big = 900
+        val rnd = java.util.Random(11)
+        val tex = FloatArray(big * big) { rnd.nextFloat() }.also { PortraitProcessor.boxBlur(it, big, big, 3) }
+        fun truth(x: Float, y: Float): Float {
+            val xi = x.toInt().coerceIn(0, big - 1)
+            val yi = y.toInt().coerceIn(0, big - 1)
+            var v = 60 + 140 * tex[yi * big + xi]
+            if ((xi / 24 + yi / 24) % 2 == 0 && xi < 450) v = 30f
+            return v
+        }
+        val f = 3
+        val n = big / f - 4
+        val shifts = listOf(0f to 0f, 1.3f to 0.7f, -0.6f to 2.1f, 2.2f to -1.4f, -1.7f to -0.9f)
+        val frames = shifts.mapIndexed { k, (sx, sy) ->
+            val ang = 0.004f * k
+            val nr = java.util.Random(k * 7L + 1)
+            SuperRes.Frame(IntArray(n * n) { i ->
+                val x = i % n
+                val y = i / n
+                var s = 0f
+                for (yy in 0 until f) for (xx in 0 until f) {
+                    val lx = x + (xx + 0.5f) / f - n / 2f
+                    val ly = y + (yy + 0.5f) / f - n / 2f
+                    val rx = lx * kotlin.math.cos(ang) - ly * kotlin.math.sin(ang) + n / 2f + sx
+                    val ry = lx * kotlin.math.sin(ang) + ly * kotlin.math.cos(ang) + n / 2f + sy
+                    s += truth((rx + 2) * f, (ry + 2) * f)
+                }
+                val v = (s / (f * f) + nr.nextGaussian() * 5).toInt().coerceIn(0, 255)
+                (0xFF shl 24) or (v shl 16) or (v shl 8) or v
+            }, n, n)
+        }
+        val on = n * f
+        val truthFrame = SuperRes.Frame(IntArray(on * on) { i ->
+            val v = truth(i % on + 2f * f + 0.5f, i / on + 2f * f + 0.5f).toInt()
+            (0xFF shl 24) or (v shl 16) or (v shl 8) or v
+        }, on, on)
+        val offs = SuperRes.offsets(frames, 2).map { it.dx to it.dy }
+        val single = SuperRes.Frame(SuperRes.enlarge(frames[0], on, on), on, on)
+        val old = SuperRes.merge(frames, offs, IntArray(frames.size) { 60 }, f.toFloat())
+        val new = KernelMerge.merge(frames, offs, f.toFloat())
+        val eSingle = SuperRes.rmse(single, truthFrame, 30)
+        val eOld = SuperRes.rmse(old, truthFrame, 30)
+        val eNew = SuperRes.rmse(new, truthFrame, 30)
+        Log.i(TAG, "zoom merge error: single $eSingle, old $eOld, new $eNew (${KernelMerge.lastTimings})")
+        assertTrue("new merge beats the old one with a tilt: $eNew vs $eOld", eNew < eOld * 0.8)
+        assertTrue("and isn't worse than one frame: $eNew vs $eSingle", eNew < eSingle * 1.05)
+    }
+
     // ------------------------------------------------------------------ helpers
 
     /** The app's recent log lines matching [pattern] (for failure messages). */

@@ -158,8 +158,6 @@ object TileMerge {
                 val region = Rect(max(0, tx - margin), max(0, ty - margin), min(fw, tx + ow + margin), min(fh, ty + oh + margin))
                 val full = Rect(region.left * sample, region.top * sample, region.right * sample, region.bottom * sample)
                 val parts = chosen.map { sources[it].region(full, sample) }
-                val pw = parts[0].w
-                val ph = parts[0].h
                 val prepared = SuperRes.prepare(parts[0], GRAY_SCALE)
                 val offsets = global.mapIndexed { k, g ->
                     if (k == 0) g
@@ -172,11 +170,8 @@ object TileMerge {
                     }
                 }
                 tiles++
-                val motion = IntArray(parts.size) { k ->
-                    val (dx, dy) = offsets[k]
-                    if (k == 0) 255 else NightProcessor.motionThreshold(parts[0].px, parts[k].px, pw, ph, dx.roundToInt(), dy.roundToInt())
-                }
-                val merged = SuperRes.merge(parts, offsets, motion, 1f)
+                // Patch-by-patch alignment within the tile, edge-shaped kernels, ghost rejection.
+                val merged = KernelMerge.merge(parts, offsets, 1f)
                 Deconvolve.sharpen(merged, iterations = iterations)
                 blendInto(out, merged, region, tx, ty, ow, oh)
                 tx += TILE

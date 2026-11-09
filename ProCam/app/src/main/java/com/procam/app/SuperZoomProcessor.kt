@@ -69,22 +69,19 @@ class SuperZoomProcessor {
         val frames = good.map { chosen[it] }
         val offsets = good.map { all[it].dx to all[it].dy }
         val t2 = android.os.SystemClock.uptimeMillis()
-        val motion = IntArray(frames.size) { k ->
-            val (dx, dy) = offsets[k]
-            if (k == 0) 255 else NightProcessor.motionThreshold(frames[0].px, frames[k].px, w0, h0, dx.roundToInt(), dy.roundToInt())
-        }
         Log.i(TAG, "kept ${frames.size} of $taken frames; offsets ${all.map { "%.2f,%.2f (%.0f)".format(it.dx, it.dy, it.cost) }}")
         val merged: SuperRes.Frame
         val scale: Float
         if (ai != null) {
             // AI detail: merge at the frames' own size (clean, no noise), then the network enlarges it.
             scale = (AI_MAX_SIDE.toFloat() / max(w0, h0)).coerceIn(1f, 4f)
-            val clean = SuperRes.merge(frames, offsets, motion, 1f)
+            val clean = KernelMerge.merge(frames, offsets, 1f)
             merged = ai.upscale(clean, (w0 * scale).roundToInt(), (h0 * scale).roundToInt())
         } else {
-            // Shift-and-add onto a finer grid (2-3x, aiming for ~3000 px), then sharpen.
+            // Onto a finer grid (2-3x, aiming for ~3000 px): patch-by-patch alignment and
+            // edge-shaped kernels (KernelMerge), then sharpen.
             scale = (MAX_SIDE.toFloat() / max(w0, h0)).coerceIn(1f, MAX_SCALE)
-            merged = SuperRes.merge(frames, offsets, motion, scale)
+            merged = KernelMerge.merge(frames, offsets, scale)
         }
         val t3 = android.os.SystemClock.uptimeMillis()
         if (ai == null) SuperRes.sharpen(merged)
@@ -116,7 +113,7 @@ class SuperZoomProcessor {
         val t5 = android.os.SystemClock.uptimeMillis()
         Log.i(TAG, "super zoom: ${result.width}x${result.height} from ${frames.size} of $taken frames ${w0}x$h0 (x$scale); " +
             "timing ms: lucky ${t1 - t0}, align ${t2 - t1}, merge ${t3 - t2}, sharpen ${t4 - t3}, encode ${t5 - t4}, " +
-            "cores ${Runtime.getRuntime().availableProcessors()}")
+            "cores ${Runtime.getRuntime().availableProcessors()}; merge stages: ${KernelMerge.lastTimings}")
         return result
     }
 

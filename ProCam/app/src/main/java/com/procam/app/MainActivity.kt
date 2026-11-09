@@ -974,6 +974,9 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             settings = settings.copy(zoom = hardware)
             camera.update(settings)
         }
+        // Full-size frames for the steadiest moment are only kept where a photo can use them.
+        camera.setSteadiestMomentStreaming(extraCrop <= 1.001f && !zoomEnhanceApplies())
+        lastZoomChange = SystemClock.uptimeMillis()
         // After the new zoom is in place (a quick jump, e.g. tapping 5×, may be a single step).
         updateSteady()
         applyPreviewCrop()
@@ -984,6 +987,9 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         updateZoomSlider()
         showZoomIndicator()
     }
+
+    /** When the zoom last changed (the viewfinder analysis pauses during a zoom drag). */
+    private var lastZoomChange = 0L
 
     /** The open camera's total zoom including super zoom. */
     private fun cameraZoom() = settings.zoom * extraCrop
@@ -3089,6 +3095,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             mainHandler.postDelayed(this, ANALYSIS_INTERVAL_MS)
             val c = caps ?: return
             if (!textureView.isAvailable || textureView.width == 0) return
+            // While zooming, the main thread belongs to the gesture: skip the snapshot and analysis.
+            if (SystemClock.uptimeMillis() - lastZoomChange < ZOOM_QUIET_MS) return
             val w = ANALYSIS_WIDTH
             val h = (w * textureView.height / textureView.width).coerceAtLeast(1)
             var bmp = analysisBitmap
@@ -3287,6 +3295,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     // ------------------------------------------------------------------ UI state
 
     private fun refreshUi() {
+        if (caps != null) camera.setSteadiestMomentStreaming(extraCrop <= 1.001f && !zoomEnhanceApplies())
         updateUiMode()
         val c = caps
         val pro = settings.manualExposure
@@ -3500,6 +3509,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         private const val BLURRY_RATIO = 0.5f
         private const val FOCUS_STEPS = 100
         private const val ANALYSIS_INTERVAL_MS = 150L
+        /** Viewfinder analysis waits this long after the last zoom change. */
+        private const val ZOOM_QUIET_MS = 400L
         private const val ANALYSIS_WIDTH = 270
         private const val MAX_AUTO_SHUTTER_NS = 500_000_000L // 1/2 s
     }
