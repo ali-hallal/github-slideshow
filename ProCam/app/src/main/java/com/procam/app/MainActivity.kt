@@ -991,6 +991,17 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     /** When the zoom last changed (the viewfinder analysis pauses during a zoom drag). */
     private var lastZoomChange = 0L
 
+    /** Native-pixel zoom of the current zoom shot: how much the app crops the lens's own view (null = camera zoom). */
+    private var zoomNativeCrop: Float? = null
+
+    /** The lens's own zoom for [zoom]: the largest physical lens stop at or below it (1× on single-lens phones). */
+    private fun opticalBase(zoom: Float): Float {
+        val c = caps ?: return zoom
+        val stops = (c.physicalScale.values.map { CameraCaps.roundStop(it) } + 1f)
+            .filter { it >= c.zoomRange.lower - 0.01f && it <= c.zoomRange.upper + 0.01f && it <= zoom + 0.01f }
+        return (stops.maxOrNull() ?: zoom).coerceIn(c.zoomRange.lower, c.zoomRange.upper)
+    }
+
     /** The open camera's total zoom including super zoom. */
     private fun cameraZoom() = settings.zoom * extraCrop
 
@@ -1254,12 +1265,22 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 SuperZoomProcessor.plan(liveIso!!, liveExposure!!, safeShutterNs() ?: liveExposure!!, isoR, expR)
             } else null
             exposure?.let { Log.i(TAG, "super zoom plan: ISO ${it.first} ${Stops.shutterLabel(it.second)}") }
+            // Native-pixel zoom: shoot at the lens's own zoom and crop here, so the merge works on
+            // real sensor pixels (the camera's digital zoom would stretch every shot first).
+            val base = opticalBase(settings.zoom)
+            val nativeCrop = cameraZoom() / base
+            zoomNativeCrop = if (prefs.nativeZoom && base < settings.zoom - 0.01f && nativeCrop in NATIVE_MIN_CROP..NATIVE_MAX_CROP) nativeCrop else null
+            lastZoomShot = "zoom shot: ${"%.2f".format(Locale.US, cameraZoom())}x, lens base ${base}x, " +
+                (zoomNativeCrop?.let { "native crop %.2f".format(Locale.US, it) } ?: "camera zoom")
+            Log.i(TAG, lastZoomShot)
             if (zoomEnhancing && prefs.rawZoom && camera.rawBurstAvailable()) {
                 // Best: merge the sensor's RAW frames (JPEGs come along as fallback and for the look).
+                zoomNativeCrop = null
                 camera.takeRawZoomBurst(deviceOrientation, zoomBurstFrames(), exposure)
             } else {
                 // Full-resolution JPEG shots (video-size frames would be faster but lose detail).
-                camera.takeBurst(deviceOrientation, zoomBurstFrames(), toMemory = true, exposure = exposure, minimalProcessing = true)
+                camera.takeBurst(deviceOrientation, zoomBurstFrames(), toMemory = true, exposure = exposure, minimalProcessing = true,
+                    zoomOverride = zoomNativeCrop?.let { base })
             }
         } else {
             // A normal photo: never slower than the hands can hold right now.
@@ -2434,9 +2455,13 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private fun processSuperZoom(frames: List<ByteArray>, mimeType: String) {
         val timingForZoom = camera.lastBurstTiming
         val roiSensor = subjectSensor()
-        val crop = extraCrop
+        val native = zoomNativeCrop
+        zoomNativeCrop = null
+        val crop = native ?: extraCrop
+        val superCrop = extraCrop
         val quality = prefs.jpegQuality
-        val enhance = zoomEnhancing
+        val enhance = zoomEnhancing && native == null
+        val nativeEnhance = zoomEnhancing && native != null
         zoomEnhancing = false
         releaseShutterForBackground()
         enhancer.execute {
@@ -2447,7 +2472,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 val burst = keepSteady(frames.drop(skip), timing.drop(skip), minKeep = 3)
                 when {
                     enhance -> superZoom.enhance(burst, quality, roi = subjectForJpeg(burst.firstOrNull(), roiSensor))
-                    aiFor(crop) -> superZoom.process(burst, crop, quality, ai = aiUpscaler())
+                    aiFor(superCrop) -> superZoom.process(burst, crop, quality, ai = aiUpscaler())
                     else -> superZoom.process(burst, crop, quality)
                 }
             } catch (e: Throwable) {
@@ -2462,6 +2487,15 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                     writer = { it.write(result.jpeg) },
                     afterWrite = { u -> MediaSaver.copyExif(this, u, frames.first()) },
                 )
+            } else if (native != null) {
+                // Shot at the lens's own zoom: the plain crop of the first shot is what was framed.
+                val plain = SuperZoomProcessor.decodeCentre(frames.first(), native)
+                if (plain != null) {
+                    val bytes = java.io.ByteArrayOutputStream().also { plain.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality.coerceIn(50, 100), it) }.toByteArray()
+                    plain.recycle()
+                    MediaSaver.save(this, "${MediaSaver.newBaseName()}.jpg", "image/jpeg",
+                        writer = { it.write(bytes) }, afterWrite = { u -> MediaSaver.copyExif(this, u, frames.first()) })
+                } else null
             } else {
                 // Fall back to the camera's own photo (at the camera's maximum zoom).
                 val ext = if (mimeType == "image/heic") "heic" else "jpg"
@@ -2471,9 +2505,11 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 enhanceDone(
                     uri, if (result != null) "image/jpeg" else mimeType,
                     when {
+                        result == null && native != null -> "Saved without enhancing"
                         result == null -> "Saved at the camera's maximum zoom"
                         enhance -> "Zoom enhance · ${result.merged} shots merged for detail"
-                        aiFor(crop) -> "Super zoom · AI detail · ${result.merged} shots merged"
+                        nativeEnhance -> "Zoom enhance · ${result.merged} shots' real pixels merged"
+                        aiFor(superCrop) -> "Super zoom · AI detail · ${result.merged} shots merged"
                         else -> "Super zoom · sharpest ${result.merged} of ${frames.size} shots merged"
                     },
                 )
@@ -3511,6 +3547,12 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         private const val ANALYSIS_INTERVAL_MS = 150L
         /** Viewfinder analysis waits this long after the last zoom change. */
         private const val ZOOM_QUIET_MS = 400L
+        /** Native-pixel zoom from this much crop of the lens's own view (below, the camera's zoom is as good). */
+        /** How the last zoom shot was taken (diagnostics, tests). */
+        @Volatile var lastZoomShot = ""
+        private const val NATIVE_MIN_CROP = 1.2f
+        /** ...and up to this much (a smaller crop has too few real pixels to rebuild a full photo from). */
+        private const val NATIVE_MAX_CROP = 4f
         private const val ANALYSIS_WIDTH = 270
         private const val MAX_AUTO_SHUTTER_NS = 500_000_000L // 1/2 s
     }

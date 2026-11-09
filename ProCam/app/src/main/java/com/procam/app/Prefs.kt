@@ -41,6 +41,14 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("zoomEnhance", true)
         set(v) = sp.edit().putBoolean("zoomEnhance", v).apply()
 
+    /**
+     * Zoomed photos are shot at the lens's own zoom and enlarged in the app from the real sensor
+     * pixels of several shots (the camera's own digital zoom enlarges each shot first).
+     */
+    var nativeZoom: Boolean
+        get() = sp.getBoolean("nativeZoom", true)
+        set(v) = sp.edit().putBoolean("nativeZoom", v).apply()
+
     /** AI detail for super zoom: [AI_OFF], [AI_HALFWAY] (from halfway into super zoom) or [AI_ALL_SUPER]. */
     var aiDetail: Int
         get() = sp.getInt("aiDetail", AI_HALFWAY)

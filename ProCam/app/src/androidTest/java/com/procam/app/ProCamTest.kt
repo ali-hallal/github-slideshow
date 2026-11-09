@@ -1669,6 +1669,30 @@ class ProCamTest {
     }
 
     @Test
+    fun zoomShotUsesTheLensesRealPixels() {
+        waitForCamera()
+        setSimple(true)
+        Prefs(context).zoomEnhance = true
+        Prefs(context).rawZoom = false
+        onView(withContentDescription("Zoom 2×")).perform(click())
+        SystemClock.sleep(800)
+        val before = count("image/jpeg")
+        onView(withId(R.id.shutter)).perform(click())
+        waitFor("zoom photo saved", 150_000) { count("image/jpeg") > before }
+        assertTrue("shot at the lens's own zoom, cropped here: ${MainActivity.lastZoomShot}", MainActivity.lastZoomShot.contains("native crop 2.00"))
+        val uri = latestImage()!!
+        val size = context.contentResolver.openInputStream(uri)!!.use {
+            val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            android.graphics.BitmapFactory.decodeStream(it, null, o)
+            o.outWidth to o.outHeight
+        }
+        var name = ""
+        context.contentResolver.query(uri, arrayOf(MediaStore.Images.Media.DISPLAY_NAME), null, null, null)?.use { if (it.moveToFirst()) name = it.getString(0) }
+        assertTrue("a _ZOOM photo: $name", name.contains("_ZOOM"))
+        assertTrue("rebuilt at full size, not a small crop: $size", maxOf(size.first, size.second) >= 1800)
+    }
+
+    @Test
     fun shakeProofShutterMaths() {
         val isoR = Range(50, 3200)
         val expR = Range(100_000L, 1_000_000_000L)

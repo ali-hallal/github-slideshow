@@ -122,6 +122,8 @@ class SettingsActivity : Activity() {
             listOf("Off", "On"), { if (prefs.level) 1 else 0 }, { prefs.level = it == 1 }))
         row(Option("Zoom enhance", "From 1.5× zoom, photos are merged from several shots for more detail (takes a moment)",
             listOf("Off", "On"), { if (prefs.zoomEnhance) 1 else 0 }, { prefs.zoomEnhance = it == 1 }))
+        row(Option("Zoom from real pixels", "Zoomed photos are taken at the lens's own zoom and enlarged by the app from several shots' real sensor pixels, instead of the camera's stretched digital zoom",
+            listOf("Off", "On"), { if (prefs.nativeZoom) 1 else 0 }, { prefs.nativeZoom = it == 1 }))
         row(Option("AI detail (super zoom)", "An on-device AI restores edges and texture in super zoom photos (takes a few seconds, in the background)",
             listOf("Off", "From halfway into super zoom", "All super zoom"), { prefs.aiDetail.coerceIn(0, 2) }, { prefs.aiDetail = it }))
         list.addView(TextView(this).apply {

@@ -164,7 +164,7 @@ class SuperZoomProcessor {
         /** With AI detail: up to 4× the crop, about 12 MP. */
         private const val AI_MAX_SIDE = 4000
         /** Enlargement measured to recover real detail from ~6 frames; more would only add pixels. */
-        private const val MAX_SCALE = 2f
+        private const val MAX_SCALE = 3f
         /** Frames merged out of the burst (the sharpest ones). */
         const val KEEP_FRAMES = 6
         private const val GRAY_SCALE = 2

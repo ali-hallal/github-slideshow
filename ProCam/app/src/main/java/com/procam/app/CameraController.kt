@@ -117,6 +117,8 @@ class CameraController(context: Context, private val listener: Listener) {
     private var stillToMemory = false
     private var burstExposure: Pair<Int, Long>? = null
     private var burstMinimal = false
+    /** Zoom ratio for the stills of the current burst instead of the preview's (null = same). */
+    private var burstZoom: Float? = null
     private var burstIntervalMs = 0L
     private var burstFocus: FloatArray? = null
     // RAW zoom burst
@@ -222,6 +224,7 @@ class CameraController(context: Context, private val listener: Listener) {
                 stillToMemory = false
                 burstToYuv = false
                 burstExposure = null
+                burstZoom = null
                 takePictureInternal(deviceOrientation)
                 return@post
             }
@@ -350,6 +353,7 @@ class CameraController(context: Context, private val listener: Listener) {
             stillToMemory = true
             burstExposure = exposure
             burstMinimal = true
+            burstZoom = null
             burstToYuv = true
             yuvCrop = crop.coerceAtLeast(1f)
             takePictureInternal(deviceOrientation)
@@ -477,6 +481,12 @@ class CameraController(context: Context, private val listener: Listener) {
         intervalMs: Long = 0L,
         /** Close-up focus stacking: one focus distance (diopters) per frame; null = normal focus. */
         focusDistances: FloatArray? = null,
+        /**
+         * Zoom ratio for the burst's photos instead of the viewfinder's: native-pixel zoom shoots
+         * at the lens's own zoom and crops in the app (the camera's own digital zoom enlarges
+         * every frame before the merge could use the real pixels).
+         */
+        zoomOverride: Float? = null,
     ) {
         val h = handler
         if (h == null) {
@@ -489,6 +499,7 @@ class CameraController(context: Context, private val listener: Listener) {
             burstToYuv = false
             burstExposure = exposure
             burstMinimal = minimalProcessing
+            burstZoom = zoomOverride
             burstIntervalMs = intervalMs
             burstFocus = focusDistances?.takeIf { caps?.canManualFocus == true }
             if (burstFocus != null) stillCount = burstFocus!!.size.coerceAtMost(MAX_BURST)
@@ -540,6 +551,7 @@ class CameraController(context: Context, private val listener: Listener) {
             burstToYuv = false
             burstExposure = exposure
             burstMinimal = true
+            burstZoom = null
             burstIntervalMs = 0L
             burstFocus = null
             takePictureInternal(deviceOrientation)
@@ -1111,7 +1123,7 @@ class CameraController(context: Context, private val listener: Listener) {
         }
 
         // ---- zoom
-        val zoom = s.zoom.coerceIn(c.zoomRange.lower, c.zoomRange.upper)
+        val zoom = (if (still) burstZoom ?: s.zoom else s.zoom).coerceIn(c.zoomRange.lower, c.zoomRange.upper)
         if (c.zoomRatioApi && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             b.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoom)
         } else if (zoom > 1.001f) {
