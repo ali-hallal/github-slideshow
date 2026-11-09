@@ -82,6 +82,36 @@ object MotionDeblur {
      * doesn't follow the gyroscope well enough to tell.
      */
     fun oisResidual(calGyro: FloatArray, calOis: FloatArray, gyro: FloatArray, ois: FloatArray): FloatArray? {
+        val c = oisFit(calGyro, calOis) ?: return null
+        val c00 = c[0]; val c01 = c[1]; val c10 = c[2]; val c11 = c[3]
+        val cdet = c00 * c11 - c01 * c10
+        val out = FloatArray(gyro.size)
+        for (i in 0 until gyro.size / 2) {
+            val ox = (ois[2 * i] - ois[0]).toDouble()
+            val oy = (ois[2 * i + 1] - ois[1]).toDouble()
+            // C⁻¹ · shift
+            val tx = (c11 * ox - c01 * oy) / cdet
+            val ty = (-c10 * ox + c00 * oy) / cdet
+            out[2 * i] = (gyro[2 * i] - gyro[0] - tx).toFloat()
+            out[2 * i + 1] = (gyro[2 * i + 1] - gyro[1] - ty).toFloat()
+        }
+        return out
+    }
+
+    /**
+     * The share of a turn that optical stabilisation takes out (0 = none, 1 = all of it): the
+     * fitted lens shift per radian, against [focalPx] (the focal length in the same pixels as
+     * the lens-shift reports), which is how far the picture moves per radian with the lens
+     * still. Null if the lens doesn't follow the gyroscope well enough to tell.
+     */
+    fun oisShare(calGyro: FloatArray, calOis: FloatArray, focalPx: Float): Float? {
+        if (focalPx <= 0f) return null
+        val c = oisFit(calGyro, calOis) ?: return null
+        return (sqrt(abs(c[0] * c[3] - c[1] * c[2])) / focalPx).toFloat().coerceIn(0f, 1f)
+    }
+
+    /** Lens shift ≈ C · turn: C (row by row), or null if the fit is poor. */
+    private fun oisFit(calGyro: FloatArray, calOis: FloatArray): DoubleArray? {
         var sgg00 = 0.0; var sgg01 = 0.0; var sgg11 = 0.0
         var sog00 = 0.0; var sog01 = 0.0; var sog10 = 0.0; var sog11 = 0.0
         val n = calGyro.size / 2
@@ -120,17 +150,7 @@ object MotionDeblur {
         val cdet = c00 * c11 - c01 * c10
         log("ois fit: C = [%.1f %.1f; %.1f %.1f], R² %.2f".format(c00, c01, c10, c11, fit))
         if (fit < MIN_OIS_FIT || abs(cdet) < 1e-9) return null
-        val out = FloatArray(gyro.size)
-        for (i in 0 until gyro.size / 2) {
-            val ox = (ois[2 * i] - ois[0]).toDouble()
-            val oy = (ois[2 * i + 1] - ois[1]).toDouble()
-            // C⁻¹ · shift
-            val tx = (c11 * ox - c01 * oy) / cdet
-            val ty = (-c10 * ox + c00 * oy) / cdet
-            out[2 * i] = (gyro[2 * i] - gyro[0] - tx).toFloat()
-            out[2 * i + 1] = (gyro[2 * i + 1] - gyro[1] - ty).toFloat()
-        }
-        return out
+        return doubleArrayOf(c00, c01, c10, c11)
     }
 
     /** Linear interpolation of samples ([ts], [xs], [ys]) at [t]; null outside them. */

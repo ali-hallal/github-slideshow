@@ -171,7 +171,7 @@ object TileMerge {
                 }
                 tiles++
                 // Patch-by-patch alignment within the tile, edge-shaped kernels, ghost rejection.
-                val merged = KernelMerge.merge(parts, offsets, 1f)
+                val merged = KernelMerge.merge(parts, offsets, 1f, KernelMerge.SAME_SIZE)
                 Deconvolve.sharpen(merged, iterations = iterations)
                 blendInto(out, merged, region, tx, ty, ow, oh)
                 tx += TILE

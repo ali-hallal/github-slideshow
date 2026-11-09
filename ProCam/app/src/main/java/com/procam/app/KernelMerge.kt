@@ -134,6 +134,14 @@ object KernelMerge {
     }
 
     /** How long the last merge's stages took (diagnostics). */
+    /**
+     * For merging at the frames' own size (zoom enhance), which is sharpened by deconvolution
+     * afterwards: wider kernels, so every pixel averages more of the burst. Narrow ones leave
+     * more noise, and the deconvolution then amplifies it (measured: error 5.7 vs 4.8 on a noisy
+     * burst, against 6.4 for one shot).
+     */
+    val SAME_SIZE = Params(acrossEdge = 0.4f, alongEdge = 0.8f, flat = 0.8f)
+
     @Volatile var lastTimings = ""
 
     /** Mean local offset of [f] against [ref] (checks). */

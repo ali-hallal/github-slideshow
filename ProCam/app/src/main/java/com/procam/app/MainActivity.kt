@@ -360,6 +360,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         sensorManager.unregisterListener(this)
         locationTracker.stop()
         shake.stop()
+        mainHandler.removeCallbacks(steadyTune)
         steady.stop()
         steady.active = false
         mainHandler.removeCallbacks(steadyTick)
@@ -1058,13 +1059,56 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             steady.maxShiftY = (SteadyZoom.MARGIN - 1f) / 2f * textureView.height
         }
         if (steady.active != on) {
+            steady.gain = if (c?.ois == true) SteadyZoom.OIS_GAIN else 1f
             steady.active = on
+            mainHandler.removeCallbacks(steadyTune)
+            if (on && c?.ois == true) mainHandler.postDelayed(steadyTune, STEADY_TUNE_MS)
             if (!on) {
                 steadyDx = 0f
                 steadyDy = 0f
             }
             applyPreviewCrop()
         }
+    }
+
+    /**
+     * With optical stabilisation, the lens already cancels most of the tremor: learn from its
+     * lens-shift reports how much, and steady the viewfinder only by what is left (cancelling
+     * the whole turn twice would make the picture wobble the other way).
+     */
+    private val steadyTune = object : Runnable {
+        override fun run() {
+            if (!steady.active) return
+            mainHandler.postDelayed(this, STEADY_TUNE_MS)
+            val left = oisLeftover() ?: return
+            steady.gain = (0.7f * steady.gain + 0.3f * left).coerceIn(SteadyZoom.MIN_GAIN, 1f)
+            lastSteadyGain = steady.gain
+        }
+    }
+
+    /** Share of a turn that still moves the picture after optical stabilisation; null if unknown. */
+    private fun oisLeftover(): Float? {
+        val c = caps ?: return null
+        if (!c.ois || !camera.oisDataAvailable || !camera.timestampsMatchSensors || !shake.available) return null
+        val focal = c.focalLength ?: return null
+        if (focal <= 0f || c.sensorWidthMm <= 0f) return null
+        val (ots, ox, oy) = camera.oisSamples()
+        if (ots.size < 8) return null
+        // The last moments the lens reported on (as much as its history covers).
+        val span = minOf(OIS_CAL_NS, ots.last() - ots.first())
+        val steps = (span / OIS_CAL_STEP_NS).toInt()
+        if (steps < 20) return null
+        val start = ots.last() - span
+        val gyro = shake.pathDuring(start, span, steps) ?: return null
+        val lens = FloatArray(2 * (steps + 1))
+        for (k in 0..steps) {
+            val (x, y) = MotionDeblur.sampleAt(ots, ox, oy, start + span * k / steps) ?: return null
+            lens[2 * k] = x
+            lens[2 * k + 1] = y
+        }
+        // Lens shifts are in the pixels of the lens in use: its focal length in those pixels.
+        val focalPx = focal / c.sensorWidthMm * c.activeArray.width() * opticalBase(settings.zoom)
+        return MotionDeblur.oisShare(gyro, lens, focalPx)?.let { 1f - it }
     }
 
     /** Screen tap → 0..1 position in the camera's (un-super-zoomed) frame. */
@@ -3492,6 +3536,9 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         private const val DEBLUR_ABOVE_PX = 2.5f
         private const val PATH_STEPS = 24
         /** Lens shift is learnt against the gyroscope over this long before the photo. */
+        private const val STEADY_TUNE_MS = 700L
+        /** Last learnt viewfinder steadying share (for diagnostics and tests). */
+        @Volatile var lastSteadyGain = 1f
         private const val OIS_CAL_NS = 1_500_000_000L
         private const val OIS_CAL_STEP_NS = 20_000_000L
         /** A tap marks the subject for this long. */

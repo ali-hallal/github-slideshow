@@ -536,7 +536,8 @@ class ProCamTest {
         }
         val lowRes = shifts.map { (sx, sy) -> boxDown(4, sx, sy) }
         val frames = lowRes.mapIndexed { k, f -> jpeg(f, k, smear = false) } + listOf(jpeg(lowRes[1], 90, true), jpeg(lowRes[2], 91, true))
-        val result = SuperZoomProcessor().process(frames, crop = 1f, quality = 97)
+        // Enlarged 2x here, so the result sits exactly on the truth's pixel grid.
+        val result = SuperZoomProcessor().process(frames, crop = 1f, quality = 97, maxScale = 2f)
         assertEquals("kept the 6 sharp frames", 6, result.merged)
         val out = android.graphics.BitmapFactory.decodeByteArray(result.jpeg, 0, result.jpeg.size)
         val outFrame = SuperRes.Frame(IntArray(out.width * out.height).also { out.getPixels(it, 0, out.width, 0, 0, out.width, out.height) }, out.width, out.height)
@@ -1088,6 +1089,38 @@ class ProCamTest {
         )?.use { it.count } ?: 0
         assertTrue("a _CLEAN photo was saved", names > 0)
         assertEquals("Clean", ReviewActivity.describe("PROCAM_1_CLEAN.jpg").first)
+    }
+
+    @Test
+    fun steadyZoomLeavesToTheLensWhatTheLensSteadies() {
+        // A lens with optical stabilisation that takes out 70% of every turn (reported as lens
+        // shifts with swapped axes and a flipped sign, as on real phones): the share is found from
+        // the reports alone, and the viewfinder then cancels only the 30% that is left.
+        val rnd = java.util.Random(3)
+        val n = 75
+        val focalPx = 3000f
+        val gyro = FloatArray(2 * n)
+        val lens = FloatArray(2 * n)
+        for (i in 1 until n) {
+            gyro[2 * i] = gyro[2 * i - 2] + (rnd.nextGaussian() * 0.0004).toFloat()
+            gyro[2 * i + 1] = gyro[2 * i - 1] + (rnd.nextGaussian() * 0.0004).toFloat()
+            lens[2 * i] = -0.7f * focalPx * gyro[2 * i + 1] + (rnd.nextGaussian() * 0.05).toFloat()
+            lens[2 * i + 1] = 0.7f * focalPx * gyro[2 * i] + (rnd.nextGaussian() * 0.05).toFloat()
+        }
+        val share = MotionDeblur.oisShare(gyro, lens, focalPx)
+        assertTrue("the lens's share of the steadying is found: $share", share != null && abs(share - 0.7f) < 0.05f)
+        // A lens that doesn't follow the gyroscope tells nothing.
+        val noise = FloatArray(2 * n) { (rnd.nextGaussian() * 3).toFloat() }
+        assertTrue("unrelated lens movement is not trusted", MotionDeblur.oisShare(gyro, noise, focalPx) == null)
+        // The viewfinder shift: all of the turn without stabilisation, only the leftover with it.
+        val (fullX, fullY) = SteadyZoom.shift(0.002f, -0.001f, 0.0001f, 1f, 100f, 100f)
+        val (leftX, leftY) = SteadyZoom.shift(0.002f, -0.001f, 0.0001f, 1f - share!!, 100f, 100f)
+        assertEquals(10f, fullX, 0.01f)
+        assertEquals(-20f, fullY, 0.01f)
+        assertEquals(fullX * (1f - share), leftX, 0.01f)
+        assertEquals(fullY * (1f - share), leftY, 0.01f)
+        // Never further than the spare picture at the edges.
+        assertEquals(-5f, SteadyZoom.shift(0.002f, 0f, 0.0001f, 1f, 5f, 5f).second, 0.001f)
     }
 
     @Test

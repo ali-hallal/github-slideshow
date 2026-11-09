@@ -13,6 +13,10 @@ import kotlin.math.exp
  * shifted the opposite way by the same number of pixels, so the subject stays put. Slow,
  * deliberate movement (framing, panning) fades through after a moment.
  *
+ * A lens with optical stabilisation already takes out most of the tremor by itself; cancelling
+ * the whole turn again would make the picture wobble the other way, so only the part the lens
+ * leaves ([gain]) is cancelled.
+ *
  * Phone held upright (portrait), back camera. The preview is enlarged by [MARGIN] so there is
  * picture to spare at the edges for the shift.
  */
@@ -35,6 +39,9 @@ class SteadyZoom(context: Context, private val onShift: (Float, Float) -> Unit) 
     /** Largest shift allowed (px), from the spare picture at the edges. */
     var maxShiftX = 0f
     var maxShiftY = 0f
+
+    /** Share of the turn that reaches the picture (1 = no optical stabilisation). */
+    @Volatile var gain = 1f
 
     private var ax = 0f // accumulated pitch (around the phone's x axis), radians
     private var ay = 0f // accumulated yaw (around its y axis)
@@ -61,10 +68,8 @@ class SteadyZoom(context: Context, private val onShift: (Float, Float) -> Unit) 
         val (dx, dy) = step(ax, ay, e.values[0], e.values[1], dt)
         ax = dx
         ay = dy
-        onShift(
-            (-ay / radPerPx).coerceIn(-maxShiftX, maxShiftX),
-            (-ax / radPerPx).coerceIn(-maxShiftY, maxShiftY),
-        )
+        val (sx, sy) = shift(ax, ay, radPerPx, gain, maxShiftX, maxShiftY)
+        onShift(sx, sy)
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
@@ -74,6 +79,17 @@ class SteadyZoom(context: Context, private val onShift: (Float, Float) -> Unit) 
         const val MARGIN = 1.12f
         /** Movement lasting longer than about this (s) is treated as deliberate and let through. */
         const val TAU = 0.6f
+
+        /** With optical stabilisation and no lens-shift reports: the lens is taken to remove 3/4 of the tremor. */
+        const val OIS_GAIN = 0.25f
+        /** Never less than this, whatever the lens reports. */
+        const val MIN_GAIN = 0.1f
+
+        /** Preview shift (px) that cancels the accumulated turn, as far as the spare picture allows. */
+        fun shift(ax: Float, ay: Float, radPerPx: Float, gain: Float, maxX: Float, maxY: Float): Pair<Float, Float> = Pair(
+            (-ay * gain / radPerPx).coerceIn(-maxX, maxX),
+            (-ax * gain / radPerPx).coerceIn(-maxY, maxY),
+        )
 
         /**
          * One gyro sample: integrate the turn, then let it decay (a high-pass filter), so tremor is

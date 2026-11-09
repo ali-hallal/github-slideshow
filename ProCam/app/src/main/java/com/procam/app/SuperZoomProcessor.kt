@@ -30,7 +30,7 @@ class SuperZoomProcessor {
      * @param crop how much further than the camera's own zoom (e.g. 3 = the centre third).
      * Blocking: call off the main thread.
      */
-    fun process(frames: List<ByteArray>, crop: Float, quality: Int, ai: AiUpscaler? = null): Result {
+    fun process(frames: List<ByteArray>, crop: Float, quality: Int, ai: AiUpscaler? = null, maxScale: Float = MAX_SCALE): Result {
         require(frames.isNotEmpty())
         val rotation = exifRotation(frames.first())
         // 1. Full-resolution centre crops.
@@ -44,14 +44,14 @@ class SuperZoomProcessor {
             }
         }
         require(crops.isNotEmpty()) { "could not decode any frame" }
-        return processFrames(crops, rotation, quality, frames.size, ai)
+        return processFrames(crops, rotation, quality, frames.size, ai, maxScale)
     }
 
     /**
      * The merge itself, from frames already cropped and converted to pixels (fast bursts arrive
      * like this). [rotation] = clockwise degrees to make the result upright.
      */
-    fun processFrames(crops: List<SuperRes.Frame>, rotation: Int, quality: Int, taken: Int = crops.size, ai: AiUpscaler? = null): Result {
+    fun processFrames(crops: List<SuperRes.Frame>, rotation: Int, quality: Int, taken: Int = crops.size, ai: AiUpscaler? = null, maxScale: Float = MAX_SCALE): Result {
         require(crops.isNotEmpty())
         val t0 = android.os.SystemClock.uptimeMillis()
         val w0 = crops[0].w
@@ -80,7 +80,7 @@ class SuperZoomProcessor {
         } else {
             // Onto a finer grid (2-3x, aiming for ~3000 px): patch-by-patch alignment and
             // edge-shaped kernels (KernelMerge), then sharpen.
-            scale = (MAX_SIDE.toFloat() / max(w0, h0)).coerceIn(1f, MAX_SCALE)
+            scale = (MAX_SIDE.toFloat() / max(w0, h0)).coerceIn(1f, maxScale)
             merged = KernelMerge.merge(frames, offsets, scale)
         }
         val t3 = android.os.SystemClock.uptimeMillis()
@@ -164,7 +164,7 @@ class SuperZoomProcessor {
         /** With AI detail: up to 4× the crop, about 12 MP. */
         private const val AI_MAX_SIDE = 4000
         /** Enlargement measured to recover real detail from ~6 frames; more would only add pixels. */
-        private const val MAX_SCALE = 3f
+        const val MAX_SCALE = 3f
         /** Frames merged out of the burst (the sharpest ones). */
         const val KEEP_FRAMES = 6
         private const val GRAY_SCALE = 2
