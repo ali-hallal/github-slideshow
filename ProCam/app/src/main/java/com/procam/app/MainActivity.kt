@@ -576,7 +576,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) = startCamera()
             override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) = Unit
             override fun onSurfaceTextureDestroyed(surface: SurfaceTexture) = true
-            override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
+            override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = steadyFrame(surface.timestamp)
         }
 
         val gestures = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
@@ -1059,6 +1059,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             steady.maxShiftY = (SteadyZoom.MARGIN - 1f) / 2f * textureView.height
         }
         if (steady.active != on) {
+            steady.frameSynced = on && camera.timestampsMatchSensors
+            steadyMisses = 0
             steady.gain = if (c?.ois == true) SteadyZoom.OIS_GAIN else 1f
             steady.active = on
             mainHandler.removeCallbacks(steadyTune)
@@ -1070,6 +1072,27 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             applyPreviewCrop()
         }
     }
+
+    /**
+     * A new preview frame is on screen: place it by where the phone pointed when that very frame
+     * was taken (the middle of its read-out), so the steadying matches the picture shown.
+     */
+    private fun steadyFrame(frameNs: Long) {
+        if (!steady.active || !steady.frameSynced) return
+        val s = steady.shiftAt(frameNs + camera.frameSkewNs / 2)
+        if (s == null) {
+            // Frames that can't be found on the gyroscope's clock: steady by a typical delay instead.
+            if (++steadyMisses > STEADY_MAX_MISSES) steady.frameSynced = false
+            return
+        }
+        steadyMisses = 0
+        if (s.first == steadyDx && s.second == steadyDy) return
+        steadyDx = s.first
+        steadyDy = s.second
+        applyPreviewCrop()
+    }
+
+    private var steadyMisses = 0
 
     /**
      * With optical stabilisation, the lens already cancels most of the tremor: learn from its
@@ -3537,6 +3560,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         private const val PATH_STEPS = 24
         /** Lens shift is learnt against the gyroscope over this long before the photo. */
         private const val STEADY_TUNE_MS = 700L
+        private const val STEADY_MAX_MISSES = 30
         /** Last learnt viewfinder steadying share (for diagnostics and tests). */
         @Volatile var lastSteadyGain = 1f
         private const val OIS_CAL_NS = 1_500_000_000L

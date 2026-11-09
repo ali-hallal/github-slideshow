@@ -1124,6 +1124,24 @@ class ProCamTest {
     }
 
     @Test
+    fun steadyZoomPlacesEachFrameByWhenItWasTaken() {
+        // A ring of gyroscope readings every 5 ms (wrapped around): the turn is looked up at the
+        // moment a preview frame was taken, not at the latest reading.
+        val size = 8
+        val ts = LongArray(size)
+        val xs = FloatArray(size)
+        val ys = FloatArray(size)
+        var head = 0
+        for (k in 0 until 11) { ts[head] = k * 5_000_000L; xs[head] = k * 0.001f; ys[head] = -k * 0.002f; head = (head + 1) % size }
+        val mid = SteadyZoom.turnAt(ts, xs, ys, head, size, 32_500_000L)!!
+        assertEquals("between two readings", 0.0065f, mid.first, 1e-5f)
+        assertEquals(-0.013f, mid.second, 1e-5f)
+        assertEquals("just after the latest reading", 0.010f, SteadyZoom.turnAt(ts, xs, ys, head, size, 60_000_000L)!!.first, 1e-6f)
+        assertTrue("older than the history", SteadyZoom.turnAt(ts, xs, ys, head, size, 10_000_000L) == null)
+        assertTrue("another clock altogether", SteadyZoom.turnAt(ts, xs, ys, head, size, 5_000_000_000L) == null)
+    }
+
+    @Test
     fun steadyZoomFilterLetsPansThrough() {
         // Tremor: a short turn is held (cancelled on screen) ...
         var a = 0f to 0f

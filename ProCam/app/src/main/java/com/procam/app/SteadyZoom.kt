@@ -13,6 +13,12 @@ import kotlin.math.exp
  * shifted the opposite way by the same number of pixels, so the subject stays put. Slow,
  * deliberate movement (framing, panning) fades through after a moment.
  *
+ * The picture on screen is always a little old (the camera, then the screen, take some tens of
+ * milliseconds), and tremor changes direction several times a second: shifting an old picture
+ * by where the phone points *now* shakes it more, not less. So every preview frame is shifted
+ * by where the phone pointed at the moment that frame was taken ([shiftAt] with the frame's own
+ * timestamp); where frames can't be timed against the gyroscope, by a typical delay.
+ *
  * A lens with optical stabilisation already takes out most of the tremor by itself; cancelling
  * the whole turn again would make the picture wobble the other way, so only the part the lens
  * leaves ([gain]) is cancelled.
@@ -32,6 +38,7 @@ class SteadyZoom(context: Context, private val onShift: (Float, Float) -> Unit) 
             field = value
             ax = 0f
             ay = 0f
+            synchronized(ts) { n = 0 }
             if (!value) onShift(0f, 0f)
         }
     /** Radians per preview pixel at the current zoom. */
@@ -47,10 +54,30 @@ class SteadyZoom(context: Context, private val onShift: (Float, Float) -> Unit) 
     private var ay = 0f // accumulated yaw (around its y axis)
     private var last = 0L
 
+    /** Preview frames carry gyroscope-clock timestamps: the owner calls [shiftAt] for every frame. */
+    @Volatile var frameSynced = false
+
+    // Recent accumulated turns, for looking up where the phone pointed when a frame was taken.
+    private val ts = LongArray(HISTORY)
+    private val hx = FloatArray(HISTORY)
+    private val hy = FloatArray(HISTORY)
+    private var head = 0
+    private var n = 0
+
+    /**
+     * The preview shift (px) for a frame taken at [timeNs] (gyroscope clock). Null if that moment
+     * is not within the recent history (then the frame's clock is not the gyroscope's).
+     */
+    fun shiftAt(timeNs: Long): Pair<Float, Float>? {
+        if (!active || radPerPx <= 0f) return null
+        val (x, y) = synchronized(ts) { turnAt(ts, hx, hy, head, n, timeNs) } ?: return null
+        return shift(x, y, radPerPx, gain, maxShiftX, maxShiftY)
+    }
+
     val available get() = gyro != null
 
     fun start() {
-        gyro?.let { sensors?.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
+        gyro?.let { sensors?.registerListener(this, it, SAMPLE_US) }
     }
 
     fun stop() {
@@ -68,7 +95,16 @@ class SteadyZoom(context: Context, private val onShift: (Float, Float) -> Unit) 
         val (dx, dy) = step(ax, ay, e.values[0], e.values[1], dt)
         ax = dx
         ay = dy
-        val (sx, sy) = shift(ax, ay, radPerPx, gain, maxShiftX, maxShiftY)
+        synchronized(ts) {
+            ts[head] = t
+            hx[head] = ax
+            hy[head] = ay
+            head = (head + 1) % HISTORY
+            if (n < HISTORY) n++
+        }
+        if (frameSynced) return
+        // Frames can't be timed: assume the picture on screen is a typical delay old.
+        val (sx, sy) = shiftAt(t - TYPICAL_DELAY_NS) ?: return
         onShift(sx, sy)
     }
 
@@ -79,6 +115,38 @@ class SteadyZoom(context: Context, private val onShift: (Float, Float) -> Unit) 
         const val MARGIN = 1.12f
         /** Movement lasting longer than about this (s) is treated as deliberate and let through. */
         const val TAU = 0.6f
+
+        /** Gyroscope sampling (µs): 200 a second. */
+        const val SAMPLE_US = 5000
+        private const val HISTORY = 256
+        /** Age of the picture on screen where frames can't be timed. */
+        const val TYPICAL_DELAY_NS = 70_000_000L
+        /** A frame this much newer than the last gyroscope sample is not on the gyroscope's clock. */
+        private const val MAX_AHEAD_NS = 150_000_000L
+
+        /**
+         * The accumulated turn at [timeNs], from a ring of [n] samples ending before [head]
+         * (interpolated; the latest sample for a moment just after it). Null outside the history.
+         */
+        fun turnAt(ts: LongArray, xs: FloatArray, ys: FloatArray, head: Int, n: Int, timeNs: Long): Pair<Float, Float>? {
+            if (n == 0) return null
+            val size = ts.size
+            val newest = (head - 1 + size) % size
+            val oldest = (head - n + size) % size
+            if (timeNs < ts[oldest] || timeNs > ts[newest] + MAX_AHEAD_NS) return null
+            if (timeNs >= ts[newest]) return xs[newest] to ys[newest]
+            var i = newest
+            while (i != oldest) {
+                val prev = (i - 1 + size) % size
+                if (ts[prev] <= timeNs) {
+                    val span = (ts[i] - ts[prev]).coerceAtLeast(1L)
+                    val f = (timeNs - ts[prev]).toFloat() / span
+                    return (xs[prev] + (xs[i] - xs[prev]) * f) to (ys[prev] + (ys[i] - ys[prev]) * f)
+                }
+                i = prev
+            }
+            return xs[oldest] to ys[oldest]
+        }
 
         /** With optical stabilisation and no lens-shift reports: the lens is taken to remove 3/4 of the tremor. */
         const val OIS_GAIN = 0.25f
