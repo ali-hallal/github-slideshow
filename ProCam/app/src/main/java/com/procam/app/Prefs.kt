@@ -91,6 +91,20 @@ class Prefs(context: Context) {
     val forceShaky: Boolean get() = sp.getBoolean("forceShaky", false)
 
     /** Steady the viewfinder at high zoom. */
+    /** What the viewfinder steadying learnt about a lens ([SteadyLearner]): its matrix and clock. */
+    fun steadyModel(key: String): Pair<FloatArray, Int>? = try {
+        sp.getString("steadyModel:$key", null)?.split(',')?.takeIf { it.size == 5 }?.let { p ->
+            val m = FloatArray(4) { p[it].toFloat() }
+            val clock = p[4].toInt()
+            if (m.all { it.isFinite() } && clock in SteadyLearner.CLOCKS.indices) m to clock else null
+        }
+    } catch (_: Exception) {
+        null
+    }
+
+    fun setSteadyModel(key: String, model: FloatArray, clock: Int) =
+        sp.edit().putString("steadyModel:$key", model.joinToString(",") + ",$clock").apply()
+
     var steadyZoom: Boolean
         get() = sp.getBoolean("steadyZoom", true)
         set(v) = sp.edit().putBoolean("steadyZoom", v).apply()

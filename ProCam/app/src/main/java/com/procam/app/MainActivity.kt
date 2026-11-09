@@ -361,6 +361,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         locationTracker.stop()
         shake.stop()
         mainHandler.removeCallbacks(steadyTune)
+        saveSteadyModel()
         steady.stop()
         steady.active = false
         mainHandler.removeCallbacks(steadyTick)
@@ -576,7 +577,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) = startCamera()
             override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) = Unit
             override fun onSurfaceTextureDestroyed(surface: SurfaceTexture) = true
-            override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = steadyFrame(surface.timestamp)
+            override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = steadyFrame(surface)
         }
 
         val gestures = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
@@ -1041,7 +1042,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     /** Preview enlargement: super zoom, plus spare picture for steadying at high zoom. */
-    private fun previewScale() = extraCrop * if (steady.active) SteadyZoom.MARGIN else 1f
+    private fun previewScale() = extraCrop * if (steady.active) SteadyZoom.margin(displayZoom()) else 1f
 
     /** At high zoom (back camera, photos), steady the viewfinder against hand tremor. */
     private fun updateSteady() {
@@ -1054,13 +1055,24 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             // lens (~70°) if the camera doesn't report its focal length and sensor size.
             val focal = c!!.focalLength
             val across = if (focal != null && focal > 0f && c.sensorWidthMm > 0f) c.sensorWidthMm / focal else 1.2f
-            steady.radPerPx = across / (cameraZoom() * SteadyZoom.MARGIN) / longSide
-            steady.maxShiftX = (SteadyZoom.MARGIN - 1f) / 2f * textureView.width
-            steady.maxShiftY = (SteadyZoom.MARGIN - 1f) / 2f * textureView.height
+            val enlarged = extraCrop * SteadyZoom.margin(displayZoom())
+            steady.radPerPx = across / (settings.zoom * enlarged) / longSide
+            // The picture to spare at each edge (super zoom leaves more; the view never strays far).
+            val spare = ((enlarged - 1f) / 2f).coerceAtMost(STEADY_MAX_SPARE)
+            steady.maxShiftX = spare * textureView.width
+            steady.maxShiftY = spare * textureView.height
+            // What was learnt belongs to one lens: each has its own stabilisation and timing.
+            val key = "${c.id}@${opticalBase(settings.zoom)}"
+            if (key != steadyKey) {
+                saveSteadyModel()
+                steadyKey = key
+                steadyLearner = SteadyLearner().also { l -> prefs.steadyModel(key)?.let { l.restore(it.first, it.second) } }
+                steady.model = steadyLearner.model
+            }
         }
         if (steady.active != on) {
-            steady.frameSynced = on && camera.timestampsMatchSensors
-            steadyMisses = 0
+            steadyLearner.breakPair()
+            if (!on) saveSteadyModel()
             steady.gain = if (c?.ois == true) SteadyZoom.OIS_GAIN else 1f
             steady.active = on
             mainHandler.removeCallbacks(steadyTune)
@@ -1075,24 +1087,92 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
 
     /**
      * A new preview frame is on screen: place it by where the phone pointed when that very frame
-     * was taken (the middle of its read-out), so the steadying matches the picture shown.
+     * was taken, so the steadying matches the picture shown. When that was — by the frame's own
+     * timestamp or a delay before now — is what fits this phone best, as learnt from the picture.
      */
-    private fun steadyFrame(frameNs: Long) {
-        if (!steady.active || !steady.frameSynced) return
-        val s = steady.shiftAt(frameNs + camera.frameSkewNs / 2)
-        if (s == null) {
-            // Frames that can't be found on the gyroscope's clock: steady by a typical delay instead.
-            if (++steadyMisses > STEADY_MAX_MISSES) steady.frameSynced = false
-            return
+    private fun steadyFrame(surface: SurfaceTexture) {
+        if (!steady.active) return
+        val arrival = SystemClock.elapsedRealtimeNanos()
+        val stamp = surface.timestamp + camera.frameSkewNs / 2
+        val learner = steadyLearner
+        val clock = when {
+            learner.clock >= 0 -> learner.clock
+            camera.timestampsMatchSensors -> SteadyLearner.STAMP_CLOCK
+            else -> SteadyLearner.ARRIVAL_CLOCK
         }
-        steadyMisses = 0
-        if (s.first == steadyDx && s.second == steadyDy) return
-        steadyDx = s.first
-        steadyDy = s.second
-        applyPreviewCrop()
+        val s = steady.shiftAt(SteadyLearner.time(clock, stamp, arrival))
+            ?: steady.shiftAt(SteadyLearner.time(SteadyLearner.ARRIVAL_CLOCK, stamp, arrival))
+        if (s != null && (s.first != steadyDx || s.second != steadyDy)) {
+            steadyDx = s.first
+            steadyDy = s.second
+            applyPreviewCrop()
+        }
+        steadyLearn(learner, stamp, arrival)
     }
 
-    private var steadyMisses = 0
+    /**
+     * Learns how this phone's turns move its picture: a small copy of the frame just shown goes
+     * to the learner with what the gyroscope says about its moment. Every frame at first, then
+     * a pair of frames now and again to keep up (the lens, the light and the grip change).
+     */
+    private fun steadyLearn(learner: SteadyLearner, stamp: Long, arrival: Long) {
+        steadyFrames++
+        if (learner.model != null && learner.pairs >= STEADY_LEARN_PAIRS && steadyFrames % STEADY_KEEP_UP >= 2) return
+        if (SystemClock.uptimeMillis() - lastZoomChange < ZOOM_QUIET_MS || textureView.width == 0) {
+            learner.breakPair()
+            return
+        }
+        val w = SteadyLearner.COPY_WIDTH
+        val h = (w * textureView.height / textureView.width).coerceIn(32, 4 * w)
+        var bmp = steadyBitmap
+        if (bmp == null || bmp.width != w || bmp.height != h) {
+            bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            steadyBitmap = bmp
+            steadyPixels = IntArray(w * h)
+            steadyGray = arrayOf(IntArray(w * h), IntArray(w * h))
+        }
+        try {
+            // The frame as the camera gave it (without the enlargement and shift applied to the view).
+            textureView.getBitmap(bmp)
+        } catch (_: Exception) {
+            return
+        }
+        val px = steadyPixels
+        bmp.getPixels(px, 0, w, 0, 0, w, h)
+        val gray = steadyGray[steadyFrames and 1]
+        for (i in px.indices) {
+            val c = px[i]
+            gray[i] = (((c shr 16) and 0xff) + 2 * ((c shr 8) and 0xff) + (c and 0xff)) shr 2
+        }
+        val clocks = SteadyLearner.CLOCKS.size
+        val turns = FloatArray(2 * clocks)
+        for (k in 0 until clocks) {
+            val t = steady.turnAt(SteadyLearner.time(k, stamp, arrival))
+            turns[2 * k] = t?.first ?: Float.NaN
+            turns[2 * k + 1] = t?.second ?: Float.NaN
+        }
+        val scale = previewScale()
+        learner.add(SteadyLearner.Sample(gray, w, h, textureView.width.toFloat() / w * scale,
+            textureView.height.toFloat() / h * scale, steady.radPerPx, turns, arrival))
+        val m = learner.model
+        if (m !== steady.model) {
+            if (steady.model == null && m != null) Log.i(TAG, "steady zoom learnt: ${m.joinToString { "%.2f".format(it) }} clock ${learner.clock} after ${learner.pairs} pairs")
+            steady.model = m
+        }
+    }
+
+    private fun saveSteadyModel() {
+        val m = steadyLearner.model ?: return
+        val key = steadyKey ?: return
+        prefs.setSteadyModel(key, m, steadyLearner.clock)
+    }
+
+    private var steadyLearner = SteadyLearner()
+    private var steadyKey: String? = null
+    private var steadyFrames = 0
+    private var steadyBitmap: Bitmap? = null
+    private var steadyPixels = IntArray(0)
+    private var steadyGray = arrayOf(IntArray(0), IntArray(0))
 
     /**
      * With optical stabilisation, the lens already cancels most of the tremor: learn from its
@@ -3560,7 +3640,11 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         private const val PATH_STEPS = 24
         /** Lens shift is learnt against the gyroscope over this long before the photo. */
         private const val STEADY_TUNE_MS = 700L
-        private const val STEADY_MAX_MISSES = 30
+        /** Frame pairs learnt from before only looking now and again (2 frames in every [STEADY_KEEP_UP]). */
+        private const val STEADY_LEARN_PAIRS = 150
+        private const val STEADY_KEEP_UP = 6
+        /** The steadied view never strays further than this share of the screen. */
+        private const val STEADY_MAX_SPARE = 0.2f
         /** Last learnt viewfinder steadying share (for diagnostics and tests). */
         @Volatile var lastSteadyGain = 1f
         private const val OIS_CAL_NS = 1_500_000_000L

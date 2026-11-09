@@ -5,7 +5,10 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import kotlin.math.abs
 import kotlin.math.exp
+import kotlin.math.sign
+import kotlin.math.tanh
 
 /**
  * Steadies the viewfinder at high zoom. At 10× a hand tremor of a fraction of a degree throws
@@ -16,15 +19,13 @@ import kotlin.math.exp
  * The picture on screen is always a little old (the camera, then the screen, take some tens of
  * milliseconds), and tremor changes direction several times a second: shifting an old picture
  * by where the phone points *now* shakes it more, not less. So every preview frame is shifted
- * by where the phone pointed at the moment that frame was taken ([shiftAt] with the frame's own
- * timestamp); where frames can't be timed against the gyroscope, by a typical delay.
+ * by where the phone pointed at the moment that frame was taken ([shiftAt]).
  *
- * A lens with optical stabilisation already takes out most of the tremor by itself; cancelling
- * the whole turn again would make the picture wobble the other way, so only the part the lens
- * leaves ([gain]) is cancelled.
+ * How a turn moves the picture ([model]) differs between phones — a lens with optical
+ * stabilisation takes most of the tremor out by itself, for one. It starts from a sensible
+ * guess and is then learnt from the viewfinder itself ([SteadyLearner]).
  *
- * Phone held upright (portrait), back camera. The preview is enlarged by [MARGIN] so there is
- * picture to spare at the edges for the shift.
+ * The preview is enlarged by [margin] so there is picture to spare at the edges for the shift.
  */
 class SteadyZoom(context: Context, private val onShift: (Float, Float) -> Unit) : SensorEventListener {
 
@@ -38,6 +39,8 @@ class SteadyZoom(context: Context, private val onShift: (Float, Float) -> Unit) 
             field = value
             ax = 0f
             ay = 0f
+            rx = 0f
+            ry = 0f
             synchronized(ts) { n = 0 }
             if (!value) onShift(0f, 0f)
         }
@@ -47,20 +50,24 @@ class SteadyZoom(context: Context, private val onShift: (Float, Float) -> Unit) 
     var maxShiftX = 0f
     var maxShiftY = 0f
 
-    /** Share of the turn that reaches the picture (1 = no optical stabilisation). */
+    /** Share of the turn that reaches the picture (1 = no optical stabilisation): the guess until [model] is learnt. */
     @Volatile var gain = 1f
+    /** Learnt: picture movement per expected movement (m00, m01, m10, m11; see [SteadyLearner]). */
+    @Volatile var model: FloatArray? = null
 
     private var ax = 0f // accumulated pitch (around the phone's x axis), radians
     private var ay = 0f // accumulated yaw (around its y axis)
     private var last = 0L
 
-    /** Preview frames carry gyroscope-clock timestamps: the owner calls [shiftAt] for every frame. */
-    @Volatile var frameSynced = false
+    private var rx = 0f // the turn since steadying began, unfiltered (what the learner compares the picture with)
+    private var ry = 0f
 
     // Recent accumulated turns, for looking up where the phone pointed when a frame was taken.
     private val ts = LongArray(HISTORY)
     private val hx = FloatArray(HISTORY)
     private val hy = FloatArray(HISTORY)
+    private val hrx = FloatArray(HISTORY)
+    private val hry = FloatArray(HISTORY)
     private var head = 0
     private var n = 0
 
@@ -71,8 +78,13 @@ class SteadyZoom(context: Context, private val onShift: (Float, Float) -> Unit) 
     fun shiftAt(timeNs: Long): Pair<Float, Float>? {
         if (!active || radPerPx <= 0f) return null
         val (x, y) = synchronized(ts) { turnAt(ts, hx, hy, head, n, timeNs) } ?: return null
-        return shift(x, y, radPerPx, gain, maxShiftX, maxShiftY)
+        val m = model
+        return if (m == null) shift(x, y, radPerPx, gain, maxShiftX, maxShiftY) else shift(x, y, radPerPx, m, maxShiftX, maxShiftY)
     }
+
+    /** The unfiltered turn (rad) the phone had made by [timeNs]; null outside the recent history. */
+    fun turnAt(timeNs: Long): Pair<Float, Float>? =
+        if (!active) null else synchronized(ts) { turnAt(ts, hrx, hry, head, n, timeNs) }
 
     val available get() = gyro != null
 
@@ -95,32 +107,38 @@ class SteadyZoom(context: Context, private val onShift: (Float, Float) -> Unit) 
         val (dx, dy) = step(ax, ay, e.values[0], e.values[1], dt)
         ax = dx
         ay = dy
+        rx += e.values[0] * dt
+        ry += e.values[1] * dt
         synchronized(ts) {
             ts[head] = t
             hx[head] = ax
             hy[head] = ay
+            hrx[head] = rx
+            hry[head] = ry
             head = (head + 1) % HISTORY
             if (n < HISTORY) n++
         }
-        if (frameSynced) return
-        // Frames can't be timed: assume the picture on screen is a typical delay old.
-        val (sx, sy) = shiftAt(t - TYPICAL_DELAY_NS) ?: return
-        onShift(sx, sy)
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
 
     companion object {
-        /** Preview enlargement while steadying (spare picture for the shift). */
+        /** Preview enlargement while steadying (spare picture for the shift), at [MARGIN_FROM]× ... */
         const val MARGIN = 1.12f
+        /** ... growing to this by [MARGIN_TO]×: the same tremor is a larger part of a narrower view. */
+        const val MAX_MARGIN = 1.3f
+        const val MARGIN_FROM = 4f
+        const val MARGIN_TO = 16f
+
+        /** Preview enlargement while steadying at this zoom (as the user sees it). */
+        fun margin(zoom: Float): Float =
+            MARGIN + (MAX_MARGIN - MARGIN) * ((zoom - MARGIN_FROM) / (MARGIN_TO - MARGIN_FROM)).coerceIn(0f, 1f)
         /** Movement lasting longer than about this (s) is treated as deliberate and let through. */
         const val TAU = 0.6f
 
         /** Gyroscope sampling (µs): 200 a second. */
         const val SAMPLE_US = 5000
         private const val HISTORY = 256
-        /** Age of the picture on screen where frames can't be timed. */
-        const val TYPICAL_DELAY_NS = 70_000_000L
         /** A frame this much newer than the last gyroscope sample is not on the gyroscope's clock. */
         private const val MAX_AHEAD_NS = 150_000_000L
 
@@ -154,10 +172,28 @@ class SteadyZoom(context: Context, private val onShift: (Float, Float) -> Unit) 
         const val MIN_GAIN = 0.1f
 
         /** Preview shift (px) that cancels the accumulated turn, as far as the spare picture allows. */
-        fun shift(ax: Float, ay: Float, radPerPx: Float, gain: Float, maxX: Float, maxY: Float): Pair<Float, Float> = Pair(
-            (-ay * gain / radPerPx).coerceIn(-maxX, maxX),
-            (-ax * gain / radPerPx).coerceIn(-maxY, maxY),
+        fun shift(ax: Float, ay: Float, radPerPx: Float, gain: Float, maxX: Float, maxY: Float): Pair<Float, Float> =
+            shift(ax, ay, radPerPx, floatArrayOf(0f, gain, gain, 0f), maxX, maxY)
+
+        /** The same with a learnt [model] (picture movement per expected movement: m00, m01, m10, m11). */
+        fun shift(ax: Float, ay: Float, radPerPx: Float, model: FloatArray, maxX: Float, maxY: Float): Pair<Float, Float> = Pair(
+            soft(-(model[0] * ax + model[1] * ay) / radPerPx, maxX),
+            soft(-(model[2] * ax + model[3] * ay) / radPerPx, maxY),
         )
+
+        /**
+         * Limits a shift to the spare picture gently: exact for small shifts, easing off towards
+         * the limit, so the picture doesn't jerk when the spare picture runs out.
+         */
+        fun soft(v: Float, max: Float): Float {
+            if (max <= 0f) return 0f
+            val free = max * SOFT_FROM
+            val a = abs(v)
+            if (a <= free) return v
+            val room = max - free
+            return sign(v) * (free + room * tanh((a - free) / room))
+        }
+        private const val SOFT_FROM = 0.5f
 
         /**
          * One gyro sample: integrate the turn, then let it decay (a high-pass filter), so tremor is

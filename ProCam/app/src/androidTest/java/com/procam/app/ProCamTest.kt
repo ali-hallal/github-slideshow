@@ -33,6 +33,11 @@ import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.rule.GrantPermissionRule
 import org.junit.Assert.assertEquals
 import kotlin.math.abs
+import kotlin.math.PI
+import kotlin.math.hypot
+import kotlin.math.pow
+import kotlin.math.sin
+import kotlin.math.sqrt
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Assume.assumeTrue
@@ -1141,6 +1146,125 @@ class ProCamTest {
         assertTrue("another clock altogether", SteadyZoom.turnAt(ts, xs, ys, head, size, 5_000_000_000L) == null)
     }
 
+    /** A viewfinder frame of a fixed random texture, moved by (ox, oy) pixels. */
+    private fun steadyScene(w: Int, h: Int, ox: Float, oy: Float, rnd: java.util.Random): IntArray {
+        val size = 256
+        val tex = FloatArray(size * size)
+        val seed = java.util.Random(11)
+        val raw = FloatArray(size * size) { seed.nextFloat() * 255f }
+        for (y in 0 until size) for (x in 0 until size) {
+            var sum = 0f
+            for (j in -1..1) for (i in -1..1) sum += raw[((y + j + size) % size) * size + (x + i + size) % size]
+            tex[y * size + x] = sum / 9f
+        }
+        fun at(i: Int, j: Int) = tex[((j % size + size) % size) * size + (i % size + size) % size]
+        return IntArray(w * h) { k ->
+            val fx = k % w - ox + 60f
+            val fy = k / w - oy + 60f
+            val x0 = kotlin.math.floor(fx).toInt()
+            val y0 = kotlin.math.floor(fy).toInt()
+            val ax = fx - x0
+            val ay = fy - y0
+            val v = at(x0, y0) * (1 - ax) * (1 - ay) + at(x0 + 1, y0) * ax * (1 - ay) + at(x0, y0 + 1) * (1 - ax) * ay + at(x0 + 1, y0 + 1) * ax * ay
+            (v + rnd.nextGaussian().toFloat() * 2f).toInt().coerceIn(0, 255)
+        }
+    }
+
+    @Test
+    fun steadyZoomMeasuresHowFarThePictureMoved() {
+        val rnd = java.util.Random(3)
+        val w = 128
+        val h = 160
+        val a = steadyScene(w, h, 0f, 0f, rnd)
+        for ((ox, oy) in listOf(0f to 0f, 3f to -2f, -7.3f to 11.6f)) {
+            val d = SteadyLearner.measure(a, steadyScene(w, h, ox, oy, rnd), w, h)
+            assertTrue("moved $ox, $oy: ${d?.joinToString()}", d != null && abs(d[0] - ox) < 0.25f && abs(d[1] - oy) < 0.25f)
+        }
+        assertTrue("further than can be followed: no answer", SteadyLearner.measure(a, steadyScene(w, h, 30f, 0f, rnd), w, h) == null)
+        assertTrue("a blank wall: no answer", SteadyLearner.measure(IntArray(w * h) { 128 }, IntArray(w * h) { 128 }, w, h) == null)
+    }
+
+    /**
+     * The steadying must work on any phone: whatever share of the tremor the lens takes out,
+     * however old the picture is when shown, whichever way the axes run — learnt from the picture.
+     */
+    @Test
+    fun steadyZoomLearnsThePhoneFromThePicture() {
+        fun turn(tNs: Long): Pair<Float, Float> {
+            val t = tNs / 1e9
+            val x = 0.004 * sin(2 * PI * 0.5 * t + 1.0) + 0.0012 * sin(2 * PI * 4.3 * t + 2.0) + 0.0008 * sin(2 * PI * 8.1 * t + 0.3)
+            val y = 0.003 * sin(2 * PI * 0.7 * t + 0.5) + 0.0010 * sin(2 * PI * 5.1 * t + 4.0) + 0.0009 * sin(2 * PI * 7.3 * t + 5.0)
+            return x.toFloat() to y.toFloat()
+        }
+        // (what a turn really does to the picture, age of the picture on arrival, frames carry usable timestamps)
+        val phones = listOf(
+            Triple(floatArrayOf(0f, 1f, 1f, 0f), 85L, true),          // no stabilised lens
+            Triple(floatArrayOf(0f, 0.3f, 0.3f, 0f), 60L, true),      // the lens takes out 70 %
+            Triple(floatArrayOf(0f, 1f, 1f, 0f), 130L, false),        // slow pipeline, frames can't be timed
+            Triple(floatArrayOf(0.8f, 0.1f, -0.1f, -0.8f), 50L, false), // axes the other way round
+        )
+        val w = 128
+        val h = 160
+        val radPerPx = 5.4e-5f
+        val sx = 1080f / w
+        val sy = 1350f / h
+        for ((truth, lagMs, stamped) in phones) {
+            val rnd = java.util.Random(7)
+            val learner = SteadyLearner()
+            var raw = 0.0
+            var left = 0.0
+            var prevRaw: Pair<Float, Float>? = null
+            var prevLeft: Pair<Float, Float>? = null
+            for (f in 0 until 150) {
+                val taken = 1_000_000_000L + f * 33_333_333L
+                val (tx, ty) = turn(taken)
+                val dx = (truth[0] * tx + truth[1] * ty) / radPerPx
+                val dy = (truth[2] * tx + truth[3] * ty) / radPerPx
+                val arrival = taken + lagMs * 1_000_000L + (rnd.nextGaussian() * 3e6).toLong()
+                val stamp = taken - 10_000_000L // start of exposure
+                // Steady this frame with what is known so far (as the app does), and see what is left.
+                val m = learner.model ?: floatArrayOf(0f, 1f, 1f, 0f)
+                val clock = if (learner.clock >= 0) learner.clock else if (stamped) SteadyLearner.STAMP_CLOCK else SteadyLearner.ARRIVAL_CLOCK
+                val (ux, uy) = turn(SteadyLearner.time(clock, stamp, arrival))
+                val lx = dx - (m[0] * ux + m[1] * uy) / radPerPx
+                val ly = dy - (m[2] * ux + m[3] * uy) / radPerPx
+                if (f >= 90) {
+                    prevRaw?.let { raw += hypot(dx - it.first, dy - it.second).toDouble().pow(2) }
+                    prevLeft?.let { left += hypot(lx - it.first, ly - it.second).toDouble().pow(2) }
+                }
+                prevRaw = dx to dy
+                prevLeft = lx to ly
+                val turns = FloatArray(2 * SteadyLearner.CLOCKS.size) { i ->
+                    if (SteadyLearner.CLOCKS[i / 2].stamped && !stamped) Float.NaN
+                    else turn(SteadyLearner.time(i / 2, stamp, arrival)).let { if (i % 2 == 0) it.first else it.second }
+                }
+                learner.add(SteadyLearner.Sample(steadyScene(w, h, dx / sx, dy / sy, rnd), w, h, sx, sy, radPerPx, turns, arrival))
+            }
+            val m = learner.model
+            val what = "truth ${truth.joinToString()}, ${lagMs} ms old, stamped $stamped: learnt ${m?.joinToString()} clock ${learner.clock}"
+            assertTrue("learnt: $what", m != null && (0..3).all { abs(m[it] - truth[it]) < 0.12f })
+            assertEquals("frames timed by their own timestamps where they have them: $what", stamped, SteadyLearner.CLOCKS[learner.clock].stamped)
+            assertTrue("shake cut to under a third (${sqrt(raw)} -> ${sqrt(left)}): $what", left < raw / 9)
+        }
+        // A blank wall teaches nothing, and nothing is made up.
+        val blank = SteadyLearner()
+        for (f in 0 until 60) {
+            val t = 1_000_000_000L + f * 33_333_333L
+            val turns = FloatArray(2 * SteadyLearner.CLOCKS.size) { i -> turn(SteadyLearner.time(i / 2, t, t + 80_000_000L)).let { if (i % 2 == 0) it.first else it.second } }
+            blank.add(SteadyLearner.Sample(IntArray(w * h) { 128 }, w, h, sx, sy, radPerPx, turns, t + 80_000_000L))
+        }
+        assertTrue("nothing learnt from a blank wall", blank.model == null)
+        // Whatever is learnt, the picture is never thrown further than the phone turned.
+        val wild = floatArrayOf(0f, 5f, 5f, 0f)
+        SteadyLearner.limit(wild)
+        assertTrue("limited: ${wild.joinToString()}", wild[1] <= 1.31f)
+        // Shifts ease into the limit of the spare picture rather than hitting it.
+        assertEquals("small shifts exact", 20f, SteadyZoom.soft(20f, 100f), 0.001f)
+        assertTrue("eases off", SteadyZoom.soft(80f, 100f) in 60f..80f)
+        assertTrue("never past the spare picture", SteadyZoom.soft(-500f, 100f) >= -100f)
+        assertTrue("more spare picture at higher zoom", SteadyZoom.margin(20f) > SteadyZoom.margin(4f))
+    }
+
     @Test
     fun steadyZoomFilterLetsPansThrough() {
         // Tremor: a short turn is held (cancelled on screen) ...
@@ -1170,7 +1294,7 @@ class ProCamTest {
         }
         assertEquals("1×: no steadying", 1f, scale(), 0.01f)
         onView(withContentDescription("Zoom 5×")).perform(click())
-        waitFor("steadying at 5×") { abs(scale() - SteadyZoom.MARGIN) < 0.02f }
+        waitFor("steadying at 5×") { abs(scale() - SteadyZoom.margin(5f)) < 0.02f }
         onView(withContentDescription("Zoom 1×")).perform(click())
         waitFor("back to normal at 1×") { abs(scale() - 1f) < 0.01f }
     }
