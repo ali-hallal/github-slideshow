@@ -81,11 +81,69 @@ object Diagnostics {
                 }
                 appendLine("  faces mode ${caps.faceDetectMode} · face priority ${caps.facePriorityScene} · min focus ${caps.minFocusDistance}")
                 appendLine("  max JPEG ${maxSize(ImageFormat.JPEG)} · max YUV ${maxSize(ImageFormat.YUV_420_888)} · max RAW ${maxSize(ImageFormat.RAW_SENSOR)}")
+                append(fullSensor(c))
             } catch (e: Exception) {
                 appendLine("Camera $id: error ${e.message}")
             }
         }
+        append(hiddenCameras(manager))
     }
+
+    /**
+     * Can apps read the whole sensor? Many phones give other apps only the "binned" picture
+     * (a quarter or a sixteenth of the sensor's pixels) and keep the full sensor for their own
+     * camera — which is then far ahead at zoom. This lists what the phone offers.
+     */
+    private fun fullSensor(c: CameraCharacteristics): String = buildString {
+        val capabilities = c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: IntArray(0)
+        appendLine("  capabilities ${capabilities.sorted().joinToString(",")}")
+        appendLine("  pixel array ${c.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)} · active ${c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)}")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val ultra = capabilities.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR)
+            val remosaic = capabilities.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_REMOSAIC_REPROCESSING)
+            val full = try {
+                c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION)
+            } catch (e: Exception) {
+                null
+            }
+            fun most(fmt: Int) = try {
+                full?.getOutputSizes(fmt)?.maxByOrNull { it.width.toLong() * it.height }?.toString()
+            } catch (e: Exception) {
+                null
+            } ?: "-"
+            appendLine("  full sensor: offered=$ultra remosaic=$remosaic · pixel array ${c.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE_MAXIMUM_RESOLUTION)}" +
+                " · JPEG ${most(ImageFormat.JPEG)} · YUV ${most(ImageFormat.YUV_420_888)} · RAW ${most(ImageFormat.RAW_SENSOR)}" +
+                " · binning ${c.get(CameraCharacteristics.SENSOR_INFO_BINNING_FACTOR)}")
+        }
+        val keys = try {
+            c.keys.map { it.name }.filter { !it.startsWith("android.") }
+        } catch (e: Exception) {
+            emptyList()
+        }
+        if (keys.isNotEmpty()) appendLine("  maker's own settings (${keys.size}): ${keys.take(60).joinToString(" ")}")
+    }
+
+    /** Cameras the phone has but doesn't list (some makers keep full-sensor or extra lenses there). */
+    private fun hiddenCameras(manager: CameraManager): String = buildString {
+        val listed = manager.cameraIdList.toSet()
+        for (n in 0..HIDDEN_IDS) {
+            val id = n.toString()
+            if (id in listed) continue
+            try {
+                val c = manager.getCameraCharacteristics(id)
+                val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                fun most(fmt: Int) = map?.getOutputSizes(fmt)?.maxByOrNull { it.width.toLong() * it.height }?.toString() ?: "-"
+                val facing = if (c.get(CameraCharacteristics.LENS_FACING) == CameraMetadata.LENS_FACING_FRONT) "front" else "back"
+                appendLine("Unlisted camera $id: $facing · focal ${c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.joinToString()}" +
+                    " · pixel array ${c.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)}" +
+                    " · JPEG ${most(ImageFormat.JPEG)} · YUV ${most(ImageFormat.YUV_420_888)} · RAW ${most(ImageFormat.RAW_SENSOR)}")
+            } catch (e: Throwable) {
+                // Not a camera: the usual case.
+            }
+        }
+    }
+
+    private const val HIDDEN_IDS = 127
 
     /** This app's own recent log lines (apps may read their own logs). */
     private fun recentLog(): String = try {
