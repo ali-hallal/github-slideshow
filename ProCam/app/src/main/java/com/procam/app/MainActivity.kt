@@ -278,6 +278,14 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         goEdgeToEdge()
         bindViews()
 
+        // Photos that were still being made when the app last closed: into the gallery as they were.
+        if (!recoveredThisRun) {
+            recoveredThisRun = true
+            PendingShots.inBackground(this) { n ->
+                if (n > 0) runOnUiThread { toast(if (n == 1) "Recovered a photo that wasn't finished last time" else "Recovered $n photos that weren't finished last time") }
+            }
+        }
+
         prefs = Prefs(this)
         if (prefs.intent == "VIDEO") {
             // Video used to be one of the modes; it's now the PHOTO | VIDEO switch.
@@ -2652,11 +2660,13 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         }
         if (!groupProcessing) return
         groupStatus.text = "Picking the best shot…"
+        val held = PendingShots.hold(this, frames.firstOrNull(), mimeType)
         Thread {
             val pick = groupShutter.pickBest(frames)
             val ext = if (mimeType == "image/heic") "heic" else "jpg"
             val uri = MediaSaver.save(this, "${MediaSaver.newBaseName()}.$ext", mimeType, writer = { it.write(frames[pick.index]) })
             runOnUiThread {
+                PendingShots.release(held)
                 groupProcessing = false
                 capturing = false
                 shutter.busy = false
@@ -2701,6 +2711,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
 
     /** Super zoom from full-resolution JPEGs (phones without the fast stream). */
     private fun processSuperZoom(frames: List<ByteArray>, mimeType: String) {
+        val held = PendingShots.hold(this, frames.firstOrNull(), mimeType)
         val timingForZoom = camera.lastBurstTiming
         val roiSensor = subjectSensor()
         val native = zoomNativeCrop
@@ -2751,6 +2762,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 MediaSaver.save(this, "${MediaSaver.newBaseName()}.$ext", mimeType, writer = { it.write(frames.first()) })
             }
             runOnUiThread {
+                PendingShots.release(held)
                 enhanceDone(
                     uri, if (result != null) "image/jpeg" else mimeType,
                     when {
@@ -2776,6 +2788,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             return
         }
         val quality = prefs.jpegQuality
+        val held = PendingShots.hold(this, jpegs.firstOrNull(), "image/jpeg")
         zoomEnhancing = false
         releaseShutterForBackground()
         val roiSensor = subjectSensor()
@@ -2805,6 +2818,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 MediaSaver.save(this, "${MediaSaver.newBaseName()}.jpg", "image/jpeg", writer = { it.write(jpegs.first()) })
             }
             runOnUiThread {
+                PendingShots.release(held)
                 enhanceDone(uri, "image/jpeg",
                     if (result != null) "Zoom enhance · ${result.merged} $how shots merged for detail" else "Saved a single shot")
             }
@@ -2951,6 +2965,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     private fun processCloseup(frames: List<ByteArray>, mimeType: String) {
+        val held = PendingShots.hold(this, frames.firstOrNull(), mimeType)
         showGroupStatus("Making everything sharp…")
         val quality = prefs.jpegQuality
         Thread {
@@ -2972,6 +2987,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 afterWrite = if (result != null) { u -> MediaSaver.copyExif(this, u, source) } else null,
             )
             runOnUiThread {
+                PendingShots.release(held)
                 closeupProcessing = false
                 capturing = false
                 shutter.busy = false
@@ -3041,6 +3057,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     private fun processTrails(frames: List<ByteArray>, mimeType: String) {
+        val held = PendingShots.hold(this, frames.lastOrNull(), mimeType)
         mainHandler.removeCallbacks(trailsTick) // keep showing the last live result while the photo is made
         showGroupStatus("Stacking light trails…")
         val quality = prefs.jpegQuality
@@ -3063,6 +3080,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 afterWrite = if (result != null) { u -> MediaSaver.copyExif(this, u, source) } else null,
             )
             runOnUiThread {
+                PendingShots.release(held)
                 trailsProcessing = false
                 stopTrailsLive()
                 capturing = false
@@ -3083,6 +3101,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     private fun processClean(frames: List<ByteArray>, mimeType: String) {
+        val held = PendingShots.hold(this, frames.firstOrNull(), mimeType)
         showGroupStatus("Removing passers-by…")
         val quality = prefs.jpegQuality
         Thread {
@@ -3104,6 +3123,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 afterWrite = if (result != null) { u -> MediaSaver.copyExif(this, u, source) } else null,
             )
             runOnUiThread {
+                PendingShots.release(held)
                 cleanProcessing = false
                 capturing = false
                 shutter.busy = false
@@ -3174,6 +3194,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     private fun processNight(frames: List<ByteArray>, mimeType: String) {
+        val held = PendingShots.hold(this, frames.firstOrNull(), mimeType)
         val silky = mergeSilky
         val hdr = mergeHdrStops
         val indoor = mergeIndoor
@@ -3218,6 +3239,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 afterWrite = if (result != null) { u -> MediaSaver.copyExif(this, u, source) } else null,
             )
             runOnUiThread {
+                PendingShots.release(held)
                 nightProcessing = false
                 capturing = false
                 shutter.busy = false
@@ -3253,6 +3275,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     // ------------------------------------------------------------------ portrait
 
     private fun processPortrait(jpeg: ByteArray, mimeType: String) {
+        val held = PendingShots.hold(this, jpeg, mimeType)
         showGroupStatus("Creating portrait…")
         val strength = prefs.portraitStrength
         val quality = prefs.jpegQuality
@@ -3276,6 +3299,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 afterWrite = if (processed) { u -> MediaSaver.copyExif(this, u, jpeg) } else null,
             )
             runOnUiThread {
+                PendingShots.release(held)
                 portraitProcessing = false
                 capturing = false
                 shutter.busy = false
@@ -3757,6 +3781,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
 
     companion object {
         private const val TAG = "ProCam"
+        /** Unfinished photos are looked for once per run of the app. */
+        private var recoveredThisRun = false
         /** Photo modes in the order of the row (swiping across the viewfinder steps through them). */
         private val INTENT_ORDER = listOf("AUTO", "PORTRAIT", "NIGHT", "SILKY", "FREEZE", "GROUP", "CLEAN", "CLOSEUP", "TRAILS")
         private const val MODE_SWIPE_DP = 70

@@ -1303,6 +1303,29 @@ class ProCamTest {
         assertTrue("brightness untouched", px.indices.all { abs(lum(px[it]) - lum(f.px[it])) < 1.5 })
     }
 
+    /** A photo still being made when the app is closed is not lost: its plain shot turns up in the gallery. */
+    @Test
+    fun unfinishedPhotosAreRecovered() {
+        waitForCamera()
+        PendingShots.flush()
+        PendingShots.recover(context) // nothing left over from other tests
+        val before = count("image/jpeg")
+        val bmp = android.graphics.Bitmap.createBitmap(64, 48, android.graphics.Bitmap.Config.ARGB_8888)
+        val jpeg = java.io.ByteArrayOutputStream().also { bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, it) }.toByteArray()
+        // A photo that finishes: nothing to recover.
+        val done = PendingShots.hold(context, jpeg, "image/jpeg")
+        PendingShots.release(done)
+        PendingShots.flush()
+        assertEquals("finished photos leave nothing behind", 0, PendingShots.recover(context))
+        // A photo that never finishes (the app was closed): recovered at the next launch, once.
+        val held = PendingShots.hold(context, jpeg, "image/jpeg")
+        PendingShots.flush()
+        assertTrue("safety copy written", held!!.exists())
+        assertEquals(1, PendingShots.recover(context))
+        assertEquals("in the gallery", before + 1, count("image/jpeg"))
+        assertEquals("only once", 0, PendingShots.recover(context))
+    }
+
     /** Drag up on the viewfinder: brighter, with a badge that takes it back to automatic. */
     @Test
     fun dragOnViewfinderSetsBrightness() {
