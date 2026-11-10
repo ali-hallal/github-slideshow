@@ -498,6 +498,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         zoomDial = findViewById(R.id.zoomDial)
         infoRow = findViewById(R.id.infoRow)
         groupStatus = findViewById(R.id.groupStatus)
+        messageView = findViewById(R.id.message)
         intentScroll = findViewById(R.id.intentScroll)
         intentAuto = findViewById(R.id.intentAuto)
         intentGroup = findViewById(R.id.intentGroup)
@@ -589,6 +590,14 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 rememberTap(unzoomX(e.x), unzoomY(e.y))
                 showBadge("FOCUS POINT")
                 return true
+            }
+
+            /** Swipe sideways across the viewfinder: the next / previous mode, as on the phone's own camera. */
+            override fun onFling(e1: MotionEvent?, e2: MotionEvent, velocityX: Float, velocityY: Float): Boolean {
+                val dx = e2.x - (e1?.x ?: return false)
+                val dy = e2.y - e1.y
+                if (abs(dx) < MODE_SWIPE_DP * resources.displayMetrics.density || abs(dx) < 2 * abs(dy)) return false
+                return swipeMode(if (dx < 0) 1 else -1)
             }
 
             override fun onLongPress(e: MotionEvent) {
@@ -800,9 +809,41 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         haptic(intentRowView(intent), HapticFeedbackConstants.VIRTUAL_KEY)
         if (intent == "PORTRAIT") toast("Blurs the background · step back and use 2× for natural-looking faces")
         if (intent == "SILKY") toast("Turns moving water, clouds and lights into silky streaks · hold still or rest the phone")
+        hintShown = ""
         syncFreeze()
         syncVideo()
         refreshUi()
+    }
+
+    /** The next ([step] = 1) or previous (-1) photo mode, in the order of the row. */
+    private fun swipeMode(step: Int): Boolean {
+        if (prefs.uiPro || videoMode || looksOpen || recording || shutter.busy) return false
+        val at = INTENT_ORDER.indexOf(prefs.intent).coerceAtLeast(0)
+        val to = at + step
+        if (to !in INTENT_ORDER.indices) return false
+        setIntent(INTENT_ORDER[to])
+        return true
+    }
+
+    /** A mode in the row: the chosen one stands out, the rest stay quiet. */
+    private fun styleMode(v: TextView, on: Boolean) {
+        v.setBackgroundResource(if (on) R.drawable.mode_selected_bg else 0)
+        v.setTextColor(getColor(if (on) R.color.accent else R.color.mode_idle))
+        v.typeface = if (on) android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.BOLD) else android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+    }
+
+    /** The hint under the modes: shown when it changes, then it fades out of the way. */
+    private var hintShown = ""
+    private val fadeHint = Runnable { intentHint.animate().alpha(0f).setDuration(600).start() }
+
+    private fun showHint() {
+        val text = intentHint.text.toString()
+        if (text == hintShown) return
+        hintShown = text
+        intentHint.animate().cancel()
+        intentHint.alpha = 1f
+        mainHandler.removeCallbacks(fadeHint)
+        mainHandler.postDelayed(fadeHint, HINT_MS)
     }
 
     private fun intentRowView(intent: String) = when (intent) {
@@ -836,8 +877,9 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         show(infoRow, pro)
         show(btnRaw, pro)
         show(btnZebra, pro)
-        // Top-bar toggle: shows where it takes you.
-        btnMode.text = if (pro) "SIMPLE" else "PRO"
+        // Top-bar badge: filled while Pro is on.
+        btnMode.setBackgroundResource(if (pro) R.drawable.pro_badge_on_bg else R.drawable.pro_badge_bg)
+        btnMode.setTextColor(getColor(if (pro) R.color.black else R.color.white))
 
         val intent = prefs.intent
         for ((v, on) in listOf(
@@ -846,13 +888,21 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             intentFreeze to (intent == "FREEZE"), intentGroup to (intent == "GROUP"),
             intentClean to (intent == "CLEAN"), intentTrails to (intent == "TRAILS"),
             intentCloseup to (intent == "CLOSEUP"),
-        )) {
-            v.setBackgroundResource(if (on) R.drawable.pill_selected_bg else R.drawable.pill_bg)
-            v.setTextColor(getColor(if (on) R.color.black else R.color.white))
-        }
-        // Keep the selected intent in view (the row scrolls on narrow screens).
+        )) styleMode(v, on)
+        // The chosen mode sits in the middle of the row, as on the phone's own camera.
         val selectedPill = intentRowView(intent)
-        intentScroll.post { (intentScroll as android.widget.HorizontalScrollView).smoothScrollTo(maxOf(0, selectedPill.left - 60), 0) }
+        intentScroll.post {
+            val scroll = intentScroll as android.widget.HorizontalScrollView
+            val row = selectedPill.parent as View
+            val edge = (scroll.width / 2 - 36 * resources.displayMetrics.density).toInt().coerceAtLeast(0)
+            if (scroll.width > 0 && row.paddingStart != edge) {
+                row.setPaddingRelative(edge, 0, edge, 0)
+                // Laid out with the new padding first, then centred.
+                scroll.post { scroll.scrollTo(selectedPill.left + selectedPill.width / 2 - scroll.width / 2, 0) }
+            } else {
+                scroll.smoothScrollTo(selectedPill.left + selectedPill.width / 2 - scroll.width / 2, 0)
+            }
+        }
         // Portrait shows its blur selector in place of the hint line, keeping the panel short.
         val options = intent == "PORTRAIT" || intent == "SILKY"
         show(portraitRow, !pro && options)
@@ -901,6 +951,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             show(portraitRow, false)
             show(intentHint, false)
         }
+        showHint()
         shutter.video = videoMode
         shutter.recording = recording
         if (recording) {
@@ -909,7 +960,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             show(portraitRow, false)
         }
         // While recording: nothing that would stop or reopen the camera.
-        for (v in listOf(thumbnail, btnSwitch, btnMode, btnSettings, btnTimer, captureSwitch)) {
+        for (v in listOf(thumbnail, btnSwitch, btnMode.parent as View, btnSettings, btnTimer, captureSwitch)) {
             v.visibility = if (recording) View.INVISIBLE else View.VISIBLE
         }
     }
@@ -1847,8 +1898,9 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             shakeView.visibility = View.GONE
             return
         }
-        shakeView.visibility = View.VISIBLE
         val r = shakeRatio()
+        // Simple: only speaks up when the photo is at risk. Pro: always there.
+        shakeView.visibility = if (prefs.uiPro || r < 1f) View.VISIBLE else View.GONE
         val sharpTo = if (safe >= 1_000_000_000L) "sharp to 1s+" else "sharp to ${Stops.shutterLabel(safe)}"
         when {
             shake.omega < ShakeMeter.TRIPOD_OMEGA -> shakeView.show(5, ShakeView.GREEN, "Rock steady", "any shutter speed")
@@ -2117,10 +2169,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             kindTimelapse to (prefs.videoKind == OutputPrefs.VIDEO_TIMELAPSE),
             kindSlowmo to (prefs.videoKind == OutputPrefs.VIDEO_SLOWMO),
             kindLevel to (prefs.levelVideo && prefs.videoKind != OutputPrefs.VIDEO_SLOWMO),
-        )) {
-            v.setBackgroundResource(if (on) R.drawable.pill_selected_bg else R.drawable.pill_bg)
-            v.setTextColor(getColor(if (on) R.color.black else R.color.white))
-        }
+        )) styleMode(v, on)
         kindLevel.visibility = if (prefs.videoKind == OutputPrefs.VIDEO_SLOWMO) View.GONE else View.VISIBLE
     }
 
@@ -3490,13 +3539,24 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         val c = caps
         val pro = settings.manualExposure
 
-        btnFlash.text = if (c?.hasFlash == false) "NO FLASH" else settings.flash.label
+        val flash = if (c?.hasFlash == false) FlashMode.OFF else settings.flash
+        btnFlash.text = if (c?.hasFlash == false) "No flash" else flash.short
+        btnFlash.contentDescription = if (c?.hasFlash == false) "No flash" else "Flash: ${flash.short}"
+        btnFlash.setCompoundDrawablesRelativeWithIntrinsicBounds(0, when (flash) {
+            FlashMode.OFF -> R.drawable.ic_flash_off
+            FlashMode.AUTO -> R.drawable.ic_flash_auto
+            FlashMode.ON -> R.drawable.ic_flash_on
+            FlashMode.TORCH -> R.drawable.ic_torch
+        }, 0, 0)
+        setActive(btnFlash, flash != FlashMode.OFF)
         btnFlash.alpha = if (c?.hasFlash == false) 0.4f else 1f
-        btnTimer.text = if (prefs.timerSeconds == 0) "TIMER OFF" else "TIMER ${prefs.timerSeconds}s"
+        btnTimer.text = if (prefs.timerSeconds == 0) "Timer" else "${prefs.timerSeconds}s"
+        btnTimer.contentDescription = if (prefs.timerSeconds == 0) "Self-timer off" else "Self-timer ${prefs.timerSeconds} seconds"
+        setActive(btnTimer, prefs.timerSeconds != 0)
         setActive(btnRaw, settings.raw)
         btnRaw.alpha = if (c?.raw == true && !rawBlocked) 1f else 0.4f
         setActive(btnZebra, prefs.zebra != 0)
-        btnZebra.text = when (prefs.zebra) { 1 -> "ZEBRA 95"; 2 -> "ZEBRA 100"; else -> "ZEBRA" }
+        btnZebra.text = when (prefs.zebra) { 1 -> "Zebra 95"; 2 -> "Zebra 100"; else -> "Zebra" }
 
         setActive(modeAuto, !pro)
         setActive(modePro, pro)
@@ -3620,19 +3680,42 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     private fun setActive(v: TextView, active: Boolean) {
-        v.setTextColor(getColor(if (active) R.color.accent else R.color.white))
+        val color = getColor(if (active) R.color.accent else R.color.white)
+        v.setTextColor(color)
+        v.compoundDrawableTintList = android.content.res.ColorStateList.valueOf(color)
     }
 
     private fun haptic(v: View, type: Int) {
         if (prefs.haptics) v.performHapticFeedback(type)
     }
 
+    /** A short message in the viewfinder (a system toast would sit on top of the shutter button). */
     private fun toast(message: String) {
-        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+        if (!::messageView.isInitialized) {
+            Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+            return
+        }
+        messageView.text = message
+        messageView.animate().cancel()
+        messageView.alpha = 1f
+        messageView.visibility = View.VISIBLE
+        mainHandler.removeCallbacks(hideMessage)
+        mainHandler.postDelayed(hideMessage, MESSAGE_MS + 40L * message.length)
+    }
+
+    private lateinit var messageView: TextView
+    private val hideMessage = Runnable {
+        messageView.animate().alpha(0f).setDuration(250).withEndAction { messageView.visibility = View.GONE }.start()
     }
 
     companion object {
         private const val TAG = "ProCam"
+        /** Photo modes in the order of the row (swiping across the viewfinder steps through them). */
+        private val INTENT_ORDER = listOf("AUTO", "PORTRAIT", "NIGHT", "SILKY", "FREEZE", "GROUP", "CLEAN", "CLOSEUP", "TRAILS")
+        private const val MODE_SWIPE_DP = 70
+        /** The hint under the modes stays this long. */
+        private const val HINT_MS = 4000L
+        private const val MESSAGE_MS = 1800L
         private const val REQUEST_CAMERA = 1
         private const val REQUEST_AUDIO = 3
         private const val CLEAN_FRAMES = 7

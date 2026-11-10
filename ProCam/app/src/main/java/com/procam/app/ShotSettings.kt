@@ -12,11 +12,11 @@ import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
-enum class FlashMode(val label: String) {
-    OFF("FLASH OFF"),
-    AUTO("FLASH AUTO"),
-    ON("FLASH ON"),
-    TORCH("TORCH"),
+enum class FlashMode(val label: String, val short: String) {
+    OFF("FLASH OFF", "Off"),
+    AUTO("FLASH AUTO", "Auto"),
+    ON("FLASH ON", "On"),
+    TORCH("TORCH", "Torch"),
 }
 
 enum class WhiteBalance(val label: String, val awbMode: Int) {

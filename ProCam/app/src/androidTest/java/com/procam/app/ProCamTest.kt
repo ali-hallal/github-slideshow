@@ -169,9 +169,9 @@ class ProCamTest {
         waitForCamera()
         repeat(4) { onView(withId(R.id.btnFlash)).perform(click()) }
         onView(withId(R.id.btnZebra)).perform(click())
-        assertEquals("ZEBRA 95", text(R.id.btnZebra))
+        assertEquals("Zebra 95", text(R.id.btnZebra))
         onView(withId(R.id.btnTimer)).perform(click())
-        assertEquals("TIMER 3s", text(R.id.btnTimer))
+        assertEquals("3s", text(R.id.btnTimer))
         // 3 second self-timer.
         shootAndExpect("image/jpeg", timeoutMs = 20_000) { onView(withId(R.id.shutter)).perform(click()) }
     }
@@ -294,6 +294,7 @@ class ProCamTest {
     @Test
     fun shakeMeterShows() {
         waitForCamera()
+        setSimple(false) // in Simple it only appears when the photo is at risk
         val manager = context.getSystemService(android.hardware.SensorManager::class.java)
         assumeTrue("no gyroscope", manager.getDefaultSensor(android.hardware.Sensor.TYPE_GYROSCOPE) != null)
         waitFor("shake meter visible") {

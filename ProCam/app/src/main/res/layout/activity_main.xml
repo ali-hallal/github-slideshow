@@ -115,27 +115,44 @@
             android:paddingStart="4dp"
             android:paddingEnd="4dp">
 
-            <TextView android:id="@+id/btnFlash" style="@style/TopButton" />
-            <TextView android:id="@+id/btnTimer" style="@style/TopButton" />
-            <TextView android:id="@+id/btnRaw" style="@style/TopButton" android:text="RAW" />
-            <TextView android:id="@+id/btnZebra" style="@style/TopButton" android:text="ZEBRA" />
+            <TextView android:id="@+id/btnFlash" style="@style/TopButton" android:drawableTop="@drawable/ic_flash_off" />
+            <TextView android:id="@+id/btnTimer" style="@style/TopButton" android:drawableTop="@drawable/ic_timer" />
+            <TextView android:id="@+id/btnRaw" style="@style/TopButton" android:layout_height="match_parent" android:letterSpacing="0.08" android:text="RAW" android:textSize="12sp" />
+            <TextView android:id="@+id/btnZebra" style="@style/TopButton" android:drawableTop="@drawable/ic_zebra" android:text="Zebra" />
             <TextView
                 android:id="@+id/btnLook"
                 style="@style/TopButton"
                 android:contentDescription="Looks (filters)"
-                android:text="LOOK" />
-            <TextView
-                android:id="@+id/btnMode"
-                style="@style/TopButton"
-                android:contentDescription="Switch between Simple and Pro"
-                android:text="PRO" />
+                android:drawableTop="@drawable/ic_looks"
+                android:text="Looks" />
+            <!-- A badge: outlined in Simple, filled while Pro is on. -->
+            <FrameLayout
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1">
+
+                <TextView
+                    android:id="@+id/btnMode"
+                    android:layout_width="wrap_content"
+                    android:layout_height="26dp"
+                    android:layout_gravity="center"
+                    android:background="@drawable/pro_badge_bg"
+                    android:contentDescription="Switch between Simple and Pro"
+                    android:fontFamily="sans-serif-medium"
+                    android:gravity="center"
+                    android:letterSpacing="0.08"
+                    android:paddingStart="9dp"
+                    android:paddingEnd="9dp"
+                    android:text="PRO"
+                    android:textColor="@color/white"
+                    android:textSize="12sp" />
+            </FrameLayout>
             <TextView
                 android:id="@+id/btnSettings"
                 style="@style/TopButton"
-                android:layout_weight="0.6"
                 android:contentDescription="Settings"
-                android:text="⚙"
-                android:textSize="18sp" />
+                android:drawableTop="@drawable/ic_settings"
+                android:text="Settings" />
         </LinearLayout>
 
         <LinearLayout
@@ -259,6 +276,26 @@
             android:textColor="@color/white"
             android:textSize="14sp"
             android:visibility="gone" />
+
+        <!-- Short messages ("RAW + JPEG", "Zebra off"): in the viewfinder, never over the shutter. -->
+        <TextView
+            android:id="@+id/message"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginStart="24dp"
+            android:layout_marginTop="8dp"
+            android:layout_marginEnd="24dp"
+            android:background="@drawable/info_bg"
+            android:fontFamily="sans-serif-medium"
+            android:gravity="center"
+            android:paddingStart="14dp"
+            android:paddingTop="7dp"
+            android:paddingEnd="14dp"
+            android:paddingBottom="7dp"
+            android:textColor="@color/white"
+            android:textSize="14sp"
+            android:visibility="gone" />
     </LinearLayout>
 
     <!-- Bottom: parameter slider, parameter chips, mode switch, shutter row -->
@@ -277,7 +314,9 @@
             android:id="@+id/intentScroll"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:fadingEdgeLength="48dp"
             android:fillViewport="true"
+            android:requiresFadingEdge="horizontal"
             android:scrollbars="none">
 
             <LinearLayout
@@ -532,12 +571,8 @@
                 android:layout_height="52dp"
                 android:layout_gravity="end|center_vertical"
                 android:layout_marginEnd="36dp"
-                android:background="@drawable/circle_bg"
-                android:contentDescription="@string/switch_camera"
-                android:gravity="center"
-                android:text="⟲"
-                android:textColor="@color/white"
-                android:textSize="26sp" />
+                android:background="@drawable/switch_bg"
+                android:contentDescription="@string/switch_camera" />
         </FrameLayout>
     </LinearLayout>
 </FrameLayout>
