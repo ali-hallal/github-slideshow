@@ -1265,6 +1265,43 @@ class ProCamTest {
         assertTrue("more spare picture at higher zoom", SteadyZoom.margin(20f) > SteadyZoom.margin(4f))
     }
 
+    /** A dim zoom shot must not be pushed to the sensor's grainiest setting; what grain there is, is cleaned. */
+    @Test
+    fun superZoomKeepsGrainInCheck() {
+        val isoR = android.util.Range(50, 16000)
+        val expR = android.util.Range(100_000L, 16_000_000_000L)
+        // Dim scene (auto: ISO 1600, 1/16 s), shaky at high zoom (safe 1/160 s): two stops faster, not ISO 16000.
+        val (iso, exp) = SuperZoomProcessor.plan(1600, 62_500_000L, 9_000_000L, isoR, expR)
+        assertEquals("sensitivity capped", SuperZoomProcessor.MAX_PLAN_ISO, iso)
+        assertEquals("same brightness", 1600.0 * 62_500_000L, iso.toDouble() * exp, 1600.0 * 62_500_000L * 0.02)
+        // Bright scene: nothing to raise.
+        assertEquals(100, SuperZoomProcessor.plan(100, 2_000_000L, 9_000_000L, isoR, expR).first)
+        // Colour speckle goes, brightness detail stays.
+        val rnd = java.util.Random(1)
+        val w = 201
+        val h = 151
+        val px = IntArray(w * h) { i ->
+            val base = if (i % w < w / 2) 60 else 180
+            fun n() = (base + rnd.nextGaussian() * 25).toInt().coerceIn(0, 255)
+            (0xFF shl 24) or (n() shl 16) or (n() shl 8) or n()
+        }
+        fun lum(v: Int) = 0.299 * ((v shr 16) and 255) + 0.587 * ((v shr 8) and 255) + 0.114 * (v and 255)
+        fun speckle(p: IntArray): Double {
+            var sum = 0.0
+            var k = 0
+            for (y in 10 until h - 10) for (x in 10 until w / 2 - 10) {
+                val v = p[y * w + x]
+                sum += (((v shr 16) and 255) - lum(v)).pow(2) + ((v and 255) - lum(v)).pow(2)
+                k++
+            }
+            return sqrt(sum / k)
+        }
+        val f = SuperRes.Frame(px.copyOf(), w, h)
+        SuperRes.smoothChroma(f, 3)
+        assertTrue("colour speckle removed: ${speckle(px)} -> ${speckle(f.px)}", speckle(f.px) < speckle(px) / 5)
+        assertTrue("brightness untouched", px.indices.all { abs(lum(px[it]) - lum(f.px[it])) < 1.5 })
+    }
+
     @Test
     fun steadyZoomFilterLetsPansThrough() {
         // Tremor: a short turn is held (cancelled on screen) ...

@@ -9,6 +9,7 @@ import android.util.Log
 import androidx.exifinterface.media.ExifInterface
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -30,7 +31,7 @@ class SuperZoomProcessor {
      * @param crop how much further than the camera's own zoom (e.g. 3 = the centre third).
      * Blocking: call off the main thread.
      */
-    fun process(frames: List<ByteArray>, crop: Float, quality: Int, ai: AiUpscaler? = null, maxScale: Float = MAX_SCALE): Result {
+    fun process(frames: List<ByteArray>, crop: Float, quality: Int, ai: AiUpscaler? = null, maxScale: Float = MAX_SCALE, iso: Int? = null): Result {
         require(frames.isNotEmpty())
         val rotation = exifRotation(frames.first())
         // 1. Full-resolution centre crops.
@@ -44,14 +45,16 @@ class SuperZoomProcessor {
             }
         }
         require(crops.isNotEmpty()) { "could not decode any frame" }
-        return processFrames(crops, rotation, quality, frames.size, ai, maxScale)
+        return processFrames(crops, rotation, quality, frames.size, ai, maxScale, iso)
     }
 
     /**
      * The merge itself, from frames already cropped and converted to pixels (fast bursts arrive
-     * like this). [rotation] = clockwise degrees to make the result upright.
+     * like this). [rotation] = clockwise degrees to make the result upright. [iso] = the
+     * sensitivity the burst was shot at: the grainier the shots, the more colour speckle is
+     * smoothed away and the less the grain is sharpened.
      */
-    fun processFrames(crops: List<SuperRes.Frame>, rotation: Int, quality: Int, taken: Int = crops.size, ai: AiUpscaler? = null, maxScale: Float = MAX_SCALE): Result {
+    fun processFrames(crops: List<SuperRes.Frame>, rotation: Int, quality: Int, taken: Int = crops.size, ai: AiUpscaler? = null, maxScale: Float = MAX_SCALE, iso: Int? = null): Result {
         require(crops.isNotEmpty())
         val t0 = android.os.SystemClock.uptimeMillis()
         val w0 = crops[0].w
@@ -84,7 +87,10 @@ class SuperZoomProcessor {
             merged = KernelMerge.merge(frames, offsets, scale)
         }
         val t3 = android.os.SystemClock.uptimeMillis()
-        if (ai == null) SuperRes.sharpen(merged)
+        // Grain: 0 at ISO 400 and below, +1 for every doubling.
+        val grain = if (iso == null) 0f else (ln(iso / 400f) / ln(2f)).coerceIn(0f, 5f)
+        if (grain > 0f) SuperRes.smoothChroma(merged, (1 + grain).roundToInt())
+        if (ai == null) SuperRes.sharpen(merged, amount = (1.2f - 0.15f * grain).coerceAtLeast(0.5f), noiseFloor = 2f + 2f * grain)
         val t4 = android.os.SystemClock.uptimeMillis()
 
         var out = Bitmap.createBitmap(merged.px, merged.w, merged.h, Bitmap.Config.ARGB_8888)
@@ -168,6 +174,10 @@ class SuperZoomProcessor {
         /** Frames merged out of the burst (the sharpest ones). */
         const val KEEP_FRAMES = 6
         private const val GRAY_SCALE = 2
+        /** A super-zoom burst raises the sensitivity at most this many times over what auto exposure chose ... */
+        private const val MAX_ISO_BOOST = 4
+        /** ... and never past this (unless auto exposure itself is already there). */
+        const val MAX_PLAN_ISO = 3200
 
         /**
          * Exposure for a super-zoom burst: a shutter fast enough to freeze hand shake at this
@@ -180,8 +190,11 @@ class SuperZoomProcessor {
             val product = aeIso.toDouble() * aeExposureNs
             var t = min(aeExposureNs, (safeShutterNs * 0.7).toLong()).coerceIn(exposureRange.lower, exposureRange.upper)
             var iso = (product / t).roundToInt()
-            if (iso > isoRange.upper) {
-                iso = isoRange.upper
+            // Sensitivity can't be raised without limit: past a couple of stops the grain costs
+            // more detail than the faster shutter saves (and the merge only removes so much).
+            val most = max(aeIso, minOf(isoRange.upper, aeIso * MAX_ISO_BOOST, MAX_PLAN_ISO))
+            if (iso > most) {
+                iso = most
                 t = (product / iso).toLong().coerceIn(exposureRange.lower, exposureRange.upper)
             }
             return Pair(iso.coerceIn(isoRange.lower, isoRange.upper), t)

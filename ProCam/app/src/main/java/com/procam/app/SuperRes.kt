@@ -429,6 +429,64 @@ object SuperRes {
     }
 
     /**
+     * Removes colour speckle (the red/green/blue blotches of a high-ISO photo) without touching
+     * brightness detail: colour is averaged over [radius] half-size pixels, luminance is kept.
+     */
+    fun smoothChroma(f: Frame, radius: Int) {
+        if (radius <= 0) return
+        val w = f.w
+        val h = f.h
+        val px = f.px
+        val hw = (w + 1) / 2
+        val hh = (h + 1) / 2
+        val cb = FloatArray(hw * hh)
+        val cr = FloatArray(hw * hh)
+        val cnt = IntArray(hw * hh)
+        for (y in 0 until h) {
+            val o = (y / 2) * hw
+            for (x in 0 until w) {
+                val c = px[y * w + x]
+                val r = (c shr 16) and 0xFF
+                val g = (c shr 8) and 0xFF
+                val b = c and 0xFF
+                val lum = 0.299f * r + 0.587f * g + 0.114f * b
+                val i = o + x / 2
+                cb[i] += b - lum
+                cr[i] += r - lum
+                cnt[i]++
+            }
+        }
+        for (i in cb.indices) if (cnt[i] > 1) { cb[i] /= cnt[i]; cr[i] /= cnt[i] }
+        repeat(2) {
+            PortraitProcessor.boxBlur(cb, hw, hh, radius)
+            PortraitProcessor.boxBlur(cr, hw, hh, radius)
+        }
+        for (y in 0 until h) {
+            // Bilinear between the half-size colour samples (centred on pixel pairs).
+            val fy = ((y - 0.5f) / 2f).coerceIn(0f, hh - 1f)
+            val y0 = fy.toInt()
+            val y1 = kotlin.math.min(y0 + 1, hh - 1)
+            val ay = fy - y0
+            for (x in 0 until w) {
+                val fx = ((x - 0.5f) / 2f).coerceIn(0f, hw - 1f)
+                val x0 = fx.toInt()
+                val x1 = kotlin.math.min(x0 + 1, hw - 1)
+                val ax = fx - x0
+                val i00 = y0 * hw + x0; val i01 = y0 * hw + x1; val i10 = y1 * hw + x0; val i11 = y1 * hw + x1
+                val nb = (cb[i00] * (1 - ax) + cb[i01] * ax) * (1 - ay) + (cb[i10] * (1 - ax) + cb[i11] * ax) * ay
+                val nr = (cr[i00] * (1 - ax) + cr[i01] * ax) * (1 - ay) + (cr[i10] * (1 - ax) + cr[i11] * ax) * ay
+                val c = px[y * w + x]
+                val lum = 0.299f * ((c shr 16) and 0xFF) + 0.587f * ((c shr 8) and 0xFF) + 0.114f * (c and 0xFF)
+                val r = lum + nr
+                val b = lum + nb
+                val g = (lum - 0.299f * r - 0.114f * b) / 0.587f
+                px[y * w + x] = (c and (0xFF shl 24)) or
+                    ((r + 0.5f).toInt().coerceIn(0, 255) shl 16) or ((g + 0.5f).toInt().coerceIn(0, 255) shl 8) or (b + 0.5f).toInt().coerceIn(0, 255)
+            }
+        }
+    }
+
+    /**
      * Edge-aware sharpening: an unsharp mask that ignores tiny differences (noise), and is
      * clamped to the local min/max so edges get crisper without bright/dark halos.
      * Processes one colour channel at a time to keep memory low.

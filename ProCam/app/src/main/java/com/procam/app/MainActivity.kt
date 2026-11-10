@@ -995,6 +995,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
 
     /** Native-pixel zoom of the current zoom shot: how much the app crops the lens's own view (null = camera zoom). */
     private var zoomNativeCrop: Float? = null
+    /** Sensitivity of the current zoom shot's burst (how grainy its frames are). */
+    private var zoomShotIso: Int? = null
 
     /** The lens's own zoom for [zoom]: the largest physical lens stop at or below it (1× on single-lens phones). */
     private fun opticalBase(zoom: Float): Float {
@@ -1411,7 +1413,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             val exposure = if (c != null && c.manualSensor && isoR != null && expR != null && liveIso != null && liveExposure != null) {
                 SuperZoomProcessor.plan(liveIso!!, liveExposure!!, safeShutterNs() ?: liveExposure!!, isoR, expR)
             } else null
-            exposure?.let { Log.i(TAG, "super zoom plan: ISO ${it.first} ${Stops.shutterLabel(it.second)}") }
+            exposure?.let { Log.i(TAG, "super zoom plan: ISO ${it.first} ${Stops.shutterLabel(it.second)} (auto: ISO $liveIso ${liveExposure?.let { e -> Stops.shutterLabel(e) }})") }
+            zoomShotIso = exposure?.first ?: liveIso
             // Native-pixel zoom: shoot at the lens's own zoom and crop here, so the merge works on
             // real sensor pixels (the camera's digital zoom would stretch every shot first).
             val base = opticalBase(settings.zoom)
@@ -1426,7 +1429,9 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 camera.takeRawZoomBurst(deviceOrientation, zoomBurstFrames(), exposure)
             } else {
                 // Full-resolution JPEG shots (video-size frames would be faster but lose detail).
-                camera.takeBurst(deviceOrientation, zoomBurstFrames(), toMemory = true, exposure = exposure, minimalProcessing = true,
+                camera.takeBurst(deviceOrientation, zoomBurstFrames(), toMemory = true, exposure = exposure,
+                    // The merge does its own noise handling, but not enough for a very grainy burst.
+                    minimalProcessing = (zoomShotIso ?: 0) <= ZOOM_OWN_PROCESSING_ISO,
                     zoomOverride = zoomNativeCrop?.let { base })
             }
         } else {
@@ -2604,6 +2609,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         val roiSensor = subjectSensor()
         val native = zoomNativeCrop
         zoomNativeCrop = null
+        val shotIso = zoomShotIso
         val crop = native ?: extraCrop
         val superCrop = extraCrop
         val quality = prefs.jpegQuality
@@ -2619,8 +2625,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 val burst = keepSteady(frames.drop(skip), timing.drop(skip), minKeep = 3)
                 when {
                     enhance -> superZoom.enhance(burst, quality, roi = subjectForJpeg(burst.firstOrNull(), roiSensor))
-                    aiFor(superCrop) -> superZoom.process(burst, crop, quality, ai = aiUpscaler())
-                    else -> superZoom.process(burst, crop, quality)
+                    aiFor(superCrop) -> superZoom.process(burst, crop, quality, ai = aiUpscaler(), iso = shotIso)
+                    else -> superZoom.process(burst, crop, quality, iso = shotIso)
                 }
             } catch (e: Throwable) {
                 Log.e(TAG, "super zoom failed", e)
@@ -2787,12 +2793,13 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         }
         val quality = prefs.jpegQuality
         val loc = lastLocation
+        val shotIso = zoomShotIso
         releaseShutterForBackground()
         enhancer.execute {
             val t0 = SystemClock.uptimeMillis()
             val result = try {
                 // The first frame of a burst can predate the burst's settings: skip it.
-                superZoom.processFrames(if (frames.size > 3) frames.drop(1) else frames, rotationDegrees, quality)
+                superZoom.processFrames(if (frames.size > 3) frames.drop(1) else frames, rotationDegrees, quality, iso = shotIso)
             } catch (e: Throwable) {
                 Log.e(TAG, "super zoom failed", e)
                 null
@@ -3705,6 +3712,8 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         /** Native-pixel zoom from this much crop of the lens's own view (below, the camera's zoom is as good). */
         /** How the last zoom shot was taken (diagnostics, tests). */
         @Volatile var lastZoomShot = ""
+        /** Up to this ISO a zoom burst is shot with the camera's own noise reduction and sharpening off. */
+        private const val ZOOM_OWN_PROCESSING_ISO = 800
         private const val NATIVE_MIN_CROP = 1.2f
         /** ...and up to this much (a smaller crop has too few real pixels to rebuild a full photo from). */
         private const val NATIVE_MAX_CROP = 4f
