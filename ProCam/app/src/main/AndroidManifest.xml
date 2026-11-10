@@ -10,6 +10,8 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Lets a photo that is still being made finish if the app is left meanwhile. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-feature android:name="android.hardware.location" android:required="false" />
 
     <application
@@ -47,5 +49,9 @@
             android:name=".SettingsActivity"
             android:exported="false"
             android:screenOrientation="portrait" />
+        <service
+            android:name=".FinishingService"
+            android:exported="false"
+            android:foregroundServiceType="shortService" />
     </application>
 </manifest>

@@ -1324,6 +1324,12 @@ class ProCamTest {
         assertEquals(1, PendingShots.recover(context))
         assertEquals("in the gallery", before + 1, count("image/jpeg"))
         assertEquals("only once", 0, PendingShots.recover(context))
+        // While a photo is being made the app is kept alive, and let go when it is done.
+        waitFor("nothing in the making") { FinishingService.active == 0 }
+        FinishingService.begin(context)
+        assertEquals(1, FinishingService.active)
+        FinishingService.end()
+        assertEquals(0, FinishingService.active)
     }
 
     /** Drag up on the viewfinder: brighter, with a badge that takes it back to automatic. */

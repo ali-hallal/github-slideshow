@@ -2103,6 +2103,60 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         loadThumbnail(uri)
     }
 
+    /** Photos being made right now (their plain shot is on the thumbnail, with the ring around it). */
+    private var shotsInTheMaking = 0
+
+    /**
+     * A burst has arrived and its photo will take a moment to make: keep a safety copy
+     * ([PendingShots]) and show the shot on the thumbnail at once, as the phone's own camera does.
+     * [crop] = the middle part that was framed (super zoom).
+     */
+    private fun holdShot(frame: ByteArray?, mimeType: String, crop: Float = 1f): java.io.File? {
+        val held = PendingShots.hold(this, frame, mimeType)
+        if (frame == null) return held
+        FinishingService.begin(this)
+        shotsInTheMaking++
+        thumbProgress.visibility = View.VISIBLE
+        Thread {
+            val bmp = try {
+                previewOf(frame, crop)
+            } catch (e: Throwable) {
+                null
+            }
+            runOnUiThread {
+                // Unless the finished photo got there first.
+                if (bmp != null && shotsInTheMaking > 0) thumbnail.setImageBitmap(bmp)
+            }
+        }.start()
+        return held
+    }
+
+    /** The photo is saved (or given up on): its safety copy can go. */
+    private fun shotDone(held: java.io.File?) {
+        if (held == null) return
+        PendingShots.release(held)
+        FinishingService.end()
+        if (shotsInTheMaking > 0) shotsInTheMaking--
+        if (shotsInTheMaking == 0 && pendingEnhance == 0 && pendingLooks == 0) thumbProgress.visibility = View.GONE
+    }
+
+    /** A small upright picture of a shot, for the thumbnail. */
+    private fun previewOf(jpeg: ByteArray, crop: Float): Bitmap? {
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, bounds)
+        val shown = maxOf(bounds.outWidth, bounds.outHeight) / crop.coerceAtLeast(1f)
+        var sample = 1
+        while (shown / (sample * 2) >= 200) sample *= 2
+        var bmp = android.graphics.BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }) ?: return null
+        if (crop > 1.01f) {
+            val w = (bmp.width / crop).toInt().coerceAtLeast(1)
+            val h = (bmp.height / crop).toInt().coerceAtLeast(1)
+            bmp = Bitmap.createBitmap(bmp, (bmp.width - w) / 2, (bmp.height - h) / 2, w, h)
+        }
+        val turn = SuperZoomProcessor.exifRotation(jpeg)
+        return if (turn == 0) bmp else Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, Matrix().apply { postRotate(turn.toFloat()) }, true)
+    }
+
     private fun loadThumbnail(uri: Uri) {
         Thread {
             val bmp = try {
@@ -2660,13 +2714,13 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         }
         if (!groupProcessing) return
         groupStatus.text = "Picking the best shot…"
-        val held = PendingShots.hold(this, frames.firstOrNull(), mimeType)
+        val held = holdShot(frames.firstOrNull(), mimeType)
         Thread {
             val pick = groupShutter.pickBest(frames)
             val ext = if (mimeType == "image/heic") "heic" else "jpg"
             val uri = MediaSaver.save(this, "${MediaSaver.newBaseName()}.$ext", mimeType, writer = { it.write(frames[pick.index]) })
             runOnUiThread {
-                PendingShots.release(held)
+                shotDone(held)
                 groupProcessing = false
                 capturing = false
                 shutter.busy = false
@@ -2711,7 +2765,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
 
     /** Super zoom from full-resolution JPEGs (phones without the fast stream). */
     private fun processSuperZoom(frames: List<ByteArray>, mimeType: String) {
-        val held = PendingShots.hold(this, frames.firstOrNull(), mimeType)
+        val held = holdShot(frames.firstOrNull(), mimeType, crop = zoomNativeCrop ?: extraCrop)
         val timingForZoom = camera.lastBurstTiming
         val roiSensor = subjectSensor()
         val native = zoomNativeCrop
@@ -2762,7 +2816,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 MediaSaver.save(this, "${MediaSaver.newBaseName()}.$ext", mimeType, writer = { it.write(frames.first()) })
             }
             runOnUiThread {
-                PendingShots.release(held)
+                shotDone(held)
                 enhanceDone(
                     uri, if (result != null) "image/jpeg" else mimeType,
                     when {
@@ -2788,7 +2842,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             return
         }
         val quality = prefs.jpegQuality
-        val held = PendingShots.hold(this, jpegs.firstOrNull(), "image/jpeg")
+        val held = holdShot(jpegs.firstOrNull(), "image/jpeg")
         zoomEnhancing = false
         releaseShutterForBackground()
         val roiSensor = subjectSensor()
@@ -2818,7 +2872,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 MediaSaver.save(this, "${MediaSaver.newBaseName()}.jpg", "image/jpeg", writer = { it.write(jpegs.first()) })
             }
             runOnUiThread {
-                PendingShots.release(held)
+                shotDone(held)
                 enhanceDone(uri, "image/jpeg",
                     if (result != null) "Zoom enhance · ${result.merged} $how shots merged for detail" else "Saved a single shot")
             }
@@ -2965,7 +3019,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     private fun processCloseup(frames: List<ByteArray>, mimeType: String) {
-        val held = PendingShots.hold(this, frames.firstOrNull(), mimeType)
+        val held = holdShot(frames.firstOrNull(), mimeType)
         showGroupStatus("Making everything sharp…")
         val quality = prefs.jpegQuality
         Thread {
@@ -2987,7 +3041,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 afterWrite = if (result != null) { u -> MediaSaver.copyExif(this, u, source) } else null,
             )
             runOnUiThread {
-                PendingShots.release(held)
+                shotDone(held)
                 closeupProcessing = false
                 capturing = false
                 shutter.busy = false
@@ -3057,7 +3111,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     private fun processTrails(frames: List<ByteArray>, mimeType: String) {
-        val held = PendingShots.hold(this, frames.lastOrNull(), mimeType)
+        val held = holdShot(frames.lastOrNull(), mimeType)
         mainHandler.removeCallbacks(trailsTick) // keep showing the last live result while the photo is made
         showGroupStatus("Stacking light trails…")
         val quality = prefs.jpegQuality
@@ -3080,7 +3134,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 afterWrite = if (result != null) { u -> MediaSaver.copyExif(this, u, source) } else null,
             )
             runOnUiThread {
-                PendingShots.release(held)
+                shotDone(held)
                 trailsProcessing = false
                 stopTrailsLive()
                 capturing = false
@@ -3101,7 +3155,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     private fun processClean(frames: List<ByteArray>, mimeType: String) {
-        val held = PendingShots.hold(this, frames.firstOrNull(), mimeType)
+        val held = holdShot(frames.firstOrNull(), mimeType)
         showGroupStatus("Removing passers-by…")
         val quality = prefs.jpegQuality
         Thread {
@@ -3123,7 +3177,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 afterWrite = if (result != null) { u -> MediaSaver.copyExif(this, u, source) } else null,
             )
             runOnUiThread {
-                PendingShots.release(held)
+                shotDone(held)
                 cleanProcessing = false
                 capturing = false
                 shutter.busy = false
@@ -3194,7 +3248,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     private fun processNight(frames: List<ByteArray>, mimeType: String) {
-        val held = PendingShots.hold(this, frames.firstOrNull(), mimeType)
+        val held = holdShot(frames.firstOrNull(), mimeType)
         val silky = mergeSilky
         val hdr = mergeHdrStops
         val indoor = mergeIndoor
@@ -3239,7 +3293,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 afterWrite = if (result != null) { u -> MediaSaver.copyExif(this, u, source) } else null,
             )
             runOnUiThread {
-                PendingShots.release(held)
+                shotDone(held)
                 nightProcessing = false
                 capturing = false
                 shutter.busy = false
@@ -3275,7 +3329,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     // ------------------------------------------------------------------ portrait
 
     private fun processPortrait(jpeg: ByteArray, mimeType: String) {
-        val held = PendingShots.hold(this, jpeg, mimeType)
+        val held = holdShot(jpeg, mimeType)
         showGroupStatus("Creating portrait…")
         val strength = prefs.portraitStrength
         val quality = prefs.jpegQuality
@@ -3299,7 +3353,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 afterWrite = if (processed) { u -> MediaSaver.copyExif(this, u, jpeg) } else null,
             )
             runOnUiThread {
-                PendingShots.release(held)
+                shotDone(held)
                 portraitProcessing = false
                 capturing = false
                 shutter.busy = false
