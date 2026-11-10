@@ -75,11 +75,14 @@ class SuperZoomProcessor {
         Log.i(TAG, "kept ${frames.size} of $taken frames; offsets ${all.map { "%.2f,%.2f (%.0f)".format(it.dx, it.dy, it.cost) }}")
         val merged: SuperRes.Frame
         val scale: Float
-        if (ai != null) {
-            // AI detail: merge at the frames' own size (clean, no noise), then the network enlarges it.
-            scale = (AI_MAX_SIDE.toFloat() / max(w0, h0)).coerceIn(1f, 4f)
-            val clean = KernelMerge.merge(frames, offsets, 1f)
-            merged = ai.upscale(clean, (w0 * scale).roundToInt(), (h0 * scale).roundToInt())
+        // AI detail: merge at the frames' own size (clean, no noise), then the network enlarges
+        // it — unless this phone turns out too slow for that (a photo mustn't take a minute).
+        val aiScale = (AI_MAX_SIDE.toFloat() / max(w0, h0)).coerceIn(1f, 4f)
+        val byAi = if (ai == null || AiUpscaler.tooSlow) null else
+            ai.upscaleWithin(KernelMerge.merge(frames, offsets, 1f), (w0 * aiScale).roundToInt(), (h0 * aiScale).roundToInt(), AiUpscaler.budgetMs)
+        if (byAi != null) {
+            scale = aiScale
+            merged = byAi
         } else {
             // Onto a finer grid (2-3x, aiming for ~3000 px): patch-by-patch alignment and
             // edge-shaped kernels (KernelMerge), then sharpen.
@@ -90,7 +93,7 @@ class SuperZoomProcessor {
         // Grain: 0 at ISO 400 and below, +1 for every doubling.
         val grain = if (iso == null) 0f else (ln(iso / 400f) / ln(2f)).coerceIn(0f, 5f)
         if (grain > 0f) SuperRes.smoothChroma(merged, (1 + grain).roundToInt())
-        if (ai == null) SuperRes.sharpen(merged, amount = (1.2f - 0.15f * grain).coerceAtLeast(0.5f), noiseFloor = 2f + 2f * grain)
+        if (byAi == null) SuperRes.sharpen(merged, amount = (1.2f - 0.15f * grain).coerceAtLeast(0.5f), noiseFloor = 2f + 2f * grain)
         val t4 = android.os.SystemClock.uptimeMillis()
 
         var out = Bitmap.createBitmap(merged.px, merged.w, merged.h, Bitmap.Config.ARGB_8888)

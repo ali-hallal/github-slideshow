@@ -89,6 +89,24 @@ class OverlayView @JvmOverloads constructor(
         if (levelEnabled) invalidate()
     }
 
+    private var exposureUntil = 0L
+    private var exposureFraction = 0f
+    private var exposureLabel = ""
+    private val sunPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFFFFC107.toInt()
+        setShadowLayer(3f, 0f, 0f, 0xAA000000.toInt())
+    }
+
+    /** The brightness being dragged: [fraction] -1 (darkest) .. 1 (brightest), shown for a moment. */
+    fun showExposure(fraction: Float, label: String) {
+        exposureFraction = fraction.coerceIn(-1f, 1f)
+        exposureLabel = label
+        exposureUntil = SystemClock.uptimeMillis() + 1500
+        // The focus ring stays while its brightness is being set.
+        if (focusX >= 0) focusStart = minOf(SystemClock.uptimeMillis() - 250, SystemClock.uptimeMillis())
+        invalidate()
+    }
+
     fun showFocus(x: Float, y: Float) {
         focusX = x
         focusY = y
@@ -156,6 +174,38 @@ class OverlayView @JvmOverloads constructor(
             } else {
                 faces.forEachIndexed { i, f -> drawFace(canvas, f, faceColors?.getOrNull(i) ?: FACE_YELLOW) }
                 postInvalidateDelayed(FACE_TIMEOUT_MS)
+            }
+        }
+
+        if (exposureUntil > 0L) {
+            val left = exposureUntil - SystemClock.uptimeMillis()
+            if (left <= 0) {
+                exposureUntil = 0L
+            } else {
+                // Beside the focus ring (or mid-screen): a track with a sun that rides up and down.
+                val cx = if (focusX >= 0) focusX else width / 2f
+                val cy = if (focusX >= 0) focusY else height / 2f
+                val side = if (cx + 80 * density < width) 1 else -1
+                val x = cx + side * 54 * density
+                val half = 52 * density
+                val y = cy - exposureFraction * half
+                val alpha = if (left < 300) (255 * left / 300).toInt() else 255
+                sunPaint.alpha = alpha
+                sunPaint.style = Paint.Style.STROKE
+                sunPaint.strokeWidth = 1.5f * density
+                canvas.drawLine(x, cy - half, x, y - 12 * density, sunPaint)
+                canvas.drawLine(x, y + 12 * density, x, cy + half, sunPaint)
+                for (k in 0 until 8) {
+                    val a = Math.PI / 4 * k
+                    canvas.drawLine(x + (7.5f * density * Math.cos(a)).toFloat(), y + (7.5f * density * Math.sin(a)).toFloat(),
+                        x + (10.5f * density * Math.cos(a)).toFloat(), y + (10.5f * density * Math.sin(a)).toFloat(), sunPaint)
+                }
+                sunPaint.style = Paint.Style.FILL
+                canvas.drawCircle(x, y, 5 * density, sunPaint)
+                sunPaint.textSize = 13 * density
+                sunPaint.textAlign = Paint.Align.CENTER
+                canvas.drawText(exposureLabel, x, cy - half - 8 * density, sunPaint)
+                postInvalidateOnAnimation()
             }
         }
 

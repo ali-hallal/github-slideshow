@@ -171,19 +171,21 @@ class ReviewActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             setPadding(dp(8), dp(10), dp(8), dp(14))
         }
-        fun action(label: String, onClick: () -> Unit) = TextView(this).apply {
+        fun action(label: String, icon: Int, onClick: () -> Unit) = TextView(this).apply {
             text = label
-            textSize = 14f
+            textSize = 12f
             gravity = Gravity.CENTER
             setTextColor(getColor(R.color.white))
-            setPadding(0, dp(12), 0, dp(12))
+            setCompoundDrawablesRelativeWithIntrinsicBounds(0, icon, 0, 0)
+            compoundDrawablePadding = dp(4)
+            setPadding(0, dp(10), 0, dp(8))
             setBackgroundResource(android.R.drawable.list_selector_background)
             setOnClickListener { onClick() }
         }.also { actions.addView(it, LinearLayout.LayoutParams(0, -2, 1f)) }
-        action("Share") { share() }
-        saveOriginal = action("Save original") { saveOriginal() }
-        action("Delete") { confirmDelete() }
-        action("Gallery") { openInGallery() }
+        action("Share", R.drawable.ic_share) { share() }
+        saveOriginal = action("Save original", R.drawable.ic_save) { saveOriginal() }
+        action("Delete", R.drawable.ic_delete) { confirmDelete() }
+        action("Gallery", R.drawable.ic_gallery) { openInGallery() }
         root.addView(actions)
 
         setContentView(root)

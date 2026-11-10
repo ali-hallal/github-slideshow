@@ -40,8 +40,18 @@ class AiUpscaler(context: Context) : Closeable {
      * Enlarges [src] to [outW] × [outH] (up to 4× its size): the network makes a 4× version of
      * each piece, which is then scaled to the requested size.
      */
-    fun upscale(src: SuperRes.Frame, outW: Int, outH: Int): SuperRes.Frame {
+    fun upscale(src: SuperRes.Frame, outW: Int, outH: Int): SuperRes.Frame =
+        upscaleWithin(src, outW, outH, Long.MAX_VALUE)!!
+
+    /**
+     * The same, unless this phone is too slow for it: after the first pieces the whole job is
+     * projected, and if it would take longer than [budgetMs] it is abandoned (null) and
+     * [tooSlow] is set, so the caller falls back to the ordinary enlargement from then on.
+     */
+    fun upscaleWithin(src: SuperRes.Frame, outW: Int, outH: Int, budgetMs: Long): SuperRes.Frame? {
         val t0 = android.os.SystemClock.uptimeMillis()
+        val perSide = { n: Int -> (n + TILE - 2 * OVERLAP - 1) / (TILE - 2 * OVERLAP) }
+        val total = perSide(src.w) * perSide(src.h)
         val out = IntArray(outW * outH)
         val fx = outW.toFloat() / src.w
         val fy = outH.toFloat() / src.h
@@ -56,6 +66,14 @@ class AiUpscaler(context: Context) : Closeable {
                 val y0 = (y - OVERLAP).coerceIn(0, max(0, src.h - TILE))
                 val big = run4x(src, x0, y0)
                 tiles++
+                if (tiles == PROBE_TILES && total > PROBE_TILES) {
+                    val projected = (android.os.SystemClock.uptimeMillis() - t0) * total / tiles
+                    if (projected > budgetMs) {
+                        tooSlow = true
+                        Log.i(TAG, "ai upscale abandoned: $total pieces would take $projected ms (limit $budgetMs)")
+                        return null
+                    }
+                }
                 // Keep only this step's area (no seams), scaled to the final size.
                 val ax0 = x
                 val ay0 = y
@@ -147,6 +165,11 @@ class AiUpscaler(context: Context) : Closeable {
 
         /** How long the last enlargement took (diagnostics, speed test). */
         @Volatile var lastRunMs = 0L
+        /** This phone can't run the network in reasonable time (found out on the first try). */
+        @Volatile var tooSlow = false
+        /** The longest a photo may wait for the network (tests lift it). */
+        @Volatile var budgetMs = 15_000L
+        private const val PROBE_TILES = 12
 
         private fun loadModel(context: Context, name: String): MappedByteBuffer {
             context.assets.openFd(name).use { fd ->

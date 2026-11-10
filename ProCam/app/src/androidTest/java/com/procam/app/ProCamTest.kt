@@ -1303,6 +1303,26 @@ class ProCamTest {
         assertTrue("brightness untouched", px.indices.all { abs(lum(px[it]) - lum(f.px[it])) < 1.5 })
     }
 
+    /** Drag up on the viewfinder: brighter, with a badge that takes it back to automatic. */
+    @Test
+    fun dragOnViewfinderSetsBrightness() {
+        waitForCamera()
+        setSimple(true)
+        fun drag(fy0: Float, fy1: Float) = androidx.test.espresso.action.GeneralSwipeAction(
+            androidx.test.espresso.action.Swipe.SLOW,
+            { v -> val p = IntArray(2); v.getLocationOnScreen(p); floatArrayOf(p[0] + v.width * 0.5f, p[1] + v.height * fy0) },
+            { v -> val p = IntArray(2); v.getLocationOnScreen(p); floatArrayOf(p[0] + v.width * 0.5f, p[1] + v.height * fy1) },
+            androidx.test.espresso.action.Press.FINGER,
+        )
+        onView(withId(R.id.textureView)).perform(drag(0.6f, 0.35f))
+        waitFor("brighter") { visible(R.id.lockBadge) && text(R.id.lockBadge).startsWith("BRIGHTNESS +") }
+        onView(withId(R.id.lockBadge)).perform(click())
+        waitFor("back to automatic") { !visible(R.id.lockBadge) }
+        onView(withId(R.id.textureView)).perform(drag(0.35f, 0.6f))
+        waitFor("darker") { visible(R.id.lockBadge) && text(R.id.lockBadge).startsWith("BRIGHTNESS -") }
+        onView(withId(R.id.lockBadge)).perform(click())
+    }
+
     @Test
     fun steadyZoomFilterLetsPansThrough() {
         // Tremor: a short turn is held (cancelled on screen) ...
@@ -1858,6 +1878,8 @@ class ProCamTest {
         }
         assertTrue("the zoom readout says AI: ${text(R.id.zoomIndicator)}", text(R.id.zoomIndicator).contains("AI"))
         AiUpscaler.lastRunMs = 0
+        AiUpscaler.tooSlow = false
+        AiUpscaler.budgetMs = Long.MAX_VALUE // an emulator may be slower than any phone
         val before = count("image/jpeg")
         onView(withId(R.id.shutter)).perform(click())
         waitFor("super zoom photo saved", 420_000) { count("image/jpeg") > before }

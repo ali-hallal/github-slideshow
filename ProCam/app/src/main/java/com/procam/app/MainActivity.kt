@@ -592,10 +592,29 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 return true
             }
 
+            /** Drag up or down on the viewfinder: brighter or darker, as on the phone's own camera. */
+            override fun onScroll(e1: MotionEvent?, e2: MotionEvent, distanceX: Float, distanceY: Float): Boolean {
+                val c = caps ?: return false
+                val dy = e2.y - (e1?.y ?: return false)
+                val dx = e2.x - e1.x
+                val density = resources.displayMetrics.density
+                if (evDragFrom == null) {
+                    val allowed = (settings.cameraAe || settings.priorityMode) && evSteps.size > 1 && !looksOpen
+                    if (!allowed || abs(dy) < EV_DRAG_START_DP * density || abs(dy) < 2 * abs(dx)) return false
+                    evDragFrom = settings.evIndex
+                    evDragY = e2.y
+                }
+                val ev = -(e2.y - evDragY) / (EV_DRAG_DP_PER_STOP * density)
+                val target = (evDragFrom!! + (ev / c.evStep.toFloat()).roundToInt()).coerceIn(c.evRange.lower, c.evRange.upper)
+                if (target != settings.evIndex) setBrightness(target)
+                return true
+            }
+
             /** Swipe sideways across the viewfinder: the next / previous mode, as on the phone's own camera. */
             override fun onFling(e1: MotionEvent?, e2: MotionEvent, velocityX: Float, velocityY: Float): Boolean {
                 val dx = e2.x - (e1?.x ?: return false)
                 val dy = e2.y - e1.y
+                if (evDragFrom != null) return false
                 if (abs(dx) < MODE_SWIPE_DP * resources.displayMetrics.density || abs(dx) < 2 * abs(dy)) return false
                 return swipeMode(if (dx < 0) 1 else -1)
             }
@@ -621,12 +640,18 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             pinch.onTouchEvent(event)
             if (!pinch.isInProgress && event.pointerCount == 1) gestures.onTouchEvent(event)
             if (event.action == MotionEvent.ACTION_UP) v.performClick()
+            if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) evDragFrom = null
             true
         }
 
         lockBadge.setOnClickListener {
             camera.resetFocus()
             lockBadge.visibility = View.GONE
+            // In Simple the badge is the way back to "everything automatic", brightness included.
+            if (!prefs.uiPro && settings.evIndex != 0) {
+                settings = settings.copy(evIndex = 0)
+                pushSettings()
+            }
         }
 
         btnFlash.setOnClickListener {
@@ -798,6 +823,11 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     private fun setIntent(intent: String) {
         if (intent == prefs.intent) return
         prefs.intent = intent
+        // A brightness set by hand belonged to the last scene and mode.
+        if (!prefs.uiPro && settings.evIndex != 0) {
+            settings = settings.copy(evIndex = 0)
+            if (lockBadge.text.startsWith("BRIGHTNESS")) lockBadge.visibility = View.GONE
+        }
         cancelGroup()
         overlay.setFaces(emptyList())
         groupStatus.visibility = View.GONE
@@ -813,6 +843,23 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         syncFreeze()
         syncVideo()
         refreshUi()
+    }
+
+    /** Brightness (exposure compensation) being dragged on the viewfinder: where it started. */
+    private var evDragFrom: Int? = null
+    private var evDragY = 0f
+
+    private fun setBrightness(evIndex: Int) {
+        val c = caps ?: return
+        settings = settings.copy(evIndex = evIndex)
+        pushSettings()
+        val label = Stops.evLabel(evIndex, c.evStep)
+        val most = maxOf(abs(c.evRange.lower), abs(c.evRange.upper)).coerceAtLeast(1)
+        overlay.showExposure(evIndex.toFloat() / most, label)
+        if (evIndex == 0) haptic(textureView, HapticFeedbackConstants.CLOCK_TICK)
+        if (!prefs.uiPro) {
+            if (evIndex != 0) showBadge("BRIGHTNESS $label") else if (lockBadge.text.startsWith("BRIGHTNESS")) lockBadge.visibility = View.GONE
+        }
     }
 
     /** The next ([step] = 1) or previous (-1) photo mode, in the order of the row. */
@@ -3713,6 +3760,9 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         /** Photo modes in the order of the row (swiping across the viewfinder steps through them). */
         private val INTENT_ORDER = listOf("AUTO", "PORTRAIT", "NIGHT", "SILKY", "FREEZE", "GROUP", "CLEAN", "CLOSEUP", "TRAILS")
         private const val MODE_SWIPE_DP = 70
+        /** Dragging up or down on the viewfinder: where it starts counting, and how far is one stop. */
+        private const val EV_DRAG_START_DP = 24
+        private const val EV_DRAG_DP_PER_STOP = 70f
         /** The hint under the modes stays this long. */
         private const val HINT_MS = 4000L
         private const val MESSAGE_MS = 1800L
