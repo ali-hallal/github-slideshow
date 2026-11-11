@@ -27,6 +27,8 @@ import android.os.Looper
 import android.util.Log
 import android.util.Size
 import android.view.Surface
+import com.anycam.app.core.RawFrame
+import com.anycam.app.core.RawInfo
 import com.anycam.app.core.Yuv
 import kotlin.math.abs
 
@@ -51,6 +53,11 @@ class CameraEngine(context: Context, private val listener: Listener) {
         fun onLive(iso: Int?, exposureNs: Long?)
         /** Touch focus finished: sharp or not. */
         fun onFocused(sharp: Boolean)
+        /**
+         * A burst of sensor (RAW) frames is in, with what the camera says about them and, if it
+         * came, one ordinary frame of the same scene ([guide]) to take the look from.
+         */
+        fun onRawBurst(frames: List<RawFrame>, guide: Yuv?, info: RawInfo, shot: Shot)
         /** A photo made by the phone maker's own processing (an extension), ready to save. */
         fun onJpeg(jpeg: ByteArray, shot: Shot)
     }
@@ -69,6 +76,16 @@ class CameraEngine(context: Context, private val listener: Listener) {
     private var extensionSession: CameraExtensionSession? = null
     private var extensionZoom = false
     private var reader: ImageReader? = null
+    /** Sensor (RAW) frames, on cameras that give them. */
+    private var rawReader: ImageReader? = null
+    private var characteristics: CameraCharacteristics? = null
+    private var shadingMap = false
+    /** Sensor frames can be taken right now. */
+    @Volatile var rawWorks = false
+        private set
+    /** The size of sensor frames (0 if none). */
+    @Volatile var rawPixels = 0L
+        private set
     private var previewSurface: Surface? = null
     private var info: CameraInfo? = null
     /** Bumped on every open/close: callbacks from an earlier camera are ignored. */
@@ -91,6 +108,10 @@ class CameraEngine(context: Context, private val listener: Listener) {
     private var burstIso: Int? = null
     private var burstExposure: Long? = null
     private val burstFrames = ArrayList<Yuv>()
+    private var burstRaw = false
+    private val burstRawFrames = ArrayList<RawFrame>()
+    private var burstGuide: Yuv? = null
+    private var burstResult: TotalCaptureResult? = null
 
     /** The cameras to offer: the first back and the first front camera the phone lists. */
     fun cameras(): List<CameraInfo> = try {
@@ -152,18 +173,34 @@ class CameraEngine(context: Context, private val listener: Listener) {
             val surface = Surface(texture)
             val frames = ImageReader.newInstance(photo.width, photo.height, ImageFormat.YUV_420_888, MAX_BURST + 2)
             frames.setOnImageAvailableListener({ onImage(it) }, handler)
+            // Sensor frames, where the camera gives them in a layout this app develops.
+            val rawSize = if (c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_RAW) == true &&
+                (c.get(CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT) ?: -1) in 0..3
+            ) {
+                map.getOutputSizes(ImageFormat.RAW_SENSOR)?.filter { it.width.toLong() * it.height <= MAX_PHOTO_PIXELS }
+                    ?.maxByOrNull { it.width.toLong() * it.height }
+            } else null
+            val raw = rawSize?.let { size ->
+                ImageReader.newInstance(size.width, size.height, ImageFormat.RAW_SENSOR, MAX_BURST + 2).apply {
+                    setOnImageAvailableListener({ onRawImage(it) }, handler)
+                }
+            }
+            shadingMap = c.get(CameraCharacteristics.STATISTICS_INFO_AVAILABLE_LENS_SHADING_MAP_MODES)
+                ?.contains(CameraMetadata.STATISTICS_LENS_SHADING_MAP_MODE_ON) == true
+            characteristics = c
             info = cam
             previewSurface = surface
             reader = frames
+            rawReader = raw
             zoom = zoom.coerceIn(cam.minZoom, cam.maxZoom)
             ev = 0
             focusPoint = null
-            Log.i(TAG, "opening camera $id: photo $photo, viewfinder $preview, zoom ${cam.minZoom}..${cam.maxZoom}")
+            Log.i(TAG, "opening camera $id: photo $photo, sensor frames $rawSize, viewfinder $preview, zoom ${cam.minZoom}..${cam.maxZoom}")
             manager.openCamera(id, object : CameraDevice.StateCallback() {
                 override fun onOpened(d: CameraDevice) {
                     if (mine != generation) { d.close(); return }
                     device = d
-                    startSession(d, surface, frames, cam, preview, photo, mine)
+                    startSession(d, surface, frames, cam, preview, photo, mine, withRaw = raw != null)
                 }
 
                 override fun onDisconnected(d: CameraDevice) {
@@ -185,25 +222,38 @@ class CameraEngine(context: Context, private val listener: Listener) {
         }
     }
 
-    private fun startSession(d: CameraDevice, surface: Surface, frames: ImageReader, cam: CameraInfo, preview: Size, photo: Size, mine: Int) {
+    private fun startSession(d: CameraDevice, surface: Surface, frames: ImageReader, cam: CameraInfo, preview: Size, photo: Size, mine: Int, withRaw: Boolean) {
+        val raw = rawReader
+        // A phone that can't run all three streams together goes on without sensor frames.
+        fun withoutRaw(why: String): Boolean {
+            if (!withRaw || mine != generation) return false
+            Log.w(TAG, "no sensor frames on this camera ($why)")
+            try { raw?.close() } catch (_: Exception) {}
+            rawReader = null
+            startSession(d, surface, frames, cam, preview, photo, mine, withRaw = false)
+            return true
+        }
         try {
-            val outputs = listOf(OutputConfiguration(surface), OutputConfiguration(frames.surface))
+            val outputs = mutableListOf(OutputConfiguration(surface), OutputConfiguration(frames.surface))
+            if (withRaw && raw != null) outputs += OutputConfiguration(raw.surface)
             d.createCaptureSession(SessionConfiguration(SessionConfiguration.SESSION_REGULAR, outputs, { handler.post(it) },
                 object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(s: CameraCaptureSession) {
                         if (mine != generation) return
                         session = s
+                        rawWorks = withRaw && raw != null
+                        rawPixels = if (rawWorks && raw != null) raw.width.toLong() * raw.height else 0L
                         startPreview()
                         main.post { listener.onOpened(cam, preview, photo) }
                     }
 
                     override fun onConfigureFailed(s: CameraCaptureSession) {
-                        if (mine == generation) fail("The camera couldn't start")
+                        if (mine == generation && !withoutRaw("not configurable")) fail("The camera couldn't start")
                     }
                 }))
         } catch (e: Exception) {
             Log.e(TAG, "session", e)
-            fail("The camera couldn't start: ${e.message}")
+            if (!withoutRaw(e.message ?: "error")) fail("The camera couldn't start: ${e.message}")
         }
     }
 
@@ -292,9 +342,14 @@ class CameraEngine(context: Context, private val listener: Listener) {
         generation++
         handler.removeCallbacks(backToAuto)
         handler.removeCallbacks(burstTimeout)
+        rawWorks = false
+        try { rawReader?.close() } catch (_: Exception) {}
+        rawReader = null
         if (burstWanted > 0) {
             burstWanted = 0
             burstFrames.clear()
+            burstRawFrames.clear()
+            burstGuide = null
             main.post { listener.onCaptureFailed("The camera closed") }
         }
         try { session?.close() } catch (_: Exception) {}
@@ -474,9 +529,9 @@ class CameraEngine(context: Context, private val listener: Listener) {
     /**
      * Takes [count] full-size shots in a row at one exposure. [rotation]: degrees to turn them
      * upright. [exposure]: ISO and shutter time (ns) to use instead of auto exposure's, on
-     * cameras that take them.
+     * cameras that take them. [raw]: take sensor frames (where [rawWorks]) instead of ordinary ones.
      */
-    fun takeBurst(count: Int, rotation: Int, exposure: Pair<Int, Long>? = null) = handler.post {
+    fun takeBurst(count: Int, rotation: Int, exposure: Pair<Int, Long>? = null, raw: Boolean = false) = handler.post {
         val cam = info
         val d = device
         val s = session
@@ -491,10 +546,12 @@ class CameraEngine(context: Context, private val listener: Listener) {
             return@post
         }
         val n = count.coerceIn(1, MAX_BURST)
+        val sensor = if (raw && rawWorks) rawReader else null
         try {
             val b = d.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
-            b.addTarget(frames.surface)
+            b.addTarget(sensor?.surface ?: frames.surface)
             applyControls(b)
+            if (sensor != null && shadingMap) b.set(CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE, CameraMetadata.STATISTICS_LENS_SHADING_MAP_MODE_ON)
             // One exposure and colour for the whole burst, so the shots can be laid on each other.
             if (exposure != null && cam.isoRange != null) {
                 b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
@@ -510,13 +567,29 @@ class CameraEngine(context: Context, private val listener: Listener) {
             }
             if (cam.canLockWhiteBalance) b.set(CaptureRequest.CONTROL_AWB_LOCK, true)
             val request = b.build()
+            // With sensor frames, the first shot also gives an ordinary frame: the phone's own
+            // rendering of the scene, which the developed photo takes its look from.
+            val first = if (sensor != null) {
+                b.addTarget(frames.surface)
+                b.build()
+            } else request
             burstWanted = n
             burstFailed = 0
             burstStarted = false
             burstRotation = rotation
             burstFrames.clear()
+            burstRaw = sensor != null
+            burstRawFrames.clear()
+            burstGuide = null
+            burstResult = null
             val mine = generation
-            s.captureBurst(List(n) { request }, object : CameraCaptureSession.CaptureCallback() {
+            s.captureBurst(List(n) { if (it == 0) first else request }, object : CameraCaptureSession.CaptureCallback() {
+                override fun onCaptureCompleted(s: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+                    if (mine != generation || burstResult != null) return
+                    burstResult = result
+                    finishBurstIfComplete()
+                }
+
                 override fun onCaptureStarted(s: CameraCaptureSession, request: CaptureRequest, timestamp: Long, frameNumber: Long) {
                     if (mine != generation || burstStarted) return
                     burstStarted = true
@@ -596,10 +669,24 @@ class CameraEngine(context: Context, private val listener: Listener) {
     private fun onImage(r: ImageReader) {
         val image = try { r.acquireNextImage() } catch (e: Exception) { null } ?: return
         try {
-            if (burstWanted > 0) burstFrames += image.toYuv()
+            if (burstWanted > 0 && burstRaw) burstGuide = image.toYuv()
+            else if (burstWanted > 0) burstFrames += image.toYuv()
         } catch (e: Throwable) {
             // Out of memory on a frame: go on with the ones we have.
             Log.w(TAG, "frame dropped", e)
+            if (!burstRaw) burstFailed++
+        } finally {
+            image.close()
+        }
+        finishBurstIfComplete()
+    }
+
+    private fun onRawImage(r: ImageReader) {
+        val image = try { r.acquireNextImage() } catch (e: Exception) { null } ?: return
+        try {
+            if (burstWanted > 0 && burstRaw) burstRawFrames += image.toRawFrame()
+        } catch (e: Throwable) {
+            Log.w(TAG, "sensor frame dropped", e)
             burstFailed++
         } finally {
             image.close()
@@ -608,7 +695,11 @@ class CameraEngine(context: Context, private val listener: Listener) {
     }
 
     private fun finishBurstIfComplete() {
-        if (burstWanted == 0 || burstFrames.size + burstFailed < burstWanted) return
+        if (burstWanted == 0) return
+        if (burstRaw) {
+            // All the sensor frames, what the camera says about them, and the ordinary frame.
+            if (burstRawFrames.size + burstFailed < burstWanted || burstResult == null || burstGuide == null) return
+        } else if (burstFrames.size + burstFailed < burstWanted) return
         deliverBurst()
     }
 
@@ -621,6 +712,24 @@ class CameraEngine(context: Context, private val listener: Listener) {
         burstFrames.clear()
         burstWanted = 0
         val shot = Shot(burstRotation, burstIso, burstExposure, System.currentTimeMillis())
+        if (burstRaw) {
+            val sensorFrames = ArrayList(burstRawFrames)
+            val guide = burstGuide
+            val c = characteristics
+            burstRawFrames.clear()
+            burstGuide = null
+            burstRaw = false
+            when {
+                sensorFrames.isNotEmpty() && c != null -> {
+                    val about = rawInfo(c, burstResult)
+                    main.post { listener.onRawBurst(sensorFrames, guide, about, shot) }
+                }
+                // No sensor frames after all: the ordinary frame is still a photo.
+                guide != null -> main.post { listener.onBurst(listOf(guide), shot) }
+                else -> main.post { listener.onCaptureFailed("The camera didn't deliver the photo") }
+            }
+            return
+        }
         if (frames.isEmpty()) main.post { listener.onCaptureFailed("The camera didn't deliver the photo") }
         else main.post { listener.onBurst(frames, shot) }
     }

@@ -27,6 +27,8 @@ import com.anycam.app.camera.CameraInfo
 import com.anycam.app.capture.PhotoMaker
 import com.anycam.app.core.Exposure
 import com.anycam.app.core.Geometry
+import com.anycam.app.core.RawFrame
+import com.anycam.app.core.RawInfo
 import com.anycam.app.core.Yuv
 import java.util.Locale
 import kotlin.math.abs
@@ -281,9 +283,12 @@ class MainActivity : Activity(), CameraEngine.Listener {
             Exposure.plan(iso, exposure, isoRange.lower, isoRange.upper, exposureRange.lower, exposureRange.upper)
         } else null
         val wanted = plan?.frames ?: Geometry.burstFrames(iso)
-        val count = Geometry.framesThatFit(wanted, size.width.toLong() * size.height, Runtime.getRuntime().maxMemory())
+        // Sensor frames where the camera gives them — at 1×, since zoom doesn't reach them.
+        val raw = engine.rawWorks && abs(zoom - 1f) < 0.01f
+        val count = if (raw) Geometry.framesThatFit(wanted, engine.rawPixels, Runtime.getRuntime().maxMemory(), bytesPerPixel = 2f, workBytesPerPixel = 7f)
+        else Geometry.framesThatFit(wanted, size.width.toLong() * size.height, Runtime.getRuntime().maxMemory())
         if (count > 3) say(getString(R.string.hold_still))
-        engine.takeBurst(count, Geometry.photoRotation(cam.sensorOrientation, deviceDegrees, cam.front), plan?.let { it.iso to it.exposureNs })
+        engine.takeBurst(count, Geometry.photoRotation(cam.sensorOrientation, deviceDegrees, cam.front), plan?.let { it.iso to it.exposureNs }, raw)
     }
 
     private var photoSize = Size(0, 0)
@@ -326,6 +331,28 @@ class MainActivity : Activity(), CameraEngine.Listener {
             lastMerged = photo.merged
             photoCount++
             say(if (photo.merged > 1) getString(R.string.merged, photo.merged) else getString(R.string.saved))
+            showThumbnail(photo.uri)
+        }
+    }
+
+    override fun onRawBurst(frames: List<RawFrame>, guide: Yuv?, info: RawInfo, shot: CameraEngine.Shot) {
+        taking = false
+        shutter.busy = false
+        making++
+        thumbnail.alpha = 0.5f
+        say(getString(R.string.merging_sensor, frames.size), stay = true)
+        photos.makeRaw(frames, guide, info, shot) { photo ->
+            making--
+            if (making == 0) thumbnail.alpha = 1f
+            if (photo == null) {
+                say(getString(R.string.not_saved))
+                return@makeRaw
+            }
+            lastPhoto = photo.uri
+            lastMerged = photo.merged
+            lastFromSensor = photo.fromSensor
+            photoCount++
+            say(if (photo.fromSensor) getString(R.string.merged_sensor, photo.merged, photo.megapixels.roundToInt()) else getString(R.string.saved))
             showThumbnail(photo.uri)
         }
     }
@@ -497,6 +524,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
         @Volatile var ready = false
         @Volatile var photoCount = 0
         @Volatile var lastMerged = 0
+        @Volatile var lastFromSensor = false
 
         // Android's names for the kinds of processing a phone maker can offer other apps.
         private const val EXT_AUTO = 0

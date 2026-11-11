@@ -20,8 +20,8 @@ object Align {
     /** Shift of each tile ([dx], [dy] in pixels: reference (x, y) matches frame (x+dx, y+dy)) and how well it matched. */
     class Field(val cols: Int, val rows: Int, val dx: IntArray, val dy: IntArray, val cost: FloatArray)
 
-    /** The brightness plane at 1/[SMALL] size (box average). */
-    fun small(f: Yuv): Plane {
+    /** A brightness plane at 1/[SMALL] size (box average). */
+    fun small(f: Plane): Plane {
         val sw = f.w / SMALL
         val sh = f.h / SMALL
         val out = ByteArray(sw * sh)
@@ -29,12 +29,14 @@ object Align {
             var sum = 0
             for (j in 0 until SMALL) {
                 val row = (y * SMALL + j) * f.w + x * SMALL
-                for (i in 0 until SMALL) sum += f.y[row + i].toInt() and 0xFF
+                for (i in 0 until SMALL) sum += f.px[row + i].toInt() and 0xFF
             }
             out[y * sw + x] = (sum / (SMALL * SMALL)).toByte()
         }
         return Plane(sw, sh, out)
     }
+
+    fun small(f: Yuv): Plane = small(Plane(f.w, f.h, f.y))
 
     class Plane(val w: Int, val h: Int, val px: ByteArray)
 
@@ -93,7 +95,9 @@ object Align {
     }
 
     /** Per-tile shifts of [frame] against [ref], starting from the whole-picture shift [g]. */
-    fun tiles(ref: Yuv, frame: Yuv, g: IntArray): Field {
+    fun tiles(ref: Yuv, frame: Yuv, g: IntArray): Field = tiles(Plane(ref.w, ref.h, ref.y), Plane(frame.w, frame.h, frame.y), g)
+
+    fun tiles(ref: Plane, frame: Plane, g: IntArray): Field {
         val cols = (ref.w + TILE - 1) / TILE
         val rows = (ref.h + TILE - 1) / TILE
         val dx = IntArray(cols * rows)
@@ -123,7 +127,7 @@ object Align {
                             while (x < x1) {
                                 val fx = x + sx
                                 if (fx in 0 until frame.w) {
-                                    sad += abs((ref.y[y * ref.w + x].toInt() and 0xFF) - (frame.y[fy * frame.w + fx].toInt() and 0xFF))
+                                    sad += abs((ref.px[y * ref.w + x].toInt() and 0xFF) - (frame.px[fy * frame.w + fx].toInt() and 0xFF))
                                     n++
                                 }
                                 x += 2

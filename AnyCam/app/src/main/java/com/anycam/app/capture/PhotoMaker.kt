@@ -15,7 +15,12 @@ import android.provider.MediaStore
 import android.util.Log
 import com.anycam.app.camera.CameraEngine
 import com.anycam.app.core.Detail
+import com.anycam.app.core.Develop
+import com.anycam.app.core.Look
 import com.anycam.app.core.Merge
+import com.anycam.app.core.RawFrame
+import com.anycam.app.core.RawInfo
+import com.anycam.app.core.RawMerge
 import com.anycam.app.core.Yuv
 import java.io.ByteArrayOutputStream
 import java.text.SimpleDateFormat
@@ -26,7 +31,7 @@ import java.util.concurrent.Executors
 /** Turns a burst into a finished photo in the gallery, off the main thread, one at a time. */
 class PhotoMaker(context: Context) {
 
-    class Photo(val uri: Uri, val merged: Int, val of: Int, val millis: Long)
+    class Photo(val uri: Uri, val merged: Int, val of: Int, val millis: Long, val fromSensor: Boolean = false, val megapixels: Float = 0f)
 
     private val app = context.applicationContext
     private val worker = Executors.newSingleThreadExecutor { r -> Thread(r, "anycam-photo") }
@@ -54,6 +59,43 @@ class PhotoMaker(context: Context) {
             } catch (e: Throwable) {
                 Log.e(TAG, "photo failed", e)
                 null
+            }
+            main.post { done(photo) }
+        }
+    }
+
+    /**
+     * The same from sensor (RAW) frames: merged before any processing, developed, and given the
+     * look of the phone's own picture of the scene ([guide]). If anything goes wrong on the way,
+     * the phone's own picture is saved instead: a photo is never lost to this.
+     */
+    fun makeRaw(frames: List<RawFrame>, guide: Yuv?, info: RawInfo, shot: CameraEngine.Shot, done: (Photo?) -> Unit) {
+        worker.execute {
+            val t0 = System.currentTimeMillis()
+            val photo = try {
+                val merged = RawMerge.merge(frames, info)
+                val t1 = System.currentTimeMillis()
+                // The two pictures must show the same view for the look to be taken from one to the other.
+                val sameShape = guide != null && kotlin.math.abs(guide.w.toFloat() / guide.h - merged.w.toFloat() / merged.h) < 0.03f
+                val look = if (guide != null && sameShape) {
+                    Look.fit(Develop.coarse(merged, info, Look.GRID_W, Look.GRID_H), Look.coarse(guide))
+                } else Look.PLAIN
+                val developed = Develop.develop(merged, info, look)
+                val t2 = System.currentTimeMillis()
+                val finished = Detail.sharpen(developed, merged.noise / kotlin.math.sqrt(merged.used.toFloat()))
+                val uri = save(encode(finished), shot)
+                Log.i(TAG, "photo from the sensor: ${merged.w}x${merged.h}, ${merged.used} of ${frames.size} shots merged " +
+                    "(noise ${"%.1f".format(Locale.US, merged.noise)}), look ${if (look === Look.PLAIN) "plain" else "from the phone"}, " +
+                    "wb ${info.wb.joinToString { "%.2f".format(Locale.US, it) }}, lens map ${info.shading != null}, ISO ${shot.iso}; " +
+                    "merge ${t1 - t0} ms, develop ${t2 - t1} ms, all ${System.currentTimeMillis() - t0} ms")
+                uri?.let { Photo(it, merged.used, frames.size, System.currentTimeMillis() - t0, fromSensor = true, megapixels = merged.w.toLong() * merged.h / 1_000_000f) }
+            } catch (e: Throwable) {
+                Log.e(TAG, "sensor photo failed, keeping the phone's own picture", e)
+                try {
+                    guide?.let { g -> save(encode(g), shot)?.let { Photo(it, 1, frames.size, System.currentTimeMillis() - t0) } }
+                } catch (e2: Throwable) {
+                    null
+                }
             }
             main.post { done(photo) }
         }

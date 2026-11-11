@@ -5,6 +5,7 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.Random
+import kotlin.math.abs
 import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
@@ -163,6 +164,152 @@ class CoreTest {
         assertTrue(after.y.maxOf { it.toInt() and 255 } <= before.y.maxOf { it.toInt() and 255 })
         assertTrue(after.y.minOf { it.toInt() and 255 } >= before.y.minOf { it.toInt() and 255 })
         assertSame("colour is untouched", before.u, after.u)
+    }
+
+    // ------------------------------------------------------------------ sensor (RAW) bursts
+
+    private val ccm = floatArrayOf(1.6f, -0.4f, -0.2f, -0.3f, 1.5f, -0.2f, -0.1f, -0.5f, 1.6f)
+    private val wb = floatArrayOf(2.0f, 1.0f, 1.6f)
+    private val black = 64f
+    private val white = 1023f
+
+    private fun inverse(m: FloatArray): FloatArray {
+        val d = m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6]) + m[2] * (m[3] * m[7] - m[4] * m[6])
+        return floatArrayOf(
+            (m[4] * m[8] - m[5] * m[7]) / d, (m[2] * m[7] - m[1] * m[8]) / d, (m[1] * m[5] - m[2] * m[4]) / d,
+            (m[5] * m[6] - m[3] * m[8]) / d, (m[0] * m[8] - m[2] * m[6]) / d, (m[2] * m[3] - m[0] * m[5]) / d,
+            (m[3] * m[7] - m[4] * m[6]) / d, (m[1] * m[6] - m[0] * m[7]) / d, (m[0] * m[4] - m[1] * m[3]) / d,
+        )
+    }
+
+    /** A colourful true picture (red, green, blue 0..255 per pixel): smooth areas with soft edges. */
+    private fun truePicture(w: Int, h: Int): FloatArray {
+        val out = FloatArray(w * h * 3)
+        for (y in 0 until h) for (x in 0 until w) {
+            val o = (y * w + x) * 3
+            val bx = (x / 40) % 5
+            val by = (y / 40) % 4
+            out[o] = 40f + 40f * bx + 15f * kotlin.math.sin(x / 9f)
+            out[o + 1] = 60f + 45f * by + 15f * kotlin.math.cos(y / 11f)
+            out[o + 2] = 200f - 30f * bx - 20f * by + 10f * kotlin.math.sin((x + y) / 13f)
+        }
+        // Soften, so edges are what a lens would give.
+        val soft = out.copyOf()
+        for (y in 1 until h - 1) for (x in 1 until w - 1) for (c in 0..2) {
+            var sum = 0f
+            for (j in -1..1) for (i in -1..1) sum += out[((y + j) * w + x + i) * 3 + c]
+            soft[(y * w + x) * 3 + c] = (sum / 9f).coerceIn(5f, 250f)
+        }
+        return soft
+    }
+
+    /** What the sensor records of [truth] moved by ([ox], [oy]): one filtered sample per pixel, with [noise]. */
+    private fun sensorShot(truth: FloatArray, tw: Int, w: Int, h: Int, ox: Int, oy: Int, noise: Float, cfa: Int = 0): RawFrame {
+        val inv = inverse(ccm)
+        val info = RawInfo(cfa, FloatArray(4) { black }, white, wb, ccm)
+        val px = ShortArray(w * h)
+        for (y in 0 until h) for (x in 0 until w) {
+            val o = ((y + oy + 20) * tw + x + ox + 20) * 3
+            val lin = FloatArray(3) { c ->
+                val v = truth[o + c] / 255f
+                if (v <= 0.04045f) v / 12.92f else Math.pow((v + 0.055) / 1.055, 2.4).toFloat()
+            }
+            val c = info.colour((y and 1) * 2 + (x and 1))
+            val cam = (inv[c * 3] * lin[0] + inv[c * 3 + 1] * lin[1] + inv[c * 3 + 2] * lin[2]) / wb[c]
+            px[y * w + x] = (cam * (white - black) + black + rnd.nextGaussian().toFloat() * noise).roundToInt().coerceIn(0, 1023).toShort()
+        }
+        return RawFrame(w, h, px)
+    }
+
+    private fun pictureError(photo: Yuv, truth: FloatArray, tw: Int, ox: Int, oy: Int): Double {
+        var s = 0.0
+        var n = 0
+        for (y in 16 until photo.h - 16) for (x in 16 until photo.w - 16) {
+            val o = ((y + oy + 20) * tw + x + ox + 20) * 3
+            val lum = 0.299f * truth[o] + 0.587f * truth[o + 1] + 0.114f * truth[o + 2]
+            s += abs((photo.y[y * photo.w + x].toInt() and 255) - lum)
+            n++
+        }
+        return s / n
+    }
+
+    @Test
+    fun sensorBurstsDevelopIntoTheTruePicture() {
+        val w = 320
+        val h = 240
+        val tw = 400
+        val truth = truePicture(tw, 320)
+        for (cfa in 0..3) {
+            val info = RawInfo(cfa, FloatArray(4) { black }, white, wb, ccm)
+            val moves = listOf(0 to 0, 2 to -4, -6 to 2, 3 to 1, 0 to 8)
+            val shots = moves.map { (ox, oy) -> sensorShot(truth, tw, w, h, ox, oy, 12f, cfa) }
+            val merged = RawMerge.merge(shots, info)
+            val photo = Develop.develop(merged, info)
+            val (rx, ry) = moves[merged.reference]
+            val one = Develop.develop(RawMerge.merge(listOf(shots[merged.reference]), info), info)
+            val errMerged = pictureError(photo, truth, tw, rx, ry)
+            val errOne = pictureError(one, truth, tw, rx, ry)
+            assertTrue("filter layout $cfa: merged $errMerged is close to the truth", errMerged < 4.0)
+            assertTrue("filter layout $cfa: and cleaner than one shot ($errOne -> $errMerged)", errMerged < errOne * 0.75)
+            // Colours come out right too (a red-filter mix-up would show here).
+            var colour = 0.0
+            var n = 0
+            for (cy in 10 until photo.ch - 10) for (cx in 10 until photo.cw - 10) {
+                val o = ((cy * 2 + ry + 20) * tw + cx * 2 + rx + 20) * 3
+                val u = -0.168736f * truth[o] - 0.331264f * truth[o + 1] + 0.5f * truth[o + 2] + 128
+                val v = 0.5f * truth[o] - 0.418688f * truth[o + 1] - 0.081312f * truth[o + 2] + 128
+                colour += abs((photo.u[cy * photo.cw + cx].toInt() and 255) - u) + abs((photo.v[cy * photo.cw + cx].toInt() and 255) - v)
+                n += 2
+            }
+            assertTrue("filter layout $cfa: colour error ${colour / n}", colour / n < 5.0)
+        }
+    }
+
+    @Test
+    fun theDevelopedPhotoTakesOnThePhonesLook() {
+        val w = 320
+        val h = 240
+        val tw = 400
+        val truth = truePicture(tw, 320)
+        val info = RawInfo(0, FloatArray(4) { black }, white, wb, ccm)
+        val merged = RawMerge.merge(listOf(sensorShot(truth, tw, w, h, 0, 0, 4f), sensorShot(truth, tw, w, h, 2, 2, 4f)), info)
+        val ref = if (merged.reference == 0) 0 else 2
+        // The phone's own picture of the scene: more contrast, richer colour.
+        fun phoneLook(r: Float, g: Float, b: Float): FloatArray {
+            val lum = 0.299f * r + 0.587f * g + 0.114f * b
+            val curve = 255f * Math.pow((lum / 255.0), 0.8).toFloat() // brighter mid-tones
+            val k = curve / lum.coerceAtLeast(1f)
+            val l2 = lum * k
+            return floatArrayOf(l2 + (r * k - l2) * 1.3f, l2 + (g * k - l2) * 1.3f, l2 + (b * k - l2) * 1.3f)
+        }
+        val py = ByteArray(w * h)
+        val pu = ByteArray(w * h / 4)
+        val pv = ByteArray(w * h / 4)
+        for (y in 0 until h) for (x in 0 until w) {
+            val o = ((y + ref + 20) * tw + x + ref + 20) * 3
+            val c = phoneLook(truth[o], truth[o + 1], truth[o + 2])
+            py[y * w + x] = (0.299f * c[0] + 0.587f * c[1] + 0.114f * c[2]).roundToInt().coerceIn(0, 255).toByte()
+            if (x % 2 == 0 && y % 2 == 0) {
+                pu[(y / 2) * (w / 2) + x / 2] = (-0.168736f * c[0] - 0.331264f * c[1] + 0.5f * c[2] + 128).roundToInt().coerceIn(0, 255).toByte()
+                pv[(y / 2) * (w / 2) + x / 2] = (0.5f * c[0] - 0.418688f * c[1] - 0.081312f * c[2] + 128).roundToInt().coerceIn(0, 255).toByte()
+            }
+        }
+        val phone = Yuv(w, h, py, pu, pv)
+        val look = Look.fit(Develop.coarse(merged, info, Look.GRID_W, Look.GRID_H), Look.coarse(phone))
+        val plain = Develop.develop(merged, info)
+        val styled = Develop.develop(merged, info, look)
+        fun distance(a: Yuv): Double {
+            var s = 0.0
+            for (i in a.y.indices) s += abs((a.y[i].toInt() and 255) - (phone.y[i].toInt() and 255))
+            var c = 0.0
+            for (i in a.u.indices) c += abs((a.u[i].toInt() and 255) - (phone.u[i].toInt() and 255)) + abs((a.v[i].toInt() and 255) - (phone.v[i].toInt() and 255))
+            return s / a.y.size + c / a.u.size
+        }
+        assertTrue("with the look it matches the phone's picture: ${distance(plain)} -> ${distance(styled)}", distance(styled) < distance(plain) * 0.4)
+        // (Brightness plus colour error per pixel; the phone's picture clips its strongest blues, which no curve can follow.)
+        assertTrue("closely: ${distance(styled)}", distance(styled) < 12.0)
+        // Nothing to compare with: the picture as developed.
+        assertSame(Look.PLAIN, Look.fit(FloatArray(30), FloatArray(30)))
     }
 
     @Test

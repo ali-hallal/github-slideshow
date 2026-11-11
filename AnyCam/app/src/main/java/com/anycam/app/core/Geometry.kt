@@ -40,10 +40,14 @@ object Geometry {
         else -> 7
     }
 
-    /** As many of [wanted] frames of [pixels] each as fit comfortably in [memoryBytes]. */
-    fun framesThatFit(wanted: Int, pixels: Long, memoryBytes: Long): Int {
-        val perFrame = pixels * 3 / 2
-        val fit = (memoryBytes * 4 / 10 / perFrame.coerceAtLeast(1)).toInt()
+    /**
+     * As many of [wanted] frames of [pixels] each as fit comfortably in [memoryBytes].
+     * [bytesPerPixel]: what one frame takes (1.5 for ordinary frames, 2 for sensor frames);
+     * [workBytesPerPixel]: what the merge needs on top, whatever the number of frames.
+     */
+    fun framesThatFit(wanted: Int, pixels: Long, memoryBytes: Long, bytesPerPixel: Float = 1.5f, workBytesPerPixel: Float = 0f): Int {
+        val room = memoryBytes * 0.4 - pixels * workBytesPerPixel.toDouble()
+        val fit = (room / (pixels * bytesPerPixel.toDouble()).coerceAtLeast(1.0)).toInt()
         return wanted.coerceAtMost(fit).coerceAtLeast(1)
     }
 }
