@@ -21,6 +21,8 @@ object Develop {
         val outV = ByteArray(w * h / 4)
         val ccm = info.ccm
         val a = look.colour
+        val own = IntArray(4) { info.colour(it) }
+        val besideIsRed = BooleanArray(4) { info.colour(it xor 1) == 0 }
         Parallel.rows(h / 2) { cy ->
             val rgb = FloatArray(3)
             for (cx in 0 until w / 2) {
@@ -29,7 +31,8 @@ object Develop {
                 for (p in 0..3) {
                     val x = cx * 2 + p % 2
                     val y = cy * 2 + p / 2
-                    pixel(m, info, x, y, rgb)
+                    val pos = (y and 1) * 2 + (x and 1)
+                    pixel(m, x, y, own[pos], besideIsRed[pos], rgb)
                     // Sensor colours → standard colours (linear light), then the display curve.
                     val lr = (ccm[0] * rgb[0] + ccm[1] * rgb[1] + ccm[2] * rgb[2]).coerceIn(0f, 1f)
                     val lg = (ccm[3] * rgb[0] + ccm[4] * rgb[1] + ccm[5] * rgb[2]).coerceIn(0f, 1f)
@@ -57,7 +60,7 @@ object Develop {
     }
 
     /** Red, green and blue at one pixel, from its own sample and its neighbours'. */
-    private fun pixel(m: RawMerge.Merged, info: RawInfo, x: Int, y: Int, out: FloatArray) {
+    private fun pixel(m: RawMerge.Merged, x: Int, y: Int, own: Int, besideIsRed: Boolean, out: FloatArray) {
         val s = m.stride
         val l = m.light
         val i = (y + 2) * s + x + 2
@@ -66,13 +69,10 @@ object Develop {
         val diagonal = l[i - s - 1] + l[i - s + 1] + l[i + s - 1] + l[i + s + 1]
         val farH = l[i - 2] + l[i + 2]
         val farV = l[i - 2 * s] + l[i + 2 * s]
-        val pos = (y and 1) * 2 + (x and 1)
-        val own = info.colour(pos)
         if (own == 1) {
             // A green pixel: red and blue lie beside it, one pair left-right, the other up-down.
             val beside = ((5 * c + 4 * (l[i - 1] + l[i + 1]) - diagonal - farH + 0.5f * farV) / 8f).coerceAtLeast(0f)
             val above = ((5 * c + 4 * (l[i - s] + l[i + s]) - diagonal - farV + 0.5f * farH) / 8f).coerceAtLeast(0f)
-            val besideIsRed = info.colour(pos xor 1) == 0
             out[0] = if (besideIsRed) beside else above
             out[1] = c
             out[2] = if (besideIsRed) above else beside

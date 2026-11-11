@@ -94,7 +94,7 @@ class Look(val gain: FloatArray, val colour: FloatArray) {
             //    held towards "no change" so a scene of one colour can't produce a wild mapping.
             val xtx = Array(4) { DoubleArray(4) }
             val xty = Array(3) { DoubleArray(4) }
-            var used = 0
+            var used = 0.0
             val x = DoubleArray(4)
             for (i in 0 until n) {
                 val g = gain[lum(mine, i).toInt().coerceIn(0, 255)]
@@ -104,13 +104,15 @@ class Look(val gain: FloatArray, val colour: FloatArray) {
                     val p = phone[i * 3 + c]
                     if (p < 4f || p > 250f || x[c] < 2.0 || x[c] > 252.0) clipped = true
                 }
-                if (clipped) continue
+                // Cells at the very ends of the range say less (their true value may lie beyond),
+                // but in a scene of strong colours they are most of what there is.
+                val wt = if (clipped) CLIPPED_WEIGHT else 1.0
                 x[3] = 255.0
-                for (r in 0..3) for (c in 0..3) xtx[r][c] += x[r] * x[c]
-                for (ch in 0..2) for (c in 0..3) xty[ch][c] += phone[i * 3 + ch] * x[c]
-                used++
+                for (r in 0..3) for (c in 0..3) xtx[r][c] += wt * x[r] * x[c]
+                for (ch in 0..2) for (c in 0..3) xty[ch][c] += wt * phone[i * 3 + ch] * x[c]
+                used += wt
             }
-            if (used < n / 8) return Look(gain, PLAIN.colour)
+            if (used < n / 32.0) return Look(gain, PLAIN.colour)
             val hold = HOLD * used * 255.0 * 255.0
             val colour = FloatArray(12)
             for (ch in 0..2) {
@@ -123,6 +125,23 @@ class Look(val gain: FloatArray, val colour: FloatArray) {
         }
 
         private const val HOLD = 0.0005
+        private const val CLIPPED_WEIGHT = 0.3
+
+        /**
+         * How far two pictures of the same scene are apart (coarse grids as from [coarse]):
+         * the average difference per colour value, 0..255. Used to check a developed photo
+         * against the phone's own picture before trusting it.
+         */
+        fun distance(a: FloatArray, b: FloatArray): Float {
+            val n = minOf(a.size, b.size)
+            if (n == 0) return Float.MAX_VALUE
+            var sum = 0.0
+            for (i in 0 until n) sum += kotlin.math.abs(a[i] - b[i])
+            return (sum / n).toFloat()
+        }
+
+        /** A developed photo further than this from the phone's own picture isn't trusted. */
+        const val TRUSTED_WITHIN = 16f
 
         /** Solves the 4×4 system in the augmented matrix [m]; null if it can't be. */
         private fun solve(m: Array<DoubleArray>): DoubleArray? {

@@ -31,7 +31,10 @@ import java.util.concurrent.Executors
 /** Turns a burst into a finished photo in the gallery, off the main thread, one at a time. */
 class PhotoMaker(context: Context) {
 
-    class Photo(val uri: Uri, val merged: Int, val of: Int, val millis: Long, val fromSensor: Boolean = false, val megapixels: Float = 0f)
+    /** [sensorFailed]: the sensor's frames couldn't be turned into a trustworthy photo on this phone (the phone's own picture was saved). */
+    class Photo(val uri: Uri, val merged: Int, val of: Int, val millis: Long, val fromSensor: Boolean = false, val megapixels: Float = 0f, val sensorFailed: Boolean = false)
+
+    private class SensorNotTrusted(message: String) : Exception(message)
 
     private val app = context.applicationContext
     private val worker = Executors.newSingleThreadExecutor { r -> Thread(r, "anycam-photo") }
@@ -82,6 +85,16 @@ class PhotoMaker(context: Context) {
                 } else Look.PLAIN
                 val developed = Develop.develop(merged, info, look)
                 val t2 = System.currentTimeMillis()
+                // Before trusting it: does it show what the phone's own picture shows? A phone that
+                // reports its sensor oddly would give a wrong-looking photo, and that mustn't be saved.
+                if (guide != null && sameShape) {
+                    val apart = Look.distance(Look.coarse(developed), Look.coarse(guide))
+                    Log.i(TAG, "sensor photo check: $apart from the phone's picture (limit ${Look.TRUSTED_WITHIN}); filters ${info.cfa}, " +
+                        "black ${info.black.joinToString { it.toInt().toString() }}, white ${info.white.toInt()}, " +
+                        "matrix ${info.ccm.joinToString { "%.2f".format(Locale.US, it) }}, look colour ${look.colour.joinToString { "%.2f".format(Locale.US, it) }}, " +
+                        "curve ${look.gain.filterIndexed { i, _ -> i % 51 == 0 }.joinToString { "%.2f".format(Locale.US, it) }}")
+                    if (apart > Look.TRUSTED_WITHIN) throw SensorNotTrusted("developed photo is $apart from the phone's picture")
+                }
                 val finished = Detail.sharpen(developed, merged.noise / kotlin.math.sqrt(merged.used.toFloat()))
                 val uri = save(encode(finished), shot)
                 Log.i(TAG, "photo from the sensor: ${merged.w}x${merged.h}, ${merged.used} of ${frames.size} shots merged " +
@@ -92,7 +105,7 @@ class PhotoMaker(context: Context) {
             } catch (e: Throwable) {
                 Log.e(TAG, "sensor photo failed, keeping the phone's own picture", e)
                 try {
-                    guide?.let { g -> save(encode(g), shot)?.let { Photo(it, 1, frames.size, System.currentTimeMillis() - t0) } }
+                    guide?.let { g -> save(encode(g), shot)?.let { Photo(it, 1, frames.size, System.currentTimeMillis() - t0, sensorFailed = true) } }
                 } catch (e2: Throwable) {
                     null
                 }

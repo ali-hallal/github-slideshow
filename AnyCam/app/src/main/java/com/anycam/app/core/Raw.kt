@@ -98,12 +98,31 @@ object RawMerge {
         val cols = fields.firstOrNull()?.cols ?: 1
         val scale = FloatArray(4) { 1f / (info.white - info.black[it]).coerceAtLeast(1f) }
         val gain = FloatArray(4) { info.wb[info.colour(it)] }
+        val colourAt = IntArray(4) { info.colour(it) }
+        val black = info.black
+        // The lens map between its cells: where each column of filter groups falls in it.
+        val sh = info.shading
+        val shX = IntArray(pw)
+        val shAx = FloatArray(pw)
+        if (sh != null) for (qx in 0 until pw) {
+            val fx = (qx * 2 + 0.5f) / (w - 1f) * (sh.cols - 1)
+            shX[qx] = fx.toInt().coerceIn(0, sh.cols - 2)
+            shAx[qx] = (fx - shX[qx]).coerceIn(0f, 1f)
+        }
         var contributed = 0.0
         val lock = Any()
 
         Parallel.rows(ph) { qy ->
             var rowWeight = 0.0
             val sum = FloatArray(4)
+            val lens = FloatArray(3) { 1f }
+            var shRow = 0
+            var shAy = 0f
+            if (sh != null) {
+                val fy = (qy * 2 + 0.5f) / (h - 1f) * (sh.rows - 1)
+                shRow = fy.toInt().coerceIn(0, sh.rows - 2)
+                shAy = (fy - shRow).coerceIn(0f, 1f)
+            }
             for (qx in 0 until pw) {
                 // One 2×2 filter group at a time: its four samples move together.
                 val x = qx * 2
@@ -130,16 +149,23 @@ object RawMerge {
                     wsum += wt
                 }
                 rowWeight += wsum
+                if (sh != null) {
+                    // One lens gain per colour for the whole group (it changes slowly).
+                    val o0 = (shRow * sh.cols + shX[qx]) * 3
+                    val o1 = o0 + sh.cols * 3
+                    val ax = shAx[qx]
+                    for (c in 0..2) {
+                        lens[c] = (sh.gains[o0 + c] * (1 - ax) + sh.gains[o0 + 3 + c] * ax) * (1 - shAy) +
+                            (sh.gains[o1 + c] * (1 - ax) + sh.gains[o1 + 3 + c] * ax) * shAy
+                    }
+                }
+                val inv = 1f / wsum
                 for (p in 0..3) {
-                    val px = x + p % 2
-                    val py = y + p / 2
-                    var v = (sum[p] / wsum - info.black[p]) * scale[p]
+                    var v = (sum[p] * inv - black[p]) * scale[p]
                     if (v < 0f) v = 0f
-                    val sh = info.shading
-                    if (sh != null) v *= sh.at(info.colour(p), px / (w - 1f), py / (h - 1f))
                     // A full pixel is white whatever its colour (no tinted highlights).
-                    v *= gain[p]
-                    light[(py + 2) * stride + px + 2] = if (v > 1f) 1f else v
+                    v *= lens[colourAt[p]] * gain[p]
+                    light[(y + p / 2 + 2) * stride + x + p % 2 + 2] = if (v > 1f) 1f else v
                 }
             }
             synchronized(lock) { contributed += rowWeight }

@@ -310,6 +310,48 @@ class CoreTest {
         assertTrue("closely: ${distance(styled)}", distance(styled) < 12.0)
         // Nothing to compare with: the picture as developed.
         assertSame(Look.PLAIN, Look.fit(FloatArray(30), FloatArray(30)))
+        // The check before a developed photo is trusted: close to the phone's picture, or not.
+        assertTrue(Look.distance(Look.coarse(styled), Look.coarse(phone)) < Look.TRUSTED_WITHIN)
+    }
+
+    /**
+     * A phone that says nothing useful about its sensor (no white balance, no colour matrix) and
+     * a scene of strong, clipped colours: the look taken from the phone's picture must still set
+     * the colours right — and where it can't, the photo must be recognised as not trustworthy.
+     */
+    @Test
+    fun aSilentPhoneAndStrongColoursStillComeOutRight() {
+        val w = 320
+        val h = 240
+        // Flat areas of strong colour, some at the very top of the range.
+        val colours = listOf(floatArrayOf(255f, 255f, 255f), floatArrayOf(224f, 255f, 100f), floatArrayOf(70f, 224f, 112f),
+            floatArrayOf(165f, 120f, 105f), floatArrayOf(128f, 90f, 160f), floatArrayOf(255f, 255f, 190f), floatArrayOf(20f, 12f, 8f))
+        fun at(x: Int, y: Int) = colours[((x / 46) + (y / 40) * 3) % colours.size]
+        val truth = FloatArray(400 * 320 * 3)
+        for (y in 0 until 320) for (x in 0 until 400) for (c in 0..2) truth[(y * 400 + x) * 3 + c] = at(x, y)[c]
+        // The sensor as it is (green-heavy, unbalanced), and a phone that reports neutral values for it.
+        val shot = sensorShot(truth, 400, w, h, 0, 0, 3f)
+        val silent = RawInfo(0, FloatArray(4) { black }, white, floatArrayOf(1f, 1f, 1f), RawInfo.IDENTITY.copyOf())
+        val merged = RawMerge.merge(listOf(shot), silent)
+        val py = ByteArray(w * h)
+        val pu = ByteArray(w * h / 4)
+        val pv = ByteArray(w * h / 4)
+        for (y in 0 until h) for (x in 0 until w) {
+            val c = at(x + 20, y + 20)
+            py[y * w + x] = (0.299f * c[0] + 0.587f * c[1] + 0.114f * c[2]).roundToInt().coerceIn(0, 255).toByte()
+            if (x % 2 == 0 && y % 2 == 0) {
+                pu[(y / 2) * (w / 2) + x / 2] = (-0.168736f * c[0] - 0.331264f * c[1] + 0.5f * c[2] + 128).roundToInt().coerceIn(0, 255).toByte()
+                pv[(y / 2) * (w / 2) + x / 2] = (0.5f * c[0] - 0.418688f * c[1] - 0.081312f * c[2] + 128).roundToInt().coerceIn(0, 255).toByte()
+            }
+        }
+        val phone = Yuv(w, h, py, pu, pv)
+        val plain = Develop.develop(merged, silent)
+        val look = Look.fit(Develop.coarse(merged, silent, Look.GRID_W, Look.GRID_H), Look.coarse(phone))
+        val styled = Develop.develop(merged, silent, look)
+        val before = Look.distance(Look.coarse(plain), Look.coarse(phone))
+        val after = Look.distance(Look.coarse(styled), Look.coarse(phone))
+        assertTrue("undeveloped colours are far off and recognised as such: $before", before > Look.TRUSTED_WITHIN)
+        assertTrue("the phone's look sets them right: $before -> $after", after < Look.TRUSTED_WITHIN)
     }
 
     @Test

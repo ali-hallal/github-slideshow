@@ -68,6 +68,8 @@ class MainActivity : Activity(), CameraEngine.Listener {
     private var taking = false
     private var making = 0
     private var lastPhoto: Uri? = null
+    /** Sensor frames turned out not to be usable on this phone (found out by checking a photo). */
+    private var sensorOff = false
     /** The phone maker's processing in use (one of the camera's extensions), or null for AnyCam's own merge. */
     private var extension: Int? = null
 
@@ -284,7 +286,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
         } else null
         val wanted = plan?.frames ?: Geometry.burstFrames(iso)
         // Sensor frames where the camera gives them — at 1×, since zoom doesn't reach them.
-        val raw = engine.rawWorks && abs(zoom - 1f) < 0.01f
+        val raw = engine.rawWorks && !sensorOff && abs(zoom - 1f) < 0.01f
         val count = if (raw) Geometry.framesThatFit(wanted, engine.rawPixels, Runtime.getRuntime().maxMemory(), bytesPerPixel = 2f, workBytesPerPixel = 7f)
         else Geometry.framesThatFit(wanted, size.width.toLong() * size.height, Runtime.getRuntime().maxMemory())
         if (count > 3) say(getString(R.string.hold_still))
@@ -351,6 +353,8 @@ class MainActivity : Activity(), CameraEngine.Listener {
             lastPhoto = photo.uri
             lastMerged = photo.merged
             lastFromSensor = photo.fromSensor
+            // This phone's sensor frames didn't develop into a trustworthy photo: ordinary frames from now on.
+            if (photo.sensorFailed) sensorOff = true
             photoCount++
             say(if (photo.fromSensor) getString(R.string.merged_sensor, photo.merged, photo.megapixels.roundToInt()) else getString(R.string.saved))
             showThumbnail(photo.uri)
