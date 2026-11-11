@@ -24,8 +24,8 @@
     <string name="mode_auto">Auto+</string>
     <string name="mode_beauty">Beauty</string>
     <string name="mode_other">Extra %1$d</string>
-    <string name="by_phone">%1$s · by your phone's own processing</string>
+    <string name="by_phone">%1$s · by your phone\'s own processing</string>
     <string name="by_anycam">Photo · several shots merged by AnyCam</string>
     <string name="phone_working">Hold still… your phone is working on it</string>
-    <string name="phone_done">Saved · made by your phone's own processing</string>
+    <string name="phone_done">Saved · made by your phone\'s own processing</string>
 </resources>
