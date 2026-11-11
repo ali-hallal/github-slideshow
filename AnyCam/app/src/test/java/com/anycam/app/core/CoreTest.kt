@@ -265,6 +265,37 @@ class CoreTest {
         }
     }
 
+    /**
+     * Fine texture (cloth, print) with the shots a pixel off each other: laid on top of each
+     * other they would blur it. The merge must keep what one shot shows.
+     */
+    @Test
+    fun fineDetailSurvivesTheMerge() {
+        val w = 480
+        val h = 360
+        val tw = 560
+        // Threads three pixels wide at changing angles, and thin dark bars like small print.
+        val grey = FloatArray(tw * 440) { i ->
+            val x = i % tw
+            val y = i / tw
+            val t = if (((x / 48) + (y / 48)) % 2 == 0) kotlin.math.sin((x + 0.6f * y) * 2.1f) else kotlin.math.sin((y - 0.5f * x) * 2.1f)
+            (150f + 28f * t + (if ((x / 3) % 7 == 0 && y % 96 < 20) -70f else 0f)).coerceIn(10f, 245f)
+        }
+        val truth = FloatArray(grey.size * 3) { grey[it / 3] }
+        val noise = 3f
+        // The sensor's own noise figure, as a camera reports it.
+        val info = RawInfo(0, FloatArray(4) { black }, white, wb, ccm, null, 0f, (noise / (white - black)).pow(2))
+        val moves = listOf(0 to 0, 1 to 0, 3 to -1, -2 to 5, 5 to 3)
+        val shots = moves.map { (ox, oy) -> sensorShot(truth, tw, w, h, ox, oy, noise) }
+        val merged = RawMerge.merge(shots, info)
+        val (rx, ry) = moves[merged.reference]
+        val one = Develop.develop(RawMerge.merge(listOf(shots[merged.reference]), info), info)
+        val all = Develop.develop(merged, info)
+        val errOne = pictureError(one, truth, tw, rx, ry)
+        val errAll = pictureError(all, truth, tw, rx, ry)
+        assertTrue("merged ($errAll) keeps the detail one shot has ($errOne)", errAll < errOne * 1.1)
+    }
+
     @Test
     fun theDevelopedPhotoTakesOnThePhonesLook() {
         val w = 320

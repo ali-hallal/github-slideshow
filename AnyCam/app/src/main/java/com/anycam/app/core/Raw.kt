@@ -25,6 +25,12 @@ class RawInfo(
     val wb: FloatArray,
     val ccm: FloatArray,
     val shading: Shading? = null,
+    /**
+     * How noisy the sensor is, as the camera states it for this shot: a reading x (0 = black,
+     * 1 = full) varies by about sqrt([noiseS]·x + [noiseO]). Null where the phone doesn't say.
+     */
+    val noiseS: Float? = null,
+    val noiseO: Float? = null,
 ) {
     /** 0 red, 1 green, 2 blue at pattern position [pos] (row%2 * 2 + column%2). */
     fun colour(pos: Int): Int = PATTERNS[cfa.coerceIn(0, 3)][pos]
@@ -91,6 +97,27 @@ object RawMerge {
         val tileLimit = noise * 2.5f + 2f
         val slope = 1f / (drop - keep)
 
+        // Single samples, on the same curve as the alignment copy (so noise is about the same
+        // size in shadows and highlights). One sample is noisier than a group of four: about twice.
+        val top = info.white.toInt().coerceIn(1, 65535)
+        val blackMean = info.black.sum() / 4f
+        val range = (info.white - blackMean).coerceAtLeast(1f)
+        val curve = FloatArray(top + 1) { v -> sqrt(((v - blackMean) / range).coerceIn(0f, 1f)) * 255f }
+        // How far two samples of the same thing may differ, by brightness: from the sensor's own
+        // noise figures where the camera gives them; otherwise from the calmest parts of this
+        // burst (the typical tile would do for noise, but in a scene full of fine texture it is
+        // mostly the texture sitting a pixel off — exactly what must not be averaged in).
+        val calm = if (costs.isEmpty()) 0f else costs[costs.size / 10]
+        val s = info.noiseS
+        val o = info.noiseO
+        val keepAt = FloatArray(top + 1) { v ->
+            val sigma = if (s != null && o != null) {
+                val x = ((v - blackMean) / range).coerceIn(0.002f, 1f)
+                127.5f * sqrt((s + o / x).coerceAtLeast(0f))
+            } else calm * 1.77f // one sample is about twice as noisy as a group of four
+            (2f * 1.414f * sigma).coerceIn(1.5f, 40f)
+        }
+
         val stride = w + 4
         val light = FloatArray(stride * (h + 4))
         val pw = refProxy.w
@@ -115,6 +142,9 @@ object RawMerge {
         Parallel.rows(ph) { qy ->
             var rowWeight = 0.0
             val sum = FloatArray(4)
+            val wsums = FloatArray(4)
+            val refCurve = FloatArray(4)
+            val refKeep = FloatArray(4)
             val lens = FloatArray(3) { 1f }
             var shRow = 0
             var shAy = 0f
@@ -129,7 +159,13 @@ object RawMerge {
                 val y = qy * 2
                 val tile = (qy / Align.TILE) * cols + qx / Align.TILE
                 val r = refProxy.px[qy * pw + qx].toInt() and 0xFF
-                for (p in 0..3) sum[p] = (ref.px[(y + p / 2) * w + x + p % 2].toInt() and 0xFFFF).toFloat()
+                for (p in 0..3) {
+                    val v = ref.px[(y + p / 2) * w + x + p % 2].toInt() and 0xFFFF
+                    sum[p] = v.toFloat()
+                    wsums[p] = 1f
+                    refCurve[p] = curve[if (v > top) top else v]
+                    refKeep[p] = keepAt[if (v > top) top else v]
+                }
                 var wsum = 1f
                 for (k in fields.indices) {
                     val f = fields[k]
@@ -142,10 +178,18 @@ object RawMerge {
                     if (wt == 0f) continue
                     val fr = same[others[k]]
                     val o = fy * 2 * w + fx * 2
-                    sum[0] += (fr.px[o].toInt() and 0xFFFF) * wt
-                    sum[1] += (fr.px[o + 1].toInt() and 0xFFFF) * wt
-                    sum[2] += (fr.px[o + w].toInt() and 0xFFFF) * wt
-                    sum[3] += (fr.px[o + w + 1].toInt() and 0xFFFF) * wt
+                    // Frames can only be laid on each other in steps of a whole filter group, so
+                    // fine detail may still sit a pixel off. Each sample is therefore checked on
+                    // its own: where it differs from the reference by more than noise would, it
+                    // is left out, and the reference keeps its detail there.
+                    for (p in 0..3) {
+                        val a = fr.px[o + (p / 2) * w + p % 2].toInt() and 0xFFFF
+                        val ds = abs(curve[if (a > top) top else a] - refCurve[p])
+                        val keepS = refKeep[p]
+                        val ws = if (ds <= keepS) wt else if (ds >= 1.5f * keepS) 0f else wt * (1.5f * keepS - ds) / (0.5f * keepS)
+                        sum[p] += a * ws
+                        wsums[p] += ws
+                    }
                     wsum += wt
                 }
                 rowWeight += wsum
@@ -159,9 +203,8 @@ object RawMerge {
                             (sh.gains[o1 + c] * (1 - ax) + sh.gains[o1 + 3 + c] * ax) * shAy
                     }
                 }
-                val inv = 1f / wsum
                 for (p in 0..3) {
-                    var v = (sum[p] * inv - black[p]) * scale[p]
+                    var v = (sum[p] / wsums[p] - black[p]) * scale[p]
                     if (v < 0f) v = 0f
                     // A full pixel is white whatever its colour (no tinted highlights).
                     v *= lens[colourAt[p]] * gain[p]

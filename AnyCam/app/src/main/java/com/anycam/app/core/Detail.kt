@@ -68,4 +68,34 @@ object Detail {
     }
 
     const val AMOUNT = 1.5f
+    /** For photos developed from the sensor: nothing has sharpened them yet, as a phone's own processing would have. */
+    const val SENSOR_AMOUNT = 2.4f
+
+    /**
+     * Smooths colour slightly (1-2-1 across and down on the colour planes), leaving brightness
+     * alone: takes out the false colour that fine patterns leave when a picture is developed
+     * from the sensor, which the eye reads as tint, never as detail.
+     */
+    fun calmColour(photo: Yuv): Yuv = Yuv(photo.w, photo.h, photo.y, soften(photo.u, photo.cw, photo.ch), soften(photo.v, photo.cw, photo.ch))
+
+    private fun soften(src: ByteArray, w: Int, h: Int): ByteArray {
+        if (w < 3 || h < 3) return src
+        val across = ShortArray(w * h)
+        Parallel.rows(h) { y ->
+            val o = y * w
+            for (x in 0 until w) {
+                val l = src[o + if (x > 0) x - 1 else x].toInt() and 0xFF
+                val r = src[o + if (x < w - 1) x + 1 else x].toInt() and 0xFF
+                across[o + x] = (l + 2 * (src[o + x].toInt() and 0xFF) + r).toShort()
+            }
+        }
+        val out = ByteArray(w * h)
+        Parallel.rows(h) { y ->
+            val o = y * w
+            val up = if (y > 0) o - w else o
+            val down = if (y < h - 1) o + w else o
+            for (x in 0 until w) out[o + x] = ((across[up + x] + 2 * across[o + x] + across[down + x] + 8) / 16).toByte()
+        }
+        return out
+    }
 }

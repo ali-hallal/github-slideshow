@@ -56,5 +56,9 @@ fun rawInfo(c: CameraCharacteristics, result: TotalCaptureResult?): RawInfo {
         }
         Shading(map.columnCount, map.rowCount, g)
     } else null
-    return RawInfo(cfa, black, white, wb, ccm, shading)
+    // The sensor's stated noise for this shot (one pair per filter position; they differ little).
+    val profile = result?.get(CaptureResult.SENSOR_NOISE_PROFILE)
+    val noiseS = profile?.takeIf { it.isNotEmpty() }?.map { it.first.toFloat() }?.average()?.toFloat()
+    val noiseO = profile?.takeIf { it.isNotEmpty() }?.map { it.second.toFloat() }?.average()?.toFloat()
+    return RawInfo(cfa, black, white, wb, ccm, shading, noiseS, noiseO)
 }

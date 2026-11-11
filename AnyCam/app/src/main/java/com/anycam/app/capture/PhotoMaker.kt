@@ -95,7 +95,7 @@ class PhotoMaker(context: Context) {
                         "curve ${look.gain.filterIndexed { i, _ -> i % 51 == 0 }.joinToString { "%.2f".format(Locale.US, it) }}")
                     if (apart > Look.TRUSTED_WITHIN) throw SensorNotTrusted("developed photo is $apart from the phone's picture")
                 }
-                val finished = Detail.sharpen(developed, merged.noise / kotlin.math.sqrt(merged.used.toFloat()))
+                val finished = Detail.sharpen(Detail.calmColour(developed), merged.noise / kotlin.math.sqrt(merged.used.toFloat()), Detail.SENSOR_AMOUNT)
                 val uri = save(encode(finished), shot)
                 Log.i(TAG, "photo from the sensor: ${merged.w}x${merged.h}, ${merged.used} of ${frames.size} shots merged " +
                     "(noise ${"%.1f".format(Locale.US, merged.noise)}), look ${if (look === Look.PLAIN) "plain" else "from the phone"}, " +
