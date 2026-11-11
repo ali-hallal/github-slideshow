@@ -1,0 +1,100 @@
+name: AnyCam Android build
+
+on:
+  push:
+    paths:
+      - "AnyCam/**"
+      - ".github/workflows/anycam-android.yml"
+  pull_request:
+    paths:
+      - "AnyCam/**"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: AnyCam
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # The photo engine is plain Kotlin: its tests run here in seconds, no phone needed.
+      - name: Test the photo engine
+        run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
+
+      - name: Build the APKs
+        run: ./gradlew assembleDebug assembleBenchmark --no-daemon --stacktrace
+
+      # Optimised build: the one to install.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AnyCam-apk
+          path: AnyCam/app/build/outputs/apk/benchmark/*.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AnyCam-debug-apk
+          path: AnyCam/app/build/outputs/apk/debug/*.apk
+
+  emulator-test:
+    # Runs the app on an Android emulator with a virtual camera and takes real photos.
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: AnyCam
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Build app and test APKs
+        run: ./gradlew assembleBenchmark assembleBenchmarkAndroidTest --no-daemon
+
+      - name: Run tests on emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back emulated -camera-front emulated
+          working-directory: AnyCam
+          script: |
+            adb shell settings put global hide_error_dialogs 1 || true
+            adb shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS || true
+            adb logcat -c
+            ./gradlew connectedBenchmarkAndroidTest --no-daemon || touch tests-failed
+            adb logcat -d -v time AnyCam:V AnyCamTest:V AndroidRuntime:E CameraService:W '*:S' | tail -200
+            adb pull /sdcard/Download/anycam-screens screens || true
+            for f in screens/*.jpg; do echo "=== SCREEN $(basename $f)"; base64 -w 2000 "$f"; echo "=== END"; done
+            test ! -f tests-failed
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AnyCam-emulator-test-report
+          path: |
+            AnyCam/app/build/reports/androidTests/
+            AnyCam/screens/

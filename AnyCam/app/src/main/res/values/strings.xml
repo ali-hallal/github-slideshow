@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AnyCam</string>
+    <string name="shutter">Take photo</string>
+    <string name="switch_camera">Switch camera</string>
+    <string name="last_photo">Last photo</string>
+    <string name="light_off">Light</string>
+    <string name="light_on">Light on</string>
+    <string name="needs_camera">AnyCam needs the camera permission to take photos</string>
+    <string name="no_camera">No camera found on this device</string>
+    <string name="hold_still">Hold still…</string>
+    <string name="merging">Merging %1$d shots…</string>
+    <string name="saving">Saving…</string>
+    <string name="merged">%1$d shots merged into one</string>
+    <string name="saved">Saved</string>
+    <string name="not_saved">The photo couldn\'t be saved</string>
+    <string name="brightness">Brightness %1$s</string>
+    <string name="brightness_auto">Brightness automatic</string>
+    <string name="zoom_to">Zoom %1$s</string>
+</resources>
