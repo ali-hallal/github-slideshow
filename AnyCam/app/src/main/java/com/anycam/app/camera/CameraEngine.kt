@@ -81,6 +81,8 @@ class CameraEngine(context: Context, private val listener: Listener) {
     private var burstFailed = 0
     private var burstRotation = 0
     private var burstStarted = false
+    private var burstIso: Int? = null
+    private var burstExposure: Long? = null
     private val burstFrames = ArrayList<Yuv>()
 
     /** The cameras to offer: the first back and the first front camera the phone lists. */
@@ -350,8 +352,12 @@ class CameraEngine(context: Context, private val listener: Listener) {
 
     // ------------------------------------------------------------------ bursts
 
-    /** Takes [count] full-size shots in a row at one exposure. [rotation]: degrees to turn them upright. */
-    fun takeBurst(count: Int, rotation: Int) = handler.post {
+    /**
+     * Takes [count] full-size shots in a row at one exposure. [rotation]: degrees to turn them
+     * upright. [exposure]: ISO and shutter time (ns) to use instead of auto exposure's, on
+     * cameras that take them.
+     */
+    fun takeBurst(count: Int, rotation: Int, exposure: Pair<Int, Long>? = null) = handler.post {
         val cam = info
         val d = device
         val s = session
@@ -366,7 +372,18 @@ class CameraEngine(context: Context, private val listener: Listener) {
             b.addTarget(frames.surface)
             applyControls(b)
             // One exposure and colour for the whole burst, so the shots can be laid on each other.
-            if (cam.canLockExposure) b.set(CaptureRequest.CONTROL_AE_LOCK, true)
+            if (exposure != null && cam.isoRange != null) {
+                b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
+                b.set(CaptureRequest.SENSOR_SENSITIVITY, exposure.first)
+                b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposure.second)
+                b.set(CaptureRequest.SENSOR_FRAME_DURATION, exposure.second)
+                burstIso = exposure.first
+                burstExposure = exposure.second
+            } else {
+                if (cam.canLockExposure) b.set(CaptureRequest.CONTROL_AE_LOCK, true)
+                burstIso = liveIso
+                burstExposure = liveExposure
+            }
             if (cam.canLockWhiteBalance) b.set(CaptureRequest.CONTROL_AWB_LOCK, true)
             val request = b.build()
             burstWanted = n
@@ -423,7 +440,7 @@ class CameraEngine(context: Context, private val listener: Listener) {
         val frames = ArrayList(burstFrames)
         burstFrames.clear()
         burstWanted = 0
-        val shot = Shot(burstRotation, liveIso, liveExposure, System.currentTimeMillis())
+        val shot = Shot(burstRotation, burstIso, burstExposure, System.currentTimeMillis())
         if (frames.isEmpty()) main.post { listener.onCaptureFailed("The camera didn't deliver the photo") }
         else main.post { listener.onBurst(frames, shot) }
     }

@@ -14,6 +14,7 @@ import android.os.Looper
 import android.provider.MediaStore
 import android.util.Log
 import com.anycam.app.camera.CameraEngine
+import com.anycam.app.core.Detail
 import com.anycam.app.core.Merge
 import com.anycam.app.core.Yuv
 import java.io.ByteArrayOutputStream
@@ -43,7 +44,9 @@ class PhotoMaker(context: Context) {
                     Log.w(TAG, "merge ran out of memory, saving one shot")
                     Merge.Result(frames.first(), 0, 1, 0f)
                 }
-                val jpeg = encode(result.photo)
+                // What noise is left after averaging [used] shots; with that out of the way, the detail.
+                val finished = Detail.sharpen(result.photo, result.noise / kotlin.math.sqrt(result.used.toFloat()))
+                val jpeg = encode(finished)
                 val uri = save(jpeg, shot)
                 Log.i(TAG, "photo: ${result.photo.w}x${result.photo.h}, ${result.used} of ${frames.size} shots merged " +
                     "(noise ${"%.1f".format(Locale.US, result.noise)}), ISO ${shot.iso}, ${System.currentTimeMillis() - t0} ms")

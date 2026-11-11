@@ -25,6 +25,7 @@ import com.anycam.app.R
 import com.anycam.app.camera.CameraEngine
 import com.anycam.app.camera.CameraInfo
 import com.anycam.app.capture.PhotoMaker
+import com.anycam.app.core.Exposure
 import com.anycam.app.core.Geometry
 import com.anycam.app.core.Yuv
 import java.util.Locale
@@ -58,6 +59,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
     private var ev = 0
     private var torch = false
     private var liveIso: Int? = null
+    private var liveExposure: Long? = null
     private var deviceDegrees = 0
     private var resumed = false
     private var taking = false
@@ -255,10 +257,18 @@ class MainActivity : Activity(), CameraEngine.Listener {
         shutter.busy = true
         shutter.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
         val size = photoSize
-        val wanted = Geometry.burstFrames(liveIso)
+        // In dim light: faster, noisier shots, and more of them (sharper, and the merge cleans them).
+        val iso = liveIso
+        val exposure = liveExposure
+        val isoRange = cam.isoRange
+        val exposureRange = cam.exposureRange
+        val plan = if (iso != null && exposure != null && isoRange != null && exposureRange != null && !torch) {
+            Exposure.plan(iso, exposure, isoRange.lower, isoRange.upper, exposureRange.lower, exposureRange.upper)
+        } else null
+        val wanted = plan?.frames ?: Geometry.burstFrames(iso)
         val count = Geometry.framesThatFit(wanted, size.width.toLong() * size.height, Runtime.getRuntime().maxMemory())
         if (count > 3) say(getString(R.string.hold_still))
-        engine.takeBurst(count, Geometry.photoRotation(cam.sensorOrientation, deviceDegrees, cam.front))
+        engine.takeBurst(count, Geometry.photoRotation(cam.sensorOrientation, deviceDegrees, cam.front), plan?.let { it.iso to it.exposureNs })
     }
 
     private var photoSize = Size(0, 0)
@@ -316,6 +326,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
 
     override fun onLive(iso: Int?, exposureNs: Long?) {
         liveIso = iso
+        liveExposure = exposureNs
         readout.text = listOfNotNull(
             iso?.let { "ISO $it" },
             exposureNs?.takeIf { it > 0 }?.let { ns -> if (ns >= 500_000_000L) String.format(Locale.US, "%.1f s", ns / 1e9) else "1/${(1e9 / ns).roundToInt()}" },

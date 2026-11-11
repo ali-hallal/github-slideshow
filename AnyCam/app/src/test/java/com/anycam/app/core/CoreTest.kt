@@ -113,6 +113,59 @@ class CoreTest {
     }
 
     @Test
+    fun dimLightGetsFasterShotsNotBlur() {
+        // Bright: auto exposure is already fast, nothing changes.
+        assertTrue(Exposure.plan(100, 4_000_000L, 50, 6400, 100_000L, 1_000_000_000L) == null)
+        // Dim room (ISO 400, 1/15 s): four times faster, same brightness, more shots.
+        val room = Exposure.plan(400, 66_666_667L, 50, 6400, 100_000L, 1_000_000_000L)!!
+        assertEquals(16_666_667L, room.exposureNs)
+        assertEquals(1600, room.iso)
+        assertTrue(room.frames >= Geometry.burstFrames(400))
+        // Very dim (ISO 1600, 1/8 s): sensitivity stops where grain would win; the shutter gives the rest.
+        val dark = Exposure.plan(1600, 125_000_000L, 50, 16000, 100_000L, 1_000_000_000L)!!
+        assertEquals(Exposure.USABLE_ISO, dark.iso)
+        assertEquals(1600.0 * 125_000_000L, dark.iso.toDouble() * dark.exposureNs, 1600.0 * 125_000_000L * 0.02)
+        assertTrue(dark.exposureNs < 125_000_000L)
+        // Auto exposure already at the sensor's limit: nothing to trade.
+        assertTrue(Exposure.plan(3200, 100_000_000L, 50, 3200, 100_000L, 1_000_000_000L) == null)
+    }
+
+    @Test
+    fun detailIsBroughtOutWithoutSharpeningGrain() {
+        val w = 320
+        val h = 240
+        // A soft edge down the middle, and a flat noisy area either side.
+        val clean = ByteArray(w * h) { i ->
+            val x = i % w
+            (when (x) { in 0..156 -> 80; 157 -> 84; 158 -> 96; 159 -> 120; 160 -> 144; 161 -> 156; else -> 160 }).toByte()
+        }
+        val noisy = ByteArray(w * h) { (((clean[it].toInt() and 255) + rnd.nextGaussian() * 0.7).roundToInt().coerceIn(0, 255)).toByte() }
+        val grey = ByteArray(w * h / 4) { 128.toByte() }
+        val before = Yuv(w, h, noisy, grey, grey)
+        val after = Detail.sharpen(before, 0.7f)
+        fun steepest(p: Yuv): Double {
+            var s = 0.0
+            for (y in 10 until h - 10) s += ((p.y[y * w + 160].toInt() and 255) - (p.y[y * w + 158].toInt() and 255))
+            return s / (h - 20)
+        }
+        fun grain(p: Yuv): Double {
+            var s = 0.0
+            var n = 0
+            for (y in 10 until h - 10) for (x in 10 until 140) {
+                s += ((p.y[y * w + x].toInt() and 255) - 80.0).pow(2)
+                n++
+            }
+            return sqrt(s / n)
+        }
+        assertTrue("the edge is steeper: ${steepest(before)} -> ${steepest(after)}", steepest(after) > steepest(before) * 1.1)
+        assertTrue("flat areas no grainier: ${grain(before)} -> ${grain(after)}", grain(after) < grain(before) * 1.15)
+        // No fringes: nothing brighter or darker than the picture already had.
+        assertTrue(after.y.maxOf { it.toInt() and 255 } <= before.y.maxOf { it.toInt() and 255 })
+        assertTrue(after.y.minOf { it.toInt() and 255 } >= before.y.minOf { it.toInt() and 255 })
+        assertSame("colour is untouched", before.u, after.u)
+    }
+
+    @Test
     fun zoomButtonsAndBurstLengthFollowThePhone() {
         assertEquals(listOf(1f, 2f, 5f, 10f), Geometry.zoomStops(1f, 10f))
         assertEquals(listOf(0.6f, 1f, 2f, 5f), Geometry.zoomStops(0.6f, 8f))

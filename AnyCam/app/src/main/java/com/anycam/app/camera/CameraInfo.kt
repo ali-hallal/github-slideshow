@@ -26,6 +26,9 @@ class CameraInfo(
     val meterRegions: Boolean,
     val canLockExposure: Boolean,
     val canLockWhiteBalance: Boolean,
+    /** The sensor takes an ISO and shutter time directly (null where the phone only does automatic). */
+    val isoRange: Range<Int>?,
+    val exposureRange: Range<Long>?,
 ) {
     val minZoom get() = zoomRatio?.lower ?: 1f
     val maxZoom get() = zoomRatio?.upper ?: maxCropZoom
@@ -33,6 +36,8 @@ class CameraInfo(
     companion object {
         fun from(id: String, c: CameraCharacteristics): CameraInfo {
             val afModes = c.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES) ?: IntArray(0)
+            val manual = c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
+                ?.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR) == true
             val zoomRatio = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) c.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE) else null
             return CameraInfo(
                 id = id,
@@ -50,6 +55,8 @@ class CameraInfo(
                 meterRegions = (c.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0) > 0,
                 canLockExposure = c.get(CameraCharacteristics.CONTROL_AE_LOCK_AVAILABLE) == true,
                 canLockWhiteBalance = c.get(CameraCharacteristics.CONTROL_AWB_LOCK_AVAILABLE) == true,
+                isoRange = if (manual) c.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE) else null,
+                exposureRange = if (manual) c.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE) else null,
             )
         }
     }
