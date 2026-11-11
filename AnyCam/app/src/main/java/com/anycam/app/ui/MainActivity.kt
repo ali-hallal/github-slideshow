@@ -47,6 +47,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
     private lateinit var readout: TextView
     private lateinit var status: TextView
     private lateinit var zoomRow: LinearLayout
+    private lateinit var modeRow: LinearLayout
     private lateinit var flash: View
 
     private lateinit var engine: CameraEngine
@@ -65,6 +66,8 @@ class MainActivity : Activity(), CameraEngine.Listener {
     private var taking = false
     private var making = 0
     private var lastPhoto: Uri? = null
+    /** The phone maker's processing in use (one of the camera's extensions), or null for AnyCam's own merge. */
+    private var extension: Int? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -79,6 +82,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
         readout = findViewById(R.id.readout)
         status = findViewById(R.id.status)
         zoomRow = findViewById(R.id.zoomRow)
+        modeRow = findViewById(R.id.modeRow)
         flash = findViewById(R.id.flash)
 
         engine = CameraEngine(this, this)
@@ -97,6 +101,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
             cameraIndex = (cameraIndex + 1) % cameras.size
             zoom = 1f
             torch = false
+            extension = null
             it.animate().rotationBy(180f).setDuration(250).start()
             openCamera()
         }
@@ -172,7 +177,8 @@ class MainActivity : Activity(), CameraEngine.Listener {
             return
         }
         ready = false
-        engine.open(camera.id, viewfinder.surfaceTexture ?: return)
+        if (extension != null && extension !in camera.extensions) extension = null
+        engine.open(camera.id, viewfinder.surfaceTexture ?: return, extension)
     }
 
     // ------------------------------------------------------------------ touch
@@ -188,6 +194,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
             /** Tap: focus and set the brightness there. */
             override fun onSingleTapUp(e: MotionEvent): Boolean {
                 val cam = info ?: return false
+                if (extension != null) return false
                 if (viewfinder.width == 0) return false
                 val (sx, sy) = Geometry.viewToSensor(e.x / viewfinder.width, e.y / viewfinder.height, cam.sensorOrientation, cam.front)
                 marks.focusAt(e.x, e.y)
@@ -198,6 +205,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
             /** Drag up or down: brighter or darker. */
             override fun onScroll(e1: MotionEvent?, e2: MotionEvent, dx: Float, dy: Float): Boolean {
                 val cam = info ?: return false
+                if (extension != null) return false
                 val start = e1 ?: return false
                 val moved = e2.y - start.y
                 if (dragFromEv == null) {
@@ -233,6 +241,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
 
     private fun setZoom(value: Float) {
         val cam = info ?: return
+        if (!engine.zoomWorks) return
         val z = value.coerceIn(cam.minZoom, cam.maxZoom)
         if (abs(z - zoom) < 0.001f) return
         zoom = z
@@ -256,6 +265,12 @@ class MainActivity : Activity(), CameraEngine.Listener {
         taking = true
         shutter.busy = true
         shutter.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+        if (extension != null) {
+            // The phone's own processing takes and merges its own shots.
+            say(getString(R.string.phone_working), stay = true)
+            engine.takeBurst(1, Geometry.photoRotation(cam.sensorOrientation, deviceDegrees, cam.front))
+            return
+        }
         val size = photoSize
         // In dim light: faster, noisier shots, and more of them (sharper, and the merge cleans them).
         val iso = liveIso
@@ -281,6 +296,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
         // Shown upright: the sensor's long side runs down the screen.
         viewfinder.setShape(previewSize.height, previewSize.width)
         buildZoomRow(info)
+        buildModeRow(info)
         showTorch()
         switchButton.visibility = if (cameras.size > 1) View.VISIBLE else View.INVISIBLE
         status.visibility = View.INVISIBLE
@@ -314,6 +330,26 @@ class MainActivity : Activity(), CameraEngine.Listener {
         }
     }
 
+    override fun onJpeg(jpeg: ByteArray, shot: CameraEngine.Shot) {
+        taking = false
+        shutter.busy = false
+        making++
+        thumbnail.alpha = 0.5f
+        photos.keep(jpeg, shot) { photo ->
+            making--
+            if (making == 0) thumbnail.alpha = 1f
+            if (photo == null) {
+                say(getString(R.string.not_saved))
+                return@keep
+            }
+            lastPhoto = photo.uri
+            lastMerged = 1
+            photoCount++
+            say(getString(R.string.phone_done))
+            showThumbnail(photo.uri)
+        }
+    }
+
     override fun onCaptureFailed(reason: String) {
         taking = false
         shutter.busy = false
@@ -321,6 +357,13 @@ class MainActivity : Activity(), CameraEngine.Listener {
     }
 
     override fun onError(message: String) {
+        if (extension != null) {
+            // The phone's own processing wouldn't start: back to AnyCam's.
+            extension = null
+            say(message)
+            openCamera()
+            return
+        }
         say(message, stay = true)
     }
 
@@ -351,7 +394,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
     private fun buildZoomRow(cam: CameraInfo) {
         zoomRow.removeAllViews()
         val stops = Geometry.zoomStops(cam.minZoom, cam.maxZoom)
-        zoomRow.visibility = if (stops.size > 1) View.VISIBLE else View.GONE
+        zoomRow.visibility = if (stops.size > 1 && (extension == null || engine.zoomWorks)) View.VISIBLE else View.GONE
         val size = (40 * resources.displayMetrics.density).toInt()
         val gap = (4 * resources.displayMetrics.density).toInt()
         for (stop in stops) {
@@ -369,6 +412,44 @@ class MainActivity : Activity(), CameraEngine.Listener {
             zoomRow.addView(chip, LinearLayout.LayoutParams(size, size).apply { setMargins(gap, 0, gap, 0) })
         }
         showZoom()
+    }
+
+    /** AnyCam's own way first, then each kind of processing the phone maker offers on this camera. */
+    private fun buildModeRow(cam: CameraInfo) {
+        modeRow.removeAllViews()
+        modeRow.visibility = if (cam.extensions.isEmpty()) View.GONE else View.VISIBLE
+        if (cam.extensions.isEmpty()) return
+        val density = resources.displayMetrics.density
+        for (mode in listOf<Int?>(null) + cam.extensions.sortedBy { MODE_ORDER.indexOf(it).let { i -> if (i < 0) 99 else i } }) {
+            val on = mode == extension
+            val chip = TextView(this).apply {
+                text = modeName(mode)
+                textSize = 14f
+                gravity = Gravity.CENTER
+                typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+                setTextColor(getColor(if (on) R.color.accent else R.color.white))
+                if (on) setBackgroundResource(R.drawable.chip_bg)
+                setPadding((14 * density).toInt(), 0, (14 * density).toInt(), 0)
+                setOnClickListener {
+                    if (taking || mode == extension) return@setOnClickListener
+                    it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                    extension = mode
+                    say(if (mode == null) getString(R.string.by_anycam) else getString(R.string.by_phone, modeName(mode)))
+                    openCamera()
+                }
+            }
+            modeRow.addView(chip, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, (36 * density).toInt()))
+        }
+    }
+
+    private fun modeName(mode: Int?): String = when (mode) {
+        null -> getString(R.string.mode_photo)
+        EXT_NIGHT -> getString(R.string.mode_night)
+        EXT_HDR -> getString(R.string.mode_hdr)
+        EXT_BOKEH -> getString(R.string.mode_portrait)
+        EXT_AUTO -> getString(R.string.mode_auto)
+        EXT_BEAUTY -> getString(R.string.mode_beauty)
+        else -> getString(R.string.mode_other, mode)
     }
 
     /** The button of the widest step at or below the current zoom is lit and shows the exact zoom. */
@@ -416,5 +497,13 @@ class MainActivity : Activity(), CameraEngine.Listener {
         @Volatile var ready = false
         @Volatile var photoCount = 0
         @Volatile var lastMerged = 0
+
+        // Android's names for the kinds of processing a phone maker can offer other apps.
+        private const val EXT_AUTO = 0
+        private const val EXT_BEAUTY = 1
+        private const val EXT_BOKEH = 2
+        private const val EXT_HDR = 3
+        private const val EXT_NIGHT = 4
+        private val MODE_ORDER = listOf(EXT_NIGHT, EXT_HDR, EXT_BOKEH, EXT_AUTO, EXT_BEAUTY)
     }
 }

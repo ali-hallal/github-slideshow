@@ -10,6 +10,10 @@ features, no hidden settings, no libraries, no network.
   dim light). The sharpest shot becomes the photo; the others are aligned to it tile by tile and
   averaged in, which removes noise without smearing detail. Anything that moved between shots is
   left out there, so there are no ghosts.
+- **Your phone's own processing, where it offers it.** Android lets a phone maker offer its own
+  night, HDR and portrait processing to other apps ("camera extensions"). AnyCam asks the phone
+  which of these it has and shows each as a mode next to its own **Photo**. Nothing is assumed
+  about any brand: a phone that offers none simply shows no extra modes.
 - **Tap** to focus and meter on a point. **Drag up or down** to make the picture brighter or darker.
 - **Pinch** or use the zoom buttons. On phones with several lenses Android switches lens as you zoom.
 - **Light** (torch), **switch camera**, and the **volume keys** as a shutter.

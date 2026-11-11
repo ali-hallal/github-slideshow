@@ -59,13 +59,28 @@ class PhotoMaker(context: Context) {
         }
     }
 
+    /** Saves a photo that is already finished (made by the phone maker's own processing). */
+    fun keep(jpeg: ByteArray, shot: CameraEngine.Shot, done: (Photo?) -> Unit) {
+        worker.execute {
+            val t0 = System.currentTimeMillis()
+            val uri = try {
+                save(jpeg, shot, alreadyUpright = true)
+            } catch (e: Throwable) {
+                Log.e(TAG, "photo failed", e)
+                null
+            }
+            main.post { done(uri?.let { Photo(it, 1, 1, System.currentTimeMillis() - t0) }) }
+        }
+    }
+
     private fun encode(photo: Yuv): ByteArray {
         val out = ByteArrayOutputStream(photo.w * photo.h / 4)
         YuvImage(photo.toNv21(), ImageFormat.NV21, photo.w, photo.h, null).compressToJpeg(Rect(0, 0, photo.w, photo.h), JPEG_QUALITY, out)
         return out.toByteArray()
     }
 
-    private fun save(jpeg: ByteArray, shot: CameraEngine.Shot): Uri? {
+    /** [alreadyUpright]: the JPEG carries its own orientation (it came from the camera as a JPEG). */
+    private fun save(jpeg: ByteArray, shot: CameraEngine.Shot, alreadyUpright: Boolean = false): Uri? {
         val resolver = app.contentResolver
         val name = "ANYCAM_${SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date(shot.takenAt))}.jpg"
         val values = ContentValues().apply {
@@ -79,10 +94,10 @@ class PhotoMaker(context: Context) {
         return try {
             resolver.openOutputStream(uri)?.use { it.write(jpeg) } ?: throw IllegalStateException("no stream")
             // The pixels stay as the sensor delivered them; the photo is marked with how to turn it.
-            try {
+            if (!alreadyUpright) try {
                 resolver.openFileDescriptor(uri, "rw")?.use { fd ->
                     val exif = ExifInterface(fd.fileDescriptor)
-                    exif.setAttribute(ExifInterface.TAG_ORIENTATION, when (shot.rotation) {
+                    if (!alreadyUpright) exif.setAttribute(ExifInterface.TAG_ORIENTATION, when (shot.rotation) {
                         90 -> ExifInterface.ORIENTATION_ROTATE_90
                         180 -> ExifInterface.ORIENTATION_ROTATE_180
                         270 -> ExifInterface.ORIENTATION_ROTATE_270

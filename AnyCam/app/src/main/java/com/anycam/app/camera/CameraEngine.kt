@@ -8,12 +8,14 @@ import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
+import android.hardware.camera2.CameraExtensionSession
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureFailure
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
+import android.hardware.camera2.params.ExtensionSessionConfiguration
 import android.hardware.camera2.params.MeteringRectangle
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
@@ -49,6 +51,8 @@ class CameraEngine(context: Context, private val listener: Listener) {
         fun onLive(iso: Int?, exposureNs: Long?)
         /** Touch focus finished: sharp or not. */
         fun onFocused(sharp: Boolean)
+        /** A photo made by the phone maker's own processing (an extension), ready to save. */
+        fun onJpeg(jpeg: ByteArray, shot: Shot)
     }
 
     /** How a burst was taken. */
@@ -61,6 +65,9 @@ class CameraEngine(context: Context, private val listener: Listener) {
 
     private var device: CameraDevice? = null
     private var session: CameraCaptureSession? = null
+    /** Set instead of [session] while the phone maker's own processing is in use. */
+    private var extensionSession: CameraExtensionSession? = null
+    private var extensionZoom = false
     private var reader: ImageReader? = null
     private var previewSurface: Surface? = null
     private var info: CameraInfo? = null
@@ -92,7 +99,7 @@ class CameraEngine(context: Context, private val listener: Listener) {
                 val c = manager.getCameraCharacteristics(id)
                 val usable = c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
                     ?.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_BACKWARD_COMPATIBLE) == true
-                if (usable) CameraInfo.from(id, c) else null
+                if (usable) CameraInfo.from(id, c, extensionsOf(id)) else null
             } catch (e: Exception) {
                 null
             }
@@ -103,13 +110,39 @@ class CameraEngine(context: Context, private val listener: Listener) {
         emptyList()
     }
 
+    /**
+     * The maker's processing modes this camera offers other apps, of those that deliver a
+     * finished photo and a viewfinder. Asked of the phone; nothing is assumed about any brand.
+     */
+    private fun extensionsOf(id: String): List<Int> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return emptyList()
+        return try {
+            val ext = manager.getCameraExtensionCharacteristics(id)
+            ext.supportedExtensions.filter { e ->
+                try {
+                    ext.getExtensionSupportedSizes(e, ImageFormat.JPEG).isNotEmpty() &&
+                        ext.getExtensionSupportedSizes(e, SurfaceTexture::class.java).isNotEmpty()
+                } catch (e: Exception) {
+                    false
+                }
+            }
+        } catch (e: Throwable) {
+            emptyList()
+        }
+    }
+
+    /** [extension]: one of the camera's [CameraInfo.extensions] to use the maker's processing, or null for AnyCam's own. */
     @SuppressLint("MissingPermission")
-    fun open(id: String, texture: SurfaceTexture) = handler.post {
+    fun open(id: String, texture: SurfaceTexture, extension: Int? = null) = handler.post {
         closeNow()
         val mine = ++generation
+        if (extension != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            openExtension(id, texture, extension, mine)
+            return@post
+        }
         try {
             val c = manager.getCameraCharacteristics(id)
-            val cam = CameraInfo.from(id, c)
+            val cam = CameraInfo.from(id, c, extensionsOf(id))
             val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: throw IllegalStateException("no stream sizes")
             val photo = pickPhotoSize(map.getOutputSizes(ImageFormat.YUV_420_888) ?: emptyArray())
                 ?: throw IllegalStateException("no photo sizes")
@@ -174,6 +207,77 @@ class CameraEngine(context: Context, private val listener: Listener) {
         }
     }
 
+    @SuppressLint("MissingPermission")
+    @android.annotation.TargetApi(Build.VERSION_CODES.S)
+    private fun openExtension(id: String, texture: SurfaceTexture, extension: Int, mine: Int) {
+        try {
+            val c = manager.getCameraCharacteristics(id)
+            val cam = CameraInfo.from(id, c, extensionsOf(id))
+            val ext = manager.getCameraExtensionCharacteristics(id)
+            val photo = ext.getExtensionSupportedSizes(extension, ImageFormat.JPEG).maxByOrNull { it.width.toLong() * it.height }
+                ?: throw IllegalStateException("no photo sizes")
+            val preview = pickPreviewSize(ext.getExtensionSupportedSizes(extension, SurfaceTexture::class.java).toTypedArray(), photo)
+                ?: throw IllegalStateException("no viewfinder sizes")
+            extensionZoom = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && cam.zoomRatio != null &&
+                ext.getAvailableCaptureRequestKeys(extension).contains(CaptureRequest.CONTROL_ZOOM_RATIO)
+            texture.setDefaultBufferSize(preview.width, preview.height)
+            val surface = Surface(texture)
+            val photos = ImageReader.newInstance(photo.width, photo.height, ImageFormat.JPEG, 2)
+            photos.setOnImageAvailableListener({ onExtensionPhoto(it) }, handler)
+            info = cam
+            previewSurface = surface
+            reader = photos
+            if (!extensionZoom) zoom = 1f
+            ev = 0
+            focusPoint = null
+            Log.i(TAG, "opening camera $id with the maker's processing $extension: photo $photo, viewfinder $preview, zoom $extensionZoom")
+            manager.openCamera(id, object : CameraDevice.StateCallback() {
+                override fun onOpened(d: CameraDevice) {
+                    if (mine != generation) { d.close(); return }
+                    device = d
+                    try {
+                        val outputs = listOf(OutputConfiguration(surface), OutputConfiguration(photos.surface))
+                        d.createExtensionSession(ExtensionSessionConfiguration(extension, outputs, { handler.post(it) },
+                            object : CameraExtensionSession.StateCallback() {
+                                override fun onConfigured(s: CameraExtensionSession) {
+                                    if (mine != generation) return
+                                    extensionSession = s
+                                    startPreview()
+                                    main.post { listener.onOpened(cam, preview, photo) }
+                                }
+
+                                override fun onConfigureFailed(s: CameraExtensionSession) {
+                                    if (mine == generation) fail(EXTENSION_FAILED)
+                                }
+                            }))
+                    } catch (e: Exception) {
+                        Log.e(TAG, "extension session", e)
+                        fail(EXTENSION_FAILED)
+                    }
+                }
+
+                override fun onDisconnected(d: CameraDevice) {
+                    d.close()
+                    if (mine == generation) device = null
+                }
+
+                override fun onError(d: CameraDevice, error: Int) {
+                    d.close()
+                    if (mine == generation) {
+                        device = null
+                        fail(EXTENSION_FAILED)
+                    }
+                }
+            }, handler)
+        } catch (e: Throwable) {
+            Log.e(TAG, "open extension", e)
+            fail(EXTENSION_FAILED)
+        }
+    }
+
+    /** Whether zoom can be used right now (the maker's processing doesn't always allow it). */
+    val zoomWorks get() = extensionSession == null || extensionZoom
+
     fun close() = handler.post { closeNow() }
 
     /** Close for good (the screen is going away). */
@@ -194,6 +298,8 @@ class CameraEngine(context: Context, private val listener: Listener) {
             main.post { listener.onCaptureFailed("The camera closed") }
         }
         try { session?.close() } catch (_: Exception) {}
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) try { extensionSession?.close() } catch (_: Exception) {}
+        extensionSession = null
         try { device?.close() } catch (_: Exception) {}
         try { reader?.close() } catch (_: Exception) {}
         try { previewSurface?.release() } catch (_: Exception) {}
@@ -231,8 +337,20 @@ class CameraEngine(context: Context, private val listener: Listener) {
 
     private fun startPreview() {
         val d = device ?: return
-        val s = session ?: return
         val surface = previewSurface ?: return
+        val es = extensionSession
+        if (es != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            try {
+                val b = d.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
+                b.addTarget(surface)
+                if (extensionZoom && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) b.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoom)
+                es.setRepeatingRequest(b.build(), { handler.post(it) }, object : CameraExtensionSession.ExtensionCaptureCallback() {})
+            } catch (e: Exception) {
+                Log.e(TAG, "extension preview", e)
+            }
+            return
+        }
+        val s = session ?: return
         try {
             val b = d.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
             b.addTarget(surface)
@@ -307,6 +425,7 @@ class CameraEngine(context: Context, private val listener: Listener) {
 
     /** Focus and meter on a point ([sx], [sy]: 0..1 of the sensor's frame); back to automatic after a while. */
     fun focusAt(sx: Float, sy: Float) = handler.post {
+        if (extensionSession != null) return@post // the maker's processing focuses by itself
         val cam = info ?: return@post
         val d = device ?: return@post
         val s = session ?: return@post
@@ -362,6 +481,11 @@ class CameraEngine(context: Context, private val listener: Listener) {
         val d = device
         val s = session
         val frames = reader
+        val es = extensionSession
+        if (es != null && d != null && frames != null && burstWanted == 0 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            takeExtensionPhoto(d, es, frames, rotation)
+            return@post
+        }
         if (cam == null || d == null || s == null || frames == null || burstWanted > 0) {
             main.post { listener.onCaptureFailed("The camera isn't ready") }
             return@post
@@ -413,6 +537,62 @@ class CameraEngine(context: Context, private val listener: Listener) {
         }
     }
 
+    /** One photo by the maker's processing (it takes and merges its own shots; this can last seconds). */
+    @android.annotation.TargetApi(Build.VERSION_CODES.S)
+    private fun takeExtensionPhoto(d: CameraDevice, es: CameraExtensionSession, photos: ImageReader, rotation: Int) {
+        try {
+            val b = d.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
+            b.addTarget(photos.surface)
+            b.set(CaptureRequest.JPEG_ORIENTATION, rotation)
+            b.set(CaptureRequest.JPEG_QUALITY, 95.toByte())
+            if (extensionZoom && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) b.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoom)
+            burstWanted = 1
+            burstFailed = 0
+            burstStarted = false
+            burstRotation = rotation
+            burstIso = liveIso
+            burstExposure = liveExposure
+            val mine = generation
+            es.capture(b.build(), { handler.post(it) }, object : CameraExtensionSession.ExtensionCaptureCallback() {
+                override fun onCaptureStarted(session: CameraExtensionSession, request: CaptureRequest, timestamp: Long) {
+                    if (mine != generation || burstStarted) return
+                    burstStarted = true
+                    main.post { listener.onShutter() }
+                }
+
+                override fun onCaptureFailed(session: CameraExtensionSession, request: CaptureRequest) {
+                    if (mine != generation || burstWanted == 0) return
+                    burstWanted = 0
+                    handler.removeCallbacks(burstTimeout)
+                    main.post { listener.onCaptureFailed("The phone's own processing couldn't take this photo") }
+                }
+            })
+            handler.postDelayed(burstTimeout, EXTENSION_TIMEOUT_MS)
+        } catch (e: Exception) {
+            Log.e(TAG, "extension photo", e)
+            burstWanted = 0
+            main.post { listener.onCaptureFailed("Couldn't take the photo: ${e.message}") }
+        }
+    }
+
+    private fun onExtensionPhoto(r: ImageReader) {
+        val image = try { r.acquireNextImage() } catch (e: Exception) { null } ?: return
+        val bytes = try {
+            val buffer = image.planes[0].buffer
+            ByteArray(buffer.remaining()).also { buffer.get(it) }
+        } catch (e: Throwable) {
+            null
+        } finally {
+            image.close()
+        }
+        if (burstWanted == 0) return
+        burstWanted = 0
+        handler.removeCallbacks(burstTimeout)
+        val shot = Shot(burstRotation, burstIso, burstExposure, System.currentTimeMillis())
+        if (bytes == null) main.post { listener.onCaptureFailed("The camera didn't deliver the photo") }
+        else main.post { listener.onJpeg(bytes, shot) }
+    }
+
     private fun onImage(r: ImageReader) {
         val image = try { r.acquireNextImage() } catch (e: Exception) { null } ?: return
         try {
@@ -459,6 +639,10 @@ class CameraEngine(context: Context, private val listener: Listener) {
         private const val FOCUS_AREA = 0.12f
         private const val FOCUS_HOLD_MS = 4000L
         private const val BURST_TIMEOUT_MS = 8000L
+        /** The maker's night processing can expose for many seconds. */
+        private const val EXTENSION_TIMEOUT_MS = 40_000L
+        /** Reported when the maker's processing won't start: the screen goes back to AnyCam's own. */
+        const val EXTENSION_FAILED = "The phone's own processing isn't available right now"
 
         /** The largest 4:3 photo within [MAX_PHOTO_PIXELS] (4:3 is the whole sensor on nearly every phone). */
         fun pickPhotoSize(sizes: Array<Size>): Size? {
