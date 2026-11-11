@@ -444,7 +444,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
             toast("No camera found")
             return
         }
-        if (extraLenses.isEmpty()) extraLenses = camera.extraBackLenses(cameraIds[0])
+        if (extraLenses.isEmpty()) extraLenses = camera.extraBackLenses(cameraIds[0]).filter { it.first !in blockedLenses }
         cameraIndex = cameraIndex.coerceIn(0, cameraIds.size - 1)
         val id = if (cameraIndex == 0) lensCameraId ?: cameraIds[0] else cameraIds[cameraIndex]
         Log.i(TAG, "startCamera index=$cameraIndex id=$id ids=$cameraIds extra lenses=$extraLenses")
@@ -1567,7 +1567,17 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         val iso = liveIso ?: return null
         val exp = liveExposure ?: return null
         val safe = if (prefs.forceShaky) FORCED_SHAKY_SAFE_NS else safeShutterNs() ?: return null
-        return Steady.plan(iso, exp, safe, isoR, expR)
+        return Steady.plan(iso, exp, safe, usableIso(isoR), expR)
+    }
+
+    /**
+     * The ISO range bursts may plan with: the top of a sensor's range (ISO 16000 on some) is
+     * grain a merge can't clean, so plans stop at [SuperZoomProcessor.MAX_PLAN_ISO] — or at what
+     * auto exposure itself is using, if that is already higher.
+     */
+    private fun usableIso(range: android.util.Range<Int>): android.util.Range<Int> {
+        val top = maxOf(minOf(range.upper, SuperZoomProcessor.MAX_PLAN_ISO), minOf(range.upper, liveIso ?: 0), range.lower)
+        return android.util.Range(range.lower, top)
     }
 
     /** Shaky hands and a much faster shutter: a few such shots merged so the extra noise goes away. */
@@ -2679,7 +2689,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
         mergeIndoor = false
         mergeHdrStops = hdrStops
         val (iso, t) = Hdr.plan(
-            liveIso ?: 100, liveExposure ?: 10_000_000L, safeShutterNs() ?: 33_000_000L, hdrStops, isoR, expR,
+            liveIso ?: 100, liveExposure ?: 10_000_000L, safeShutterNs() ?: 33_000_000L, hdrStops, usableIso(isoR), expR,
         )
         nightIso = iso
         Log.i(TAG, "hdr plan: $HDR_FRAMES x ISO $iso ${Stops.shutterLabel(t)} (${hdrStops} stops darker)")
@@ -3232,7 +3242,7 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
                 aeIso = liveIso ?: 400,
                 aeExposureNs = liveExposure ?: 33_000_000L,
                 safeShutterNs = safeShutterNs() ?: 66_000_000L,
-                isoRange = isoRange,
+                isoRange = usableIso(isoRange),
                 exposureRange = expRange,
             )
             nightIso = iso
@@ -3436,8 +3446,23 @@ class MainActivity : Activity(), CameraController.Listener, SensorEventListener 
     }
 
     override fun onCameraError(message: String) {
+        val lens = lensCameraId
+        if (lens != null && cameraIndex == 0 && (message.startsWith("Could not open camera") || message.startsWith("Camera error"))) {
+            // A lens this phone has but won't open for other apps: forget it and go back to the main one.
+            Log.w(TAG, "lens $lens can't be used ($message)")
+            extraLenses = extraLenses.filter { it.first != lens }
+            blockedLenses += lens
+            lensCameraId = null
+            lensBase = 1f
+            settings = settings.copy(zoom = 1f, manualFocus = false)
+            toast("That lens isn't available to other apps on this phone")
+            startCamera()
+            return
+        }
         toast(message)
     }
+
+    private val blockedLenses = HashSet<String>()
 
     // ------------------------------------------------------------------ sensors / analysis
 

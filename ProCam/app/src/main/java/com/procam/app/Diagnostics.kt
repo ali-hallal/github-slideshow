@@ -121,6 +121,28 @@ object Diagnostics {
             emptyList()
         }
         if (keys.isNotEmpty()) appendLine("  maker's own settings (${keys.size}): ${keys.take(60).joinToString(" ")}")
+        // What those settings offer, and which of them a photo request may set.
+        try {
+            for (k in c.keys) {
+                if (k.name.startsWith("android.")) continue
+                val v = try { c.get(k) } catch (e: Throwable) { null } ?: continue
+                val text = when (v) {
+                    is IntArray -> v.take(24).joinToString(",")
+                    is ByteArray -> v.take(24).joinToString(",")
+                    is LongArray -> v.take(12).joinToString(",")
+                    is FloatArray -> v.take(12).joinToString(",")
+                    is Array<*> -> v.take(12).joinToString(",")
+                    else -> v.toString().take(80)
+                }
+                appendLine("    ${k.name.removePrefix("com.mediatek.")} = $text")
+            }
+            val request = c.availableCaptureRequestKeys.map { it.name }.filter { !it.startsWith("android.") }
+            if (request.isNotEmpty()) appendLine("  maker's photo settings (${request.size}): ${request.take(80).joinToString(" ")}")
+            val session = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) c.availableSessionKeys.map { it.name }.filter { !it.startsWith("android.") } else emptyList()
+            if (session.isNotEmpty()) appendLine("  maker's session settings: ${session.joinToString(" ")}")
+        } catch (e: Throwable) {
+            appendLine("  (maker's settings unreadable: ${e.message})")
+        }
     }
 
     /** Cameras the phone has but doesn't list (some makers keep full-sensor or extra lenses there). */

@@ -364,19 +364,47 @@ class CameraController(context: Context, private val listener: Listener) {
      * Other back cameras (separate lenses on phones that don't merge them into one camera), with
      * their zoom relative to [mainId].
      */
-    fun extraBackLenses(mainId: String): List<Pair<String, Float>> = try {
-        val main = CameraCaps.fieldOfViewScale(manager.getCameraCharacteristics(mainId))
-        if (main == null) emptyList() else listCameras()
-            .filter { it != mainId }
-            .filter { manager.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK }
-            .mapNotNull { id ->
-                CameraCaps.fieldOfViewScale(manager.getCameraCharacteristics(id))?.let { id to CameraCaps.roundStop(it / main) }
+    fun extraBackLenses(mainId: String): List<Pair<String, Float>> = extraLensCache.getOrPut(mainId) {
+        try {
+            val main = CameraCaps.fieldOfViewScale(manager.getCameraCharacteristics(mainId))
+            val unlisted = unlistedCameras().filter { worthALensButton(manager.getCameraCharacteristics(it)) }
+            if (main == null) emptyList() else (listCameras() + unlisted)
+                .filter { it != mainId }
+                .filter { manager.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK }
+                .mapNotNull { id ->
+                    CameraCaps.fieldOfViewScale(manager.getCameraCharacteristics(id))?.let { id to CameraCaps.roundStop(it / main) }
+                }
+                .filter { kotlin.math.abs(it.second - 1f) > 0.15f }
+                .distinctBy { it.second }
+                .also { Log.i(TAG, "extra back lenses: $it") }
+        } catch (e: Exception) {
+            Log.w(TAG, "extraBackLenses", e)
+            emptyList()
+        }
+    }
+
+    private val extraLensCache = HashMap<String, List<Pair<String, Float>>>()
+
+    /**
+     * Cameras the phone has but leaves out of its list. Many phones list only one back camera
+     * and keep the ultra-wide (and macro, depth...) under further numbers that still open.
+     */
+    private fun unlistedCameras(): List<String> {
+        val listed = try { manager.cameraIdList.toSet() } catch (e: Exception) { return emptyList() }
+        return (0..UNLISTED_IDS).map { it.toString() }.filter { id ->
+            id !in listed && try {
+                manager.getCameraCharacteristics(id).get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
+                    ?.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_BACKWARD_COMPATIBLE) == true
+            } catch (e: Throwable) {
+                false
             }
-            .filter { kotlin.math.abs(it.second - 1f) > 0.15f }
-            .distinctBy { it.second }
-    } catch (e: Exception) {
-        Log.w(TAG, "extraBackLenses", e)
-        emptyList()
+        }
+    }
+
+    /** A real photo lens (not a 2 MP macro or depth helper): its sensor has enough pixels. */
+    private fun worthALensButton(c: CameraCharacteristics): Boolean {
+        val px = c.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE) ?: return false
+        return px.width.toLong() * px.height >= MIN_LENS_PIXELS
     }
 
     fun open(cameraId: String, texture: SurfaceTexture, initial: ShotSettings, outputPrefs: OutputPrefs) {
@@ -1768,6 +1796,10 @@ class CameraController(context: Context, private val listener: Listener) {
     }
 
     companion object {
+        /** Camera numbers tried beyond the phone's own list. */
+        private const val UNLISTED_IDS = 15
+        /** Fewer pixels than this and a camera isn't offered as a lens (macro and depth helpers). */
+        private const val MIN_LENS_PIXELS = 5_000_000L
         /** Whether the last camera opened could keep full-size frames (tests, diagnostics). */
         @Volatile var zslLastOpen = false
         /** About 3 s of lens-shift samples. */
