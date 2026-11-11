@@ -356,7 +356,11 @@ class MainActivity : Activity(), CameraEngine.Listener {
             // This phone's sensor frames didn't develop into a trustworthy photo: ordinary frames from now on.
             if (photo.sensorFailed) sensorOff = true
             photoCount++
-            say(if (photo.fromSensor) getString(R.string.merged_sensor, photo.merged, photo.megapixels.roundToInt()) else getString(R.string.saved))
+            say(when {
+                photo.fromSensor -> getString(R.string.merged_sensor, photo.merged, photo.megapixels.roundToInt())
+                photo.sensorFailed -> getString(R.string.sensor_not_usable)
+                else -> getString(R.string.saved)
+            })
             showThumbnail(photo.uri)
         }
     }

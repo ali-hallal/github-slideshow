@@ -19,6 +19,7 @@
     <string name="zoom_to">Zoom %1$s</string>
     <string name="merging_sensor">Developing %1$d shots from the sensor…</string>
     <string name="merged_sensor">%1$d sensor shots merged · %2$d MP</string>
+    <string name="sensor_not_usable">Sensor frames didn\'t check out on this phone · saved the phone\'s own photo</string>
     <string name="mode_photo">Photo</string>
     <string name="mode_night">Night</string>
     <string name="mode_hdr">HDR</string>
