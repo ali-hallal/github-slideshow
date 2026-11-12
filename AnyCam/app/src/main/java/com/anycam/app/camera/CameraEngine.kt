@@ -422,6 +422,7 @@ class CameraEngine(context: Context, private val listener: Listener) {
         b.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
         b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
         b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, ev.coerceIn(cam.evRange.lower, cam.evRange.upper))
+        if (cam.stabilised) b.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)
         b.set(CaptureRequest.FLASH_MODE, if (torch && cam.hasFlash) CameraMetadata.FLASH_MODE_TORCH else CameraMetadata.FLASH_MODE_OFF)
         val point = focusPoint
         if (point != null && cam.touchFocus) {

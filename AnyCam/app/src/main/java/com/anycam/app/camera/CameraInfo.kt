@@ -34,6 +34,8 @@ class CameraInfo(
      * camera extensions: night, HDR, portrait...). Empty where the maker offers none.
      */
     val extensions: List<Int> = emptyList(),
+    /** The lens steadies itself against shake (optical stabilisation). */
+    val stabilised: Boolean = false,
 ) {
     val minZoom get() = zoomRatio?.lower ?: 1f
     val maxZoom get() = zoomRatio?.upper ?: maxCropZoom
@@ -63,6 +65,8 @@ class CameraInfo(
                 isoRange = if (manual) c.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE) else null,
                 exposureRange = if (manual) c.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE) else null,
                 extensions = extensions,
+                stabilised = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
+                    ?.contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON) == true,
             )
         }
     }

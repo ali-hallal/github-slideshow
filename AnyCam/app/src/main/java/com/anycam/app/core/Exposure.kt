@@ -19,11 +19,13 @@ object Exposure {
      * [exposureMin]..[exposureMax]: what the sensor can do. Null if auto exposure's own shutter
      * is already fast enough (the shots are then taken as auto exposure has them).
      */
-    fun plan(aeIso: Int, aeExposureNs: Long, isoMin: Int, isoMax: Int, exposureMin: Long, exposureMax: Long): Plan? {
-        if (aeIso <= 0 || aeExposureNs <= FAST_ENOUGH_NS) return null
+    fun plan(aeIso: Int, aeExposureNs: Long, isoMin: Int, isoMax: Int, exposureMin: Long, exposureMax: Long, stabilised: Boolean = false): Plan? {
+        // A lens that steadies itself holds a slower shutter: speeding up there only adds noise.
+        val fastEnough = if (stabilised) STABILISED_FAST_ENOUGH_NS else FAST_ENOUGH_NS
+        if (aeIso <= 0 || aeExposureNs <= fastEnough) return null
         val light = aeIso.toDouble() * aeExposureNs
         // Up to [MAX_SPEED_UP] times faster, but no faster than needed.
-        var t = (aeExposureNs / MAX_SPEED_UP).coerceAtLeast(FAST_ENOUGH_NS).coerceIn(exposureMin, exposureMax)
+        var t = (aeExposureNs / MAX_SPEED_UP).coerceAtLeast(fastEnough).coerceIn(exposureMin, exposureMax)
         var iso = (light / t).roundToInt()
         // The top of a sensor's range is grain no merge cleans: stop at a usable sensitivity
         // (or where auto exposure already is) and give the rest back to the shutter.
@@ -39,6 +41,8 @@ object Exposure {
 
     /** A shutter this fast (1/60 s) holds steady in the hand: nothing to gain below it. */
     const val FAST_ENOUGH_NS = 16_666_667L
+    /** With optical stabilisation, 1/15 s holds as well (the lens takes out about two stops of shake). */
+    const val STABILISED_FAST_ENOUGH_NS = 66_666_667L
     private const val MAX_SPEED_UP = 4L
-    const val USABLE_ISO = 3200
+    const val USABLE_ISO = 1600
 }

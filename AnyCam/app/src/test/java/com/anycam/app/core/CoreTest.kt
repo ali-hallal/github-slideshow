@@ -122,11 +122,17 @@ class CoreTest {
         assertEquals(16_666_667L, room.exposureNs)
         assertEquals(1600, room.iso)
         assertTrue(room.frames >= Geometry.burstFrames(400))
-        // Very dim (ISO 1600, 1/8 s): sensitivity stops where grain would win; the shutter gives the rest.
-        val dark = Exposure.plan(1600, 125_000_000L, 50, 16000, 100_000L, 1_000_000_000L)!!
+        // Very dim (ISO 800, 1/8 s): sensitivity stops where grain would win; the shutter gives the rest.
+        val dark = Exposure.plan(800, 125_000_000L, 50, 16000, 100_000L, 1_000_000_000L)!!
         assertEquals(Exposure.USABLE_ISO, dark.iso)
-        assertEquals(1600.0 * 125_000_000L, dark.iso.toDouble() * dark.exposureNs, 1600.0 * 125_000_000L * 0.02)
+        assertEquals(800.0 * 125_000_000L, dark.iso.toDouble() * dark.exposureNs, 800.0 * 125_000_000L * 0.02)
         assertTrue(dark.exposureNs < 125_000_000L)
+        // A stabilised lens holds 1/15 s: a dim room is shot as auto exposure has it.
+        assertTrue(Exposure.plan(400, 66_666_667L, 50, 6400, 100_000L, 1_000_000_000L, stabilised = true) == null)
+        // Darker still (1/8 s): only down to 1/15 s, not four times faster.
+        val steadied = Exposure.plan(800, 125_000_000L, 50, 6400, 100_000L, 1_000_000_000L, stabilised = true)!!
+        assertEquals(Exposure.STABILISED_FAST_ENOUGH_NS, steadied.exposureNs)
+        assertEquals(1500, steadied.iso)
         // Auto exposure already at the sensor's limit: nothing to trade.
         assertTrue(Exposure.plan(3200, 100_000_000L, 50, 3200, 100_000L, 1_000_000_000L) == null)
     }
