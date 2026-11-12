@@ -21,6 +21,7 @@ import com.anycam.app.core.Merge
 import com.anycam.app.core.RawFrame
 import com.anycam.app.core.RawInfo
 import com.anycam.app.core.RawMerge
+import com.anycam.app.core.Stack
 import com.anycam.app.core.Yuv
 import java.io.ByteArrayOutputStream
 import java.text.SimpleDateFormat
@@ -76,32 +77,37 @@ class PhotoMaker(context: Context) {
         worker.execute {
             val t0 = System.currentTimeMillis()
             val photo = try {
-                val merged = RawMerge.merge(frames, info)
+                // The sharpest frame on its own first: the photo is built around it, and its
+                // colours (coarsely) are what the look is fitted from.
+                val reference = RawMerge.sharpest(frames, info)
+                val base = RawMerge.merge(listOf(frames[reference]), info)
                 val t1 = System.currentTimeMillis()
                 // The two pictures must show the same view for the look to be taken from one to the other.
-                val sameShape = guide != null && kotlin.math.abs(guide.w.toFloat() / guide.h - merged.w.toFloat() / merged.h) < 0.03f
+                val sameShape = guide != null && kotlin.math.abs(guide.w.toFloat() / guide.h - base.w.toFloat() / base.h) < 0.03f
                 val look = if (guide != null && sameShape) {
-                    Look.fit(Develop.coarse(merged, info, Look.GRID_W, Look.GRID_H), Look.coarse(guide))
+                    Look.fit(Develop.coarse(base, info, Look.GRID_W, Look.GRID_H), Look.coarse(guide))
                 } else Look.PLAIN
-                val developed = Develop.develop(merged, info, look)
+                // Then every frame's samples laid down where they really were.
+                val merged = Stack.develop(frames, info, base, reference, look)
+                val developed = merged.photo
                 val t2 = System.currentTimeMillis()
                 // Before trusting it: does it show what the phone's own picture shows? A phone that
                 // reports its sensor oddly would give a wrong-looking photo, and that mustn't be saved.
                 if (guide != null && sameShape) {
                     val apart = Look.distance(Look.coarse(developed), Look.coarse(guide))
                     Log.i(TAG, "sensor photo check: $apart from the phone's picture (limit ${Look.TRUSTED_WITHIN}); filters ${info.cfa}, " +
-                        "black ${info.black.joinToString { it.toInt().toString() }}, white ${info.white.toInt()}, " +
+                        "black ${info.black.joinToString { it.toInt().toString() }}, white ${info.white.toInt()}, noise figures ${info.noiseS}, ${info.noiseO}, " +
                         "matrix ${info.ccm.joinToString { "%.2f".format(Locale.US, it) }}, look colour ${look.colour.joinToString { "%.2f".format(Locale.US, it) }}, " +
                         "curve ${look.gain.filterIndexed { i, _ -> i % 51 == 0 }.joinToString { "%.2f".format(Locale.US, it) }}")
                     if (apart > Look.TRUSTED_WITHIN) throw SensorNotTrusted("developed photo is $apart from the phone's picture")
                 }
                 val finished = Detail.sharpen(Detail.calmColour(developed), merged.noise / kotlin.math.sqrt(merged.used.toFloat()), Detail.SENSOR_AMOUNT)
                 val uri = save(encode(finished), shot)
-                Log.i(TAG, "photo from the sensor: ${merged.w}x${merged.h}, ${merged.used} of ${frames.size} shots merged " +
+                Log.i(TAG, "photo from the sensor: ${base.w}x${base.h}, ${merged.used} of ${frames.size} shots merged " +
                     "(noise ${"%.1f".format(Locale.US, merged.noise)}), look ${if (look === Look.PLAIN) "plain" else "from the phone"}, " +
                     "wb ${info.wb.joinToString { "%.2f".format(Locale.US, it) }}, lens map ${info.shading != null}, ISO ${shot.iso}; " +
-                    "merge ${t1 - t0} ms, develop ${t2 - t1} ms, all ${System.currentTimeMillis() - t0} ms")
-                uri?.let { Photo(it, merged.used, frames.size, System.currentTimeMillis() - t0, fromSensor = true, megapixels = merged.w.toLong() * merged.h / 1_000_000f) }
+                    "reference ${t1 - t0} ms, stack ${t2 - t1} ms, all ${System.currentTimeMillis() - t0} ms")
+                uri?.let { Photo(it, merged.used, frames.size, System.currentTimeMillis() - t0, fromSensor = true, megapixels = base.w.toLong() * base.h / 1_000_000f) }
             } catch (e: Throwable) {
                 Log.e(TAG, "sensor photo failed, keeping the phone's own picture", e)
                 try {

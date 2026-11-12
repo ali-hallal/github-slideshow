@@ -60,7 +60,7 @@ object Develop {
     }
 
     /** Red, green and blue at one pixel, from its own sample and its neighbours'. */
-    private fun pixel(m: RawMerge.Merged, x: Int, y: Int, own: Int, besideIsRed: Boolean, out: FloatArray) {
+    internal fun pixel(m: RawMerge.Merged, x: Int, y: Int, own: Int, besideIsRed: Boolean, out: FloatArray) {
         val s = m.stride
         val l = m.light
         val i = (y + 2) * s + x + 2
@@ -121,6 +121,9 @@ object Develop {
         }
         return out
     }
+
+    /** Linear light 0..1 → 0..255 on the standard display curve. */
+    internal fun display(v: Float): Float = GAMMA[(v * GAMMA_STEPS).toInt()]
 
     private const val GAMMA_STEPS = 4095
     /** The standard display curve (sRGB): linear light 0..1 → 0..255. */

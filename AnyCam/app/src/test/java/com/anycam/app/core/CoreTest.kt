@@ -296,6 +296,120 @@ class CoreTest {
         assertTrue("merged ($errAll) keeps the detail one shot has ($errOne)", errAll < errOne * 1.1)
     }
 
+    // A scene at twice the sensor's resolution, so shots can be moved by half a pixel as hands
+    // do: cells of weave-like threads each at its own angle, small print, and calm areas.
+    private fun mix(a: Int, b: Int): Int {
+        var v = a * 374761393 + b * 668265263
+        v = (v xor (v ushr 13)) * 1274126177
+        return (v xor (v ushr 16)) and 0x7fffffff
+    }
+    private fun kind(x: Int, y: Int) = mix(x / 96, y / 96) % 3
+    private fun fineScene(tw: Int, th: Int) = FloatArray(tw * th) { i ->
+        val x = i % tw
+        val y = i / tw
+        val hc = mix(x / 96 + 1000, y / 96)
+        val angle = (hc % 628) / 100f
+        val freq = 0.45f + (hc % 35) / 100f
+        val base = 110f + (mix(x / 96, y / 96 + 500) % 90)
+        val t = if (kind(x, y) == 2) 0f else kotlin.math.sin((x * kotlin.math.cos(angle) + y * kotlin.math.sin(angle)) * freq)
+        (base + 28f * t + (if (kind(x, y) == 1 && (x / 6) % 5 == 0 && y % 96 in 20..50) -60f else 0f)).coerceIn(10f, 245f)
+    }
+    /** What a sensor pixel sees: 2×2 of the scene; ([ox], [oy]) in half pixels. */
+    private fun seen(t: FloatArray, tw: Int, x: Int, y: Int, ox: Int, oy: Int): Float {
+        val o = (2 * y + oy + 40) * tw + 2 * x + ox + 40
+        return (t[o] + t[o + 1] + t[o + tw] + t[o + tw + 1]) / 4f
+    }
+    private fun fineShot(t: FloatArray, tw: Int, w: Int, h: Int, ox: Int, oy: Int, noise: Float): RawFrame {
+        val info = RawInfo(0, FloatArray(4) { black }, white, wb, RawInfo.IDENTITY)
+        return RawFrame(w, h, ShortArray(w * h) { i ->
+            val x = i % w
+            val y = i / w
+            val v = seen(t, tw, x, y, ox, oy) / 255f
+            val lin = if (v <= 0.04045f) v / 12.92f else Math.pow((v + 0.055) / 1.055, 2.4).toFloat()
+            (lin / wb[info.colour((y and 1) * 2 + (x and 1))] * (white - black) + black + rnd.nextGaussian().toFloat() * noise).roundToInt().coerceIn(0, 1023).toShort()
+        })
+    }
+    private fun fineError(p: Yuv, t: FloatArray, tw: Int, ox: Int, oy: Int, calm: Boolean?): Double {
+        var s = 0.0
+        var n = 0
+        for (y in 16 until p.h - 16) for (x in 16 until p.w - 16) {
+            if (calm != null && (kind(2 * x + ox + 40, 2 * y + oy + 40) == 2) != calm) continue
+            s += abs((p.y[y * p.w + x].toInt() and 255) - seen(t, tw, x, y, ox, oy))
+            n++
+        }
+        return s / n
+    }
+
+    /**
+     * The burst as hands really give it: every shot moved by some pixels and a half. Laying
+     * the samples where they were must clean the calm areas thoroughly and still not lose the
+     * fine detail one shot has.
+     */
+    @Test
+    fun aHandheldSensorBurstIsCleanerAndKeepsItsDetail() {
+        val w = 480
+        val h = 360
+        val tw = 1100
+        val scene = fineScene(tw, 860)
+        val noise = 10f
+        val info = RawInfo(0, FloatArray(4) { black }, white, wb, RawInfo.IDENTITY, null, 0f, (noise / (white - black)).pow(2))
+        val moves = listOf(0 to 0, 3 to 1, -5 to 2, 2 to -7, 9 to 5)
+        val shots = moves.map { (ox, oy) -> fineShot(scene, tw, w, h, ox, oy, noise) }
+        val ref = RawMerge.sharpest(shots, info)
+        val (rx, ry) = moves[ref]
+        val base = RawMerge.merge(listOf(shots[ref]), info)
+        val one = Develop.develop(base, info)
+        val stacked = Stack.develop(shots, info, base, ref)
+        val calmOne = fineError(one, scene, tw, rx, ry, true)
+        val calmAll = fineError(stacked.photo, scene, tw, rx, ry, true)
+        val fineOne = fineError(one, scene, tw, rx, ry, false)
+        val fineAll = fineError(stacked.photo, scene, tw, rx, ry, false)
+        assertTrue("calm areas much cleaner: $calmOne -> $calmAll", calmAll < calmOne * 0.6)
+        assertTrue("fine detail kept: $fineOne -> $fineAll", fineAll < fineOne * 1.2)
+        assertTrue("better overall", fineError(stacked.photo, scene, tw, rx, ry, null) < fineError(one, scene, tw, rx, ry, null))
+        // One frame alone comes out as that frame developed.
+        val alone = Stack.develop(listOf(shots[ref]), info, base, 0)
+        assertTrue(fineError(alone.photo, scene, tw, rx, ry, null) < fineError(one, scene, tw, rx, ry, null) * 1.05)
+    }
+
+    /** The same on a colourful scene, with something moving through it. */
+    @Test
+    fun aSensorBurstKeepsColoursTrueAndLeavesNoGhosts() {
+        val w = 320
+        val h = 240
+        val tw = 400
+        val truth = truePicture(tw, 320)
+        val info = RawInfo(0, FloatArray(4) { black }, white, wb, ccm, null, 0f, (8f / (white - black)).pow(2))
+        val moves = listOf(0 to 0, 2 to -4, -6 to 2, 3 to 1, 1 to 8)
+        val shots = moves.map { (ox, oy) -> sensorShot(truth, tw, w, h, ox, oy, 8f) }
+        val ref = RawMerge.sharpest(shots, info)
+        val (rx, ry) = moves[ref]
+        val base = RawMerge.merge(listOf(shots[ref]), info)
+        val stacked = Stack.develop(shots, info, base, ref).photo
+        val one = Develop.develop(base, info)
+        val errOne = pictureError(one, truth, tw, rx, ry)
+        val errAll = pictureError(stacked, truth, tw, rx, ry)
+        assertTrue("cleaner than one shot: $errOne -> $errAll", errAll < errOne * 0.8)
+        var colour = 0.0
+        var n = 0
+        for (cy in 10 until stacked.ch - 10) for (cx in 10 until stacked.cw - 10) {
+            val o = ((cy * 2 + ry + 20) * tw + cx * 2 + rx + 20) * 3
+            val u = -0.168736f * truth[o] - 0.331264f * truth[o + 1] + 0.5f * truth[o + 2] + 128
+            val v = 0.5f * truth[o] - 0.418688f * truth[o + 1] - 0.081312f * truth[o + 2] + 128
+            colour += abs((stacked.u[cy * stacked.cw + cx].toInt() and 255) - u) + abs((stacked.v[cy * stacked.cw + cx].toInt() and 255) - v)
+            n += 2
+        }
+        assertTrue("colours true: ${colour / n}", colour / n < 5.0)
+        // A bright block in a different place in every other shot must not show up.
+        val moving = shots.mapIndexed { k, f ->
+            if (k == ref) f else RawFrame(w, h, f.px.copyOf().also { px ->
+                for (y in 100 until 140) for (x in 60 + 40 * k until 100 + 40 * k) px[y * w + x] = 1000
+            })
+        }
+        val withMovement = Stack.develop(moving, info, base, ref).photo
+        assertTrue("no ghosts: ${pictureError(withMovement, truth, tw, rx, ry)}", pictureError(withMovement, truth, tw, rx, ry) < errOne)
+    }
+
     @Test
     fun theDevelopedPhotoTakesOnThePhonesLook() {
         val w = 320

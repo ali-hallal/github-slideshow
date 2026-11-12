@@ -16,9 +16,14 @@ object Align {
     private const val SMALL = 4          // the small copy is this many times smaller
     private const val COARSE_REACH = 12  // small-copy pixels: ±48 px of hand movement
     private const val FINE_REACH = 3     // full-size pixels around the coarse answer, per tile
+    private const val CAP = 32           // the most one pixel's difference may count
 
     /** Shift of each tile ([dx], [dy] in pixels: reference (x, y) matches frame (x+dx, y+dy)) and how well it matched. */
-    class Field(val cols: Int, val rows: Int, val dx: IntArray, val dy: IntArray, val cost: FloatArray)
+    class Field(
+        val cols: Int, val rows: Int, val dx: IntArray, val dy: IntArray, val cost: FloatArray,
+        /** The part of a pixel beyond [dx], [dy] (-0.5..0.5), from how the match falls off either side of the best. */
+        val subX: FloatArray = FloatArray(dx.size), val subY: FloatArray = FloatArray(dy.size),
+    )
 
     /** A brightness plane at 1/[SMALL] size (box average). */
     fun small(f: Plane): Plane {
@@ -77,7 +82,10 @@ object Align {
                             val b = (y + dy) * frame.w + dx
                             var x = inset
                             while (x < ref.w - inset) {
-                                sad += abs((ref.px[a + x].toInt() and 0xFF) - (frame.px[b + x].toInt() and 0xFF))
+                                // Capped: a thing that moved between shots differs hugely wherever the
+                                // frame is put, and mustn't decide where the rest of it goes.
+                                val d = abs((ref.px[a + x].toInt() and 0xFF) - (frame.px[b + x].toInt() and 0xFF))
+                                sad += if (d > CAP) CAP else d
                                 x += 2
                             }
                             y += 2
@@ -103,8 +111,15 @@ object Align {
         val dx = IntArray(cols * rows)
         val dy = IntArray(cols * rows)
         val cost = FloatArray(cols * rows)
+        val subX = FloatArray(cols * rows)
+        val subY = FloatArray(cols * rows)
+        val span = 2 * FINE_REACH + 1
         Parallel.rows(rows) { r ->
+            val grid = FloatArray(span * span)
             for (c in 0 until cols) {
+                grid.fill(Float.NaN)
+                var bestOx = 0
+                var bestOy = 0
                 val x0 = c * TILE
                 val y0 = r * TILE
                 val x1 = minOf(ref.w, x0 + TILE)
@@ -127,7 +142,8 @@ object Align {
                             while (x < x1) {
                                 val fx = x + sx
                                 if (fx in 0 until frame.w) {
-                                    sad += abs((ref.px[y * ref.w + x].toInt() and 0xFF) - (frame.px[fy * frame.w + fx].toInt() and 0xFF))
+                                    val d = abs((ref.px[y * ref.w + x].toInt() and 0xFF) - (frame.px[fy * frame.w + fx].toInt() and 0xFF))
+                                    sad += if (d > CAP) CAP else d
                                     n++
                                 }
                                 x += 2
@@ -136,16 +152,29 @@ object Align {
                         y += 2
                     }
                     if (n < TILE * TILE / 16) continue
+                    grid[(oy + FINE_REACH) * span + ox + FINE_REACH] = sad.toFloat() / n
                     // Per-pixel cost, with a slight pull towards the hand movement (flat tiles).
                     val score = sad * 4096 / n + (abs(ox) + abs(oy)) * 24
-                    if (score < best) { best = score; bx = sx; by = sy; bestSad = sad; bestN = n }
+                    if (score < best) { best = score; bx = sx; by = sy; bestSad = sad; bestN = n; bestOx = ox; bestOy = oy }
                 }
                 val i = r * cols + c
                 dx[i] = bx
                 dy[i] = by
+                // Between whole pixels: where the lowest point of the costs either side of the best lies.
+                if (best != Long.MAX_VALUE && abs(bestOx) < FINE_REACH && abs(bestOy) < FINE_REACH) {
+                    val at = (bestOy + FINE_REACH) * span + bestOx + FINE_REACH
+                    val mid = grid[at]
+                    fun part(lo: Float, hi: Float): Float {
+                        if (lo.isNaN() || hi.isNaN()) return 0f
+                        val curve = lo + hi - 2 * mid
+                        return if (curve <= 1e-4f) 0f else ((lo - hi) / (2 * curve)).coerceIn(-0.5f, 0.5f)
+                    }
+                    subX[i] = part(grid[at - 1], grid[at + 1])
+                    subY[i] = part(grid[at - span], grid[at + span])
+                }
                 cost[i] = if (best == Long.MAX_VALUE) Float.MAX_VALUE else bestSad.toFloat() / bestN
             }
         }
-        return Field(cols, rows, dx, dy, cost)
+        return Field(cols, rows, dx, dy, cost, subX, subY)
     }
 }

@@ -77,6 +77,10 @@ object RawMerge {
         val stride get() = w + 4
     }
 
+    /** The sharpest frame of a burst: the one the photo is built around. */
+    fun sharpest(frames: List<RawFrame>, info: RawInfo): Int =
+        frames.indices.maxByOrNull { Align.sharpness(Align.small(proxy(frames[it], info))) } ?: 0
+
     fun merge(frames: List<RawFrame>, info: RawInfo): Merged {
         require(frames.isNotEmpty())
         val w = frames[0].w
