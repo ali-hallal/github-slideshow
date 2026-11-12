@@ -56,7 +56,8 @@ class PhotoMaker(context: Context) {
                 // What noise is left after averaging [used] shots; with that out of the way, the detail.
                 val finished = Detail.sharpen(result.photo, result.noise / kotlin.math.sqrt(result.used.toFloat()))
                 val jpeg = encode(finished)
-                val uri = save(jpeg, shot)
+                val uri = save(jpeg, shot, notes = "AnyCam photo from ordinary frames; ISO ${shot.iso} ${shot.exposureNs?.let { "1/${Math.round(1e9 / it)}" }}; " +
+                    "${result.used} of ${frames.size} merged; noise ${"%.1f".format(Locale.US, result.noise)}; ${System.currentTimeMillis() - t0} ms")
                 Log.i(TAG, "photo: ${result.photo.w}x${result.photo.h}, ${result.used} of ${frames.size} shots merged " +
                     "(noise ${"%.1f".format(Locale.US, result.noise)}), ISO ${shot.iso}, ${System.currentTimeMillis() - t0} ms")
                 uri?.let { Photo(it, result.used, frames.size, System.currentTimeMillis() - t0) }
@@ -102,7 +103,10 @@ class PhotoMaker(context: Context) {
                     if (apart > Look.TRUSTED_WITHIN) throw SensorNotTrusted("developed photo is $apart from the phone's picture")
                 }
                 val finished = Detail.sharpen(Detail.calmColour(developed), merged.noise / kotlin.math.sqrt(merged.used.toFloat()), Detail.SENSOR_AMOUNT)
-                val uri = save(encode(finished), shot)
+                val notes = "AnyCam sensor photo; ISO ${shot.iso} ${shot.exposureNs?.let { "1/${Math.round(1e9 / it)}" }}; ${frames.size} frames; " +
+                    "look ${if (look === Look.PLAIN) "plain" else "from phone"}; reference ${t1 - t0} ms, stack ${t2 - t1} ms; ${merged.notes}"
+                val uri = save(encode(finished), shot, notes = notes)
+                Log.i(TAG, notes)
                 Log.i(TAG, "photo from the sensor: ${base.w}x${base.h}, ${merged.used} of ${frames.size} shots merged " +
                     "(noise ${"%.1f".format(Locale.US, merged.noise)}), look ${if (look === Look.PLAIN) "plain" else "from the phone"}, " +
                     "wb ${info.wb.joinToString { "%.2f".format(Locale.US, it) }}, lens map ${info.shading != null}, ISO ${shot.iso}; " +
@@ -111,7 +115,7 @@ class PhotoMaker(context: Context) {
             } catch (e: Throwable) {
                 Log.e(TAG, "sensor photo failed, keeping the phone's own picture", e)
                 try {
-                    guide?.let { g -> save(encode(g), shot)?.let { Photo(it, 1, frames.size, System.currentTimeMillis() - t0, sensorFailed = true) } }
+                    guide?.let { g -> save(encode(g), shot, notes = "AnyCam: the phone's own frame (sensor photo not used: ${e.message})")?.let { Photo(it, 1, frames.size, System.currentTimeMillis() - t0, sensorFailed = true) } }
                 } catch (e2: Throwable) {
                     null
                 }
@@ -141,7 +145,7 @@ class PhotoMaker(context: Context) {
     }
 
     /** [alreadyUpright]: the JPEG carries its own orientation (it came from the camera as a JPEG). */
-    private fun save(jpeg: ByteArray, shot: CameraEngine.Shot, alreadyUpright: Boolean = false): Uri? {
+    private fun save(jpeg: ByteArray, shot: CameraEngine.Shot, alreadyUpright: Boolean = false, notes: String? = null): Uri? {
         val resolver = app.contentResolver
         val name = "ANYCAM_${SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date(shot.takenAt))}.jpg"
         val values = ContentValues().apply {
@@ -169,6 +173,8 @@ class PhotoMaker(context: Context) {
                     exif.setAttribute(ExifInterface.TAG_MODEL, Build.MODEL)
                     shot.iso?.let { exif.setAttribute(ExifInterface.TAG_ISO_SPEED_RATINGS, it.toString()) }
                     shot.exposureNs?.let { exif.setAttribute(ExifInterface.TAG_EXPOSURE_TIME, (it / 1e9).toString()) }
+                    // How the photo was made, kept with it (plain text; nothing about the place or the person).
+                    notes?.let { exif.setAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION, it.take(1800)) }
                     exif.saveAttributes()
                 }
             } catch (e: Exception) {

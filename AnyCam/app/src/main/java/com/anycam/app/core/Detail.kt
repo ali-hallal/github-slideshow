@@ -60,8 +60,11 @@ object Detail {
                         if (n > hi) hi = n
                     }
                 }
+                // Up to the neighbours' range and a little beyond it (held strictly inside, strong
+                // sharpening flattens edges into steps).
+                val room = (hi - lo) / 6
                 val sharp = (v + amount * d + 0.5f).toInt()
-                out[o + x] = sharp.coerceIn(lo, hi).toByte()
+                out[o + x] = sharp.coerceIn(maxOf(0, lo - room), minOf(255, hi + room)).toByte()
             }
         }
         return Yuv(w, h, out, photo.u, photo.v)

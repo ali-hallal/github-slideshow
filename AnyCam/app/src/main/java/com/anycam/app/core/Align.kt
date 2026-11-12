@@ -175,6 +175,38 @@ object Align {
                 cost[i] = if (best == Long.MAX_VALUE) Float.MAX_VALUE else bestSad.toFloat() / bestN
             }
         }
+        // Hand movement changes smoothly across a frame. A tile that disagrees with its neighbours
+        // by more than a pixel has locked onto something else (a repeat of a pattern, a thing
+        // that moved): it takes the neighbours' middle value.
+        if (cols >= 3 && rows >= 3) {
+            val mx = dx.copyOf()
+            val my = dy.copyOf()
+            val near = IntArray(9)
+            for (r in 0 until rows) for (c in 0 until cols) {
+                fun middle(a: IntArray): Int {
+                    var n = 0
+                    for (j in -1..1) for (i in -1..1) {
+                        val rr = r + j
+                        val cc = c + i
+                        if (rr in 0 until rows && cc in 0 until cols && cost[rr * cols + cc] < Float.MAX_VALUE) near[n++] = a[rr * cols + cc]
+                    }
+                    if (n == 0) return a[r * cols + c]
+                    java.util.Arrays.sort(near, 0, n)
+                    return near[n / 2]
+                }
+                val i = r * cols + c
+                val ex = middle(dx)
+                val ey = middle(dy)
+                if (abs(dx[i] - ex) > 1 || abs(dy[i] - ey) > 1) {
+                    mx[i] = ex
+                    my[i] = ey
+                    subX[i] = 0f
+                    subY[i] = 0f
+                }
+            }
+            System.arraycopy(mx, 0, dx, 0, dx.size)
+            System.arraycopy(my, 0, dy, 0, dy.size)
+        }
         return Field(cols, rows, dx, dy, cost, subX, subY)
     }
 }

@@ -24,7 +24,8 @@ import kotlin.math.sqrt
  */
 object Stack {
 
-    class Result(val photo: Yuv, val reference: Int, val used: Int, val noise: Float)
+    /** [notes]: how the merge went, frame by frame (kept with the photo, for looking into a result later). */
+    class Result(val photo: Yuv, val reference: Int, val used: Int, val noise: Float, val notes: String = "")
 
     /** For experiments: the true shift (x, y in sensor pixels) of a frame, to use instead of the measured one. */
     internal var knownShift: ((Int) -> FloatArray?)? = null
@@ -99,10 +100,42 @@ object Stack {
                     val steep = abs((refSoft.px[i + 1].toInt() and 0xFF) - (refSoft.px[i - 1].toInt() and 0xFF)) +
                         abs((refSoft.px[i + pw].toInt() and 0xFF) - (refSoft.px[i - pw].toInt() and 0xFF))
                     val keep = 1.5f + 0.6f * sampleNoise[r] + 0.08f * steep
-                    out[i] = (if (d <= keep) 255f else if (d >= 2f * keep) 0f else 255f * (2f * keep - d) / keep).toInt().toByte()
+                    val coarse = if (d <= keep) 1f else if (d >= 2f * keep) 0f else (2f * keep - d) / keep
+                    if (coarse == 0f) continue
+                    // And exactly: the frame's brightness at the very spot the shift says this
+                    // group lies (between its pixels), against the reference's. Fine detail that
+                    // is truly lined up agrees to within noise; a frame that is a pixel or two
+                    // off — which the soft comparison above lets through — does not.
+                    val ex = qx * 2 + exact[n][2 * tile]
+                    val ey = qy * 2 + exact[n][2 * tile + 1]
+                    val ix = floor(ex).toInt()
+                    val iy = floor(ey).toInt()
+                    if (ix < 0 || iy < 0 || ix >= w - 2 || iy >= h - 2) continue
+                    val ax = ex - ix
+                    val ay = ey - iy
+                    val fr = same[k]
+                    val there = (grey4(fr, ix, iy, w, greyOf, top) * (1 - ax) + grey4(fr, ix + 1, iy, w, greyOf, top) * ax) * (1 - ay) +
+                        (grey4(fr, ix, iy + 1, w, greyOf, top) * (1 - ax) + grey4(fr, ix + 1, iy + 1, w, greyOf, top) * ax) * ay
+                    val here = grey4(same[refIndex], qx * 2, qy * 2, w, greyOf, top)
+                    val keepExact = 1.5f + 1.5f * sampleNoise[r]
+                    val de = abs(there - here)
+                    val fine = if (de <= keepExact) 1f else if (de >= 2f * keepExact) 0f else (2f * keepExact - de) / keepExact
+                    out[i] = (255f * coarse * fine).toInt().toByte()
                 }
             }
-            out
+            // One group's verdict is noisy: each takes the lowest of itself and its neighbours'
+            // average, so a patch that mostly disagrees is left out as a whole.
+            val calmed = ByteArray(pw * ph)
+            Parallel.rows(ph) { qy ->
+                if (qy < 1 || qy >= ph - 1) return@rows
+                for (qx in 1 until pw - 1) {
+                    val i = qy * pw + qx
+                    var sum = 0
+                    for (j in -1..1) for (m in -1..1) sum += out[i + j * pw + m].toInt() and 0xFF
+                    calmed[i] = minOf(out[i].toInt() and 0xFF, sum / 9).toByte()
+                }
+            }
+            calmed
         }
 
         // ---- how much fine detail the picture has, per filter group (0 = calm .. 3 = busy)
@@ -275,7 +308,16 @@ object Stack {
         // Green samples' worth of light behind the average pixel, as "shots used" (one shot gives half a green sample per pixel).
         val perPixel = contributed / (w.toLong() * h)
         val used = Math.round(perPixel * 2).toInt().coerceIn(1, same.size)
-        return Result(Yuv(w, h, outY, outU, outV), refIndex, used, calm)
+        val notes = StringBuilder("stack ${w}x$h ref $refIndex of ${same.size}; cost typical ${"%.1f".format(typical)} calm ${"%.1f".format(calm)} limit ${"%.1f".format(tileLimit)}; " +
+            "noise figures ${info.noiseS} ${info.noiseO} (sample noise mid ${"%.1f".format(sampleNoise[128])}); green per pixel ${"%.2f".format(perPixel)}; busy ${busy.count { it > 1 } * 100L / busy.size.coerceAtLeast(1)}%")
+        for (n in fields.indices) {
+            val xs = FloatArray(fields[n].dx.size) { exact[n][2 * it] }.also { it.sort() }
+            val ys = FloatArray(fields[n].dx.size) { exact[n][2 * it + 1] }.also { it.sort() }
+            val trusted = trust[n].sumOf { (it.toInt() and 0xFF).toLong() } * 100 / (255L * trust[n].size)
+            notes.append("; f${others[n]}: shift ${"%.1f".format(xs[xs.size / 2])},${"%.1f".format(ys[ys.size / 2])} (spread ${"%.1f".format(xs[xs.size * 9 / 10] - xs[xs.size / 10])},${"%.1f".format(ys[ys.size * 9 / 10] - ys[ys.size / 10])}) " +
+                "cost ${"%.1f".format(middles[n])} ${if (frameOk[n]) "ok" else "dropped"} trusted $trusted%")
+        }
+        return Result(Yuv(w, h, outY, outU, outV), refIndex, used, calm, notes.toString())
     }
 
     /**
@@ -351,6 +393,13 @@ object Stack {
             }
         }
         return out
+    }
+
+    /** Brightness of a pixel and its three neighbours (right, below, diagonal): one of every filter colour. */
+    private fun grey4(f: RawFrame, x: Int, y: Int, w: Int, greyOf: FloatArray, top: Int): Float {
+        val o = y * w + x
+        val v = ((f.px[o].toInt() and 0xFFFF) + (f.px[o + 1].toInt() and 0xFFFF) + (f.px[o + w].toInt() and 0xFFFF) + (f.px[o + w + 1].toInt() and 0xFFFF)) shr 2
+        return greyOf[if (v > top) top else v]
     }
 
     /** A plane averaged over each 3×3 neighbourhood (edges copied). */
