@@ -506,6 +506,26 @@ class CoreTest {
     }
 
     @Test
+    fun clarityLiftsLocalContrastWithoutClipping() {
+        val w = 400
+        val h = 300
+        // A soft step from grey to lighter grey, and a near-white area.
+        val y = ByteArray(w * h) { i ->
+            val x = i % w
+            (when { x < 150 -> 110; x < 250 -> 150; else -> 248 }).toByte()
+        }
+        val grey = ByteArray(w * h / 4) { 128.toByte() }
+        val before = Yuv(w, h, y, grey, grey)
+        val after = Detail.clarity(before)
+        fun at(p: Yuv, x: Int) = p.y[150 * w + x].toInt() and 255
+        assertTrue("the step stands out more: ${at(before, 152) - at(before, 147)} -> ${at(after, 152) - at(after, 147)}",
+            at(after, 152) - at(after, 147) > at(before, 152) - at(before, 147))
+        assertTrue("far from any edge, nothing changes", at(after, 50) == at(before, 50))
+        assertTrue("near-white isn't pushed into clipping", after.y.maxOf { it.toInt() and 255 } < 255)
+        assertSame(before.u, after.u)
+    }
+
+    @Test
     fun zoomButtonsAndBurstLengthFollowThePhone() {
         assertEquals(listOf(1f, 2f, 5f, 10f), Geometry.zoomStops(1f, 10f))
         assertEquals(listOf(0.6f, 1f, 2f, 5f), Geometry.zoomStops(0.6f, 8f))

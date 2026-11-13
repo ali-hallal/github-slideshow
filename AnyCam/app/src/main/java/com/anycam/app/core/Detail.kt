@@ -71,6 +71,70 @@ object Detail {
     }
 
     const val AMOUNT = 1.5f
+    /**
+     * Local contrast: each area of the picture is set a little apart from its surroundings (a
+     * wide, soft difference, about 1 % of the picture across), as phone cameras do to make a
+     * photo look crisp and three-dimensional rather than flat. Mid-tones take most of it;
+     * near-black and near-white take little, so nothing is pushed into clipping. Brightness only.
+     */
+    fun clarity(photo: Yuv, amount: Float = CLARITY): Yuv {
+        val w = photo.w
+        val h = photo.h
+        val radius = (maxOf(w, h) / 100).coerceAtLeast(2)
+        if (w <= 2 * radius || h <= 2 * radius || amount <= 0f) return photo
+        val src = photo.y
+        // A wide soft copy: three box passes each way (close to a Gaussian).
+        var a = IntArray(w * h) { src[it].toInt() and 0xFF }
+        var b = IntArray(w * h)
+        repeat(3) {
+            boxRows(a, b, w, h, radius)
+            boxCols(b, a, w, h, radius)
+        }
+        val out = ByteArray(w * h)
+        Parallel.rows(h) { y ->
+            val o = y * w
+            for (x in 0 until w) {
+                val v = src[o + x].toInt() and 0xFF
+                val mid = 4f * v * (255 - v) / (255f * 255f)
+                out[o + x] = (v + amount * mid * (v - a[o + x]) + 0.5f).toInt().coerceIn(0, 255).toByte()
+            }
+        }
+        return Yuv(w, h, out, photo.u, photo.v)
+    }
+
+    private fun boxRows(src: IntArray, dst: IntArray, w: Int, h: Int, r: Int) {
+        Parallel.rows(h) { y ->
+            val o = y * w
+            var sum = 0
+            for (i in -r..r) sum += src[o + i.coerceIn(0, w - 1)]
+            val n = 2 * r + 1
+            for (x in 0 until w) {
+                dst[o + x] = sum / n
+                sum += src[o + (x + r + 1).coerceAtMost(w - 1)] - src[o + (x - r).coerceAtLeast(0)]
+            }
+        }
+    }
+
+    private fun boxCols(src: IntArray, dst: IntArray, w: Int, h: Int, r: Int) {
+        val n = 2 * r + 1
+        Parallel.rows((w + 63) / 64) { band ->
+            val x0 = band * 64
+            val x1 = minOf(w, x0 + 64)
+            val sum = IntArray(x1 - x0)
+            for (x in x0 until x1) for (i in -r..r) sum[x - x0] += src[i.coerceIn(0, h - 1) * w + x]
+            for (y in 0 until h) {
+                val add = (y + r + 1).coerceAtMost(h - 1) * w
+                val sub = (y - r).coerceAtLeast(0) * w
+                for (x in x0 until x1) {
+                    dst[y * w + x] = sum[x - x0] / n
+                    sum[x - x0] += src[add + x] - src[sub + x]
+                }
+            }
+        }
+    }
+
+    const val CLARITY = 0.45f
+
     /** For photos developed from the sensor: nothing has sharpened them yet, as a phone's own processing would have. */
     const val SENSOR_AMOUNT = 2.4f
 
