@@ -125,6 +125,9 @@ object Develop {
     /** Linear light 0..1 → 0..255 on the standard display curve. */
     internal fun display(v: Float): Float = GAMMA[(v * GAMMA_STEPS).toInt()]
 
+    /** The display curve as a table (for the compiled code). */
+    internal val gammaTable: FloatArray get() = GAMMA
+
     private const val GAMMA_STEPS = 4095
     /** The standard display curve (sRGB): linear light 0..1 → 0..255. */
     private val GAMMA = FloatArray(GAMMA_STEPS + 1) { i ->

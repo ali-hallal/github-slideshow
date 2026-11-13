@@ -35,6 +35,8 @@ object Stack {
      * frame is the reference via [referenceIndex]). [frames]: the whole burst, reference included.
      */
     fun develop(frames: List<RawFrame>, info: RawInfo, base: RawMerge.Merged, referenceIndex: Int, look: Look = Look.PLAIN): Result {
+        val clock = LongArray(6)
+        clock[0] = System.nanoTime()
         val w = base.w
         val h = base.h
         val same = frames.filter { it.w == w && it.h == h }
@@ -47,6 +49,7 @@ object Stack {
         val ph = proxies[refIndex].h
         val cols = fields.firstOrNull()?.cols ?: 1
 
+        clock[1] = System.nanoTime()
         // ---- the same shifts, now to a fraction of a sensor pixel
         val top = info.white.toInt().coerceIn(1, 65535)
         val greyOf = FloatArray(top + 1) { v -> sqrt(((v - info.black.sum() / 4f) / (info.white - info.black.sum() / 4f).coerceAtLeast(1f)).coerceIn(0f, 1f)) * 255f }
@@ -55,6 +58,7 @@ object Stack {
             if (known != null) FloatArray(fields[n].dx.size * 2) { known[it % 2] } else refine(same[refIndex], same[k], fields[n], greyOf, top)
         }
 
+        clock[2] = System.nanoTime()
         // ---- how far apart two views of the same thing may be
         val costs = fields.flatMap { f -> f.cost.filter { it < Float.MAX_VALUE }.toList() }.sorted()
         val typical = if (costs.isEmpty()) 0f else costs[costs.size / 2]
@@ -85,7 +89,9 @@ object Stack {
             val f = fields[n]
             val out = ByteArray(pw * ph)
             val frameSoft = soft[k]
-            Parallel.rows(ph) { qy ->
+            if (Native.use) Native.trust(w, h, pw, ph, cols, Align.TILE, frameOk[n], tileLimit, refSoft.px, frameSoft.px, f.dx, f.dy, f.cost, exact[n],
+                same[refIndex].px, same[k].px, greyOf, sampleNoise, out)
+            else Parallel.rows(ph) { qy ->
                 for (qx in 0 until pw) {
                     val tile = (qy / Align.TILE) * cols + qx / Align.TILE
                     if (!frameOk[n] || f.cost[tile] > tileLimit) continue
@@ -138,6 +144,7 @@ object Stack {
             calmed
         }
 
+        clock[3] = System.nanoTime()
         // ---- how much fine detail the picture has, per filter group (0 = calm .. 3 = busy)
         // Where it is calm, samples from a little further away may be averaged in (less noise);
         // where it is busy, only those that landed almost on the pixel (no blur).
@@ -181,6 +188,7 @@ object Stack {
             }
         }
 
+        clock[4] = System.nanoTime()
         val outY = ByteArray(w * h)
         val outU = ByteArray(w * h / 4)
         val outV = ByteArray(w * h / 4)
@@ -194,7 +202,11 @@ object Stack {
         var contributed = 0.0
         val lock = Any()
 
-        Parallel.rows(h / 2) { cy ->
+        if (Native.use) contributed = Native.build(w, h, pw, cols, Align.TILE, base.light, Array(fields.size) { same[others[it]].px },
+            Array(fields.size) { trust[it] }, Array(fields.size) { exact[it] }, busy, green, greenWeights, colourWeights,
+            colourAt, besideIsRed, black, scale, gain, sh?.cols ?: 0, sh?.rows ?: 0, sh?.gains, ccm, Develop.gammaTable, look.gain, a,
+            FILL, BUSY_FILL, STEPS, outY, outU, outV)
+        else Parallel.rows(h / 2) { cy ->
             val rgb = FloatArray(3)
             val sum = FloatArray(3)
             val weight = FloatArray(3)
@@ -308,7 +320,9 @@ object Stack {
         // Green samples' worth of light behind the average pixel, as "shots used" (one shot gives half a green sample per pixel).
         val perPixel = contributed / (w.toLong() * h)
         val used = Math.round(perPixel * 2).toInt().coerceIn(1, same.size)
-        val notes = StringBuilder("stack ${w}x$h ref $refIndex of ${same.size}; cost typical ${"%.1f".format(typical)} calm ${"%.1f".format(calm)} limit ${"%.1f".format(tileLimit)}; " +
+        clock[5] = System.nanoTime()
+        val ms = (1..5).joinToString("/") { ((clock[it] - clock[it - 1]) / 1_000_000).toString() }
+        val notes = StringBuilder("stack ${w}x$h (align/refine/trust/prepare/build ms $ms) ref $refIndex of ${same.size}; cost typical ${"%.1f".format(typical)} calm ${"%.1f".format(calm)} limit ${"%.1f".format(tileLimit)}; " +
             "noise figures ${info.noiseS} ${info.noiseO} (sample noise mid ${"%.1f".format(sampleNoise[128])}); green per pixel ${"%.2f".format(perPixel)}; busy ${busy.count { it > 1 } * 100L / busy.size.coerceAtLeast(1)}%")
         for (n in fields.indices) {
             val xs = FloatArray(fields[n].dx.size) { exact[n][2 * it] }.also { it.sort() }

@@ -86,6 +86,53 @@ class AnyCamTest {
         }
     }
 
+    /** The compiled merge is there on the phone and makes exactly the photo the Kotlin one does, faster. */
+    @Test
+    fun theCompiledMergeMatchesTheReference() {
+        assertTrue("compiled library loaded", com.anycam.app.core.Native.ok)
+        val w = 640
+        val h = 480
+        val rnd = java.util.Random(4)
+        val scene = FloatArray(800 * 640) { 0f }.also { sc ->
+            val raw = FloatArray(sc.size) { rnd.nextFloat() }
+            for (y in 1 until 639) for (x in 1 until 799) {
+                var sum = 0f
+                for (j in -1..1) for (i in -1..1) sum += raw[(y + j) * 800 + x + i]
+                sc[y * 800 + x] = sum / 9f
+            }
+        }
+        val info = com.anycam.app.core.RawInfo(0, FloatArray(4) { 64f }, 1023f, floatArrayOf(1.9f, 1f, 1.5f),
+            com.anycam.app.core.RawInfo.IDENTITY, null, 0f, 3e-5f)
+        val shots = listOf(0 to 0, 3 to 1, -2 to 4, 5 to -3).map { (ox, oy) ->
+            com.anycam.app.core.RawFrame(w, h, ShortArray(w * h) { i ->
+                val v = scene[(i / w + oy + 40) * 800 + i % w + ox + 40]
+                (64 + v * 0.3f * 959 + rnd.nextGaussian() * 4).toInt().coerceIn(0, 1023).toShort()
+            })
+        }
+        val ref = com.anycam.app.core.RawMerge.sharpest(shots, info)
+        val base = com.anycam.app.core.RawMerge.merge(listOf(shots[ref]), info)
+        fun run(native: Boolean): Pair<com.anycam.app.core.Yuv, Long> {
+            com.anycam.app.core.Native.enabled = native
+            val t0 = SystemClock.uptimeMillis()
+            val photo = com.anycam.app.core.Stack.develop(shots, info, base, ref).photo
+            return photo to SystemClock.uptimeMillis() - t0
+        }
+        try {
+            val (kotlinPhoto, kotlinMs) = run(false)
+            val (nativePhoto, nativeMs) = run(true)
+            Log.i(TAG, "merge 640x480 x4: Kotlin $kotlinMs ms, compiled $nativeMs ms")
+            var worst = 0
+            for (i in kotlinPhoto.y.indices) worst = maxOf(worst, kotlin.math.abs((kotlinPhoto.y[i].toInt() and 255) - (nativePhoto.y[i].toInt() and 255)))
+            for (i in kotlinPhoto.u.indices) {
+                worst = maxOf(worst, kotlin.math.abs((kotlinPhoto.u[i].toInt() and 255) - (nativePhoto.u[i].toInt() and 255)))
+                worst = maxOf(worst, kotlin.math.abs((kotlinPhoto.v[i].toInt() and 255) - (nativePhoto.v[i].toInt() and 255)))
+            }
+            assertTrue("same photo (largest difference $worst)", worst <= 1)
+        } finally {
+            com.anycam.app.core.Native.enabled = true
+        }
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private fun photos(): Int = context.contentResolver.query(

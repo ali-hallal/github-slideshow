@@ -103,9 +103,12 @@ class PhotoMaker(context: Context) {
                     if (apart > Look.TRUSTED_WITHIN) throw SensorNotTrusted("developed photo is $apart from the phone's picture")
                 }
                 val finished = Detail.sharpen(Detail.clarity(Detail.calmColour(developed)), merged.noise / kotlin.math.sqrt(merged.used.toFloat()), Detail.SENSOR_AMOUNT)
+                val jpeg = encode(finished)
+                val t3 = System.currentTimeMillis()
                 val notes = "AnyCam sensor photo; ISO ${shot.iso} ${shot.exposureNs?.let { "1/${Math.round(1e9 / it)}" }}; ${frames.size} frames; " +
-                    "look ${if (look === Look.PLAIN) "plain" else "from phone"}; reference ${t1 - t0} ms, stack ${t2 - t1} ms; ${merged.notes}"
-                val uri = save(encode(finished), shot, notes = notes)
+                    "look ${if (look === Look.PLAIN) "plain" else "from phone"}; reference ${t1 - t0} ms, stack ${t2 - t1} ms, finish ${t3 - t2} ms; " +
+                    "compiled ${com.anycam.app.core.Native.use}; cores ${Runtime.getRuntime().availableProcessors()}; ${merged.notes}"
+                val uri = save(jpeg, shot, notes = notes)
                 Log.i(TAG, notes)
                 Log.i(TAG, "photo from the sensor: ${base.w}x${base.h}, ${merged.used} of ${frames.size} shots merged " +
                     "(noise ${"%.1f".format(Locale.US, merged.noise)}), look ${if (look === Look.PLAIN) "plain" else "from the phone"}, " +
