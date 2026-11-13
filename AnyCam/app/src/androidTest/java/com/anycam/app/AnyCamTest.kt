@@ -111,8 +111,9 @@ class AnyCamTest {
         }
         val ref = com.anycam.app.core.RawMerge.sharpest(shots, info)
         val base = com.anycam.app.core.RawMerge.merge(listOf(shots[ref]), info)
-        fun run(native: Boolean): Pair<com.anycam.app.core.Yuv, Long> {
+        fun run(native: Boolean, gpu: Boolean = false): Pair<com.anycam.app.core.Yuv, Long> {
             com.anycam.app.core.Native.enabled = native
+            com.anycam.app.core.Native.gpuEnabled = gpu
             val t0 = SystemClock.uptimeMillis()
             val photo = com.anycam.app.core.Stack.develop(shots, info, base, ref).photo
             return photo to SystemClock.uptimeMillis() - t0
@@ -120,16 +121,24 @@ class AnyCamTest {
         try {
             val (kotlinPhoto, kotlinMs) = run(false)
             val (nativePhoto, nativeMs) = run(true)
-            Log.i(TAG, "merge 640x480 x4: Kotlin $kotlinMs ms, compiled $nativeMs ms")
-            var worst = 0
-            for (i in kotlinPhoto.y.indices) worst = maxOf(worst, kotlin.math.abs((kotlinPhoto.y[i].toInt() and 255) - (nativePhoto.y[i].toInt() and 255)))
-            for (i in kotlinPhoto.u.indices) {
-                worst = maxOf(worst, kotlin.math.abs((kotlinPhoto.u[i].toInt() and 255) - (nativePhoto.u[i].toInt() and 255)))
-                worst = maxOf(worst, kotlin.math.abs((kotlinPhoto.v[i].toInt() and 255) - (nativePhoto.v[i].toInt() and 255)))
+            val (gpuPhoto, gpuMs) = run(true, gpu = true)
+            Log.i(TAG, "merge 640x480 x4: Kotlin $kotlinMs ms, compiled $nativeMs ms, graphics processor $gpuMs ms " +
+                "(graphics processor: ${com.anycam.app.core.Native.gpuStatus()})")
+            fun worst(other: com.anycam.app.core.Yuv): Int {
+                var m = 0
+                for (i in kotlinPhoto.y.indices) m = maxOf(m, kotlin.math.abs((kotlinPhoto.y[i].toInt() and 255) - (other.y[i].toInt() and 255)))
+                for (i in kotlinPhoto.u.indices) {
+                    m = maxOf(m, kotlin.math.abs((kotlinPhoto.u[i].toInt() and 255) - (other.u[i].toInt() and 255)))
+                    m = maxOf(m, kotlin.math.abs((kotlinPhoto.v[i].toInt() and 255) - (other.v[i].toInt() and 255)))
+                }
+                return m
             }
-            assertTrue("same photo (largest difference $worst)", worst <= 1)
+            assertTrue("compiled: same photo (largest difference ${worst(nativePhoto)})", worst(nativePhoto) <= 1)
+            // On the graphics processor where the device has one that can, else the same compiled code: either way the same photo.
+            assertTrue("graphics processor: same photo (largest difference ${worst(gpuPhoto)})", worst(gpuPhoto) <= 2)
         } finally {
             com.anycam.app.core.Native.enabled = true
+            com.anycam.app.core.Native.gpuEnabled = true
         }
     }
 

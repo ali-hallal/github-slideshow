@@ -29,6 +29,24 @@ object Native {
         outY: ByteArray, outU: ByteArray, outV: ByteArray,
     ): Double
 
+    /** May be switched off (to compare with the processor's result, or if it ever misbehaves). */
+    @Volatile var gpuEnabled = true
+
+    /** The same as [build], on the graphics processor; NaN if it couldn't be done there (then use [build]). */
+    @JvmStatic external fun buildGpu(
+        w: Int, h: Int, pw: Int, cols: Int, tileSize: Int,
+        light: FloatArray, frames: Array<ShortArray>, trust: Array<ByteArray>, place: Array<IntArray>,
+        busy: ByteArray, green: ShortArray, greenWeights: Array<FloatArray>, colourWeights: FloatArray,
+        colourAt: IntArray, besideIsRed: BooleanArray, black: FloatArray, scale: Float, gain: FloatArray,
+        shCols: Int, shRows: Int, shading: FloatArray?,
+        ccm: FloatArray, gamma: FloatArray, lookGain: FloatArray, lookColour: FloatArray,
+        fill: Float, busyFill: Float, steps: Int,
+        outY: ByteArray, outU: ByteArray, outV: ByteArray,
+    ): Double
+
+    /** Why the graphics processor is or isn't used ("ready", or the reason). */
+    @JvmStatic external fun gpuStatus(): String
+
     @JvmStatic external fun refine(
         w: Int, h: Int, cols: Int, rows: Int, size: Int, dx: IntArray, dy: IntArray, cost: FloatArray,
         ref: ShortArray, frame: ShortArray, greyOf: FloatArray, cap: Float, out: FloatArray,

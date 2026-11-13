@@ -218,10 +218,24 @@ object Stack {
         var contributed = 0.0
         val lock = Any()
 
-        if (Native.use) contributed = Native.build(w, h, pw, cols, Align.TILE, base.light, Array(fields.size) { same[others[it]].px },
-            Array(fields.size) { trust[it] }, place, busy, green, greenWeights, colourWeights,
-            colourAt, besideIsRed, black, scale, gain, sh?.cols ?: 0, sh?.rows ?: 0, sh?.gains, ccm, Develop.gammaTable, look.gain, a,
-            FILL, BUSY_FILL, STEPS, outY, outU, outV)
+        var where = "kotlin"
+        if (Native.use) {
+            val frameData = Array(fields.size) { same[others[it]].px }
+            val trusts = Array(fields.size) { trust[it] }
+            // The graphics processor where it can; the processor's compiled code otherwise.
+            val onGpu = if (Native.gpuEnabled && fields.isNotEmpty()) Native.buildGpu(w, h, pw, cols, Align.TILE, base.light, frameData, trusts, place, busy, green,
+                greenWeights, colourWeights, colourAt, besideIsRed, black, scale, gain, sh?.cols ?: 0, sh?.rows ?: 0, sh?.gains, ccm, Develop.gammaTable,
+                look.gain, a, FILL, BUSY_FILL, STEPS, outY, outU, outV) else Double.NaN
+            if (!onGpu.isNaN()) {
+                contributed = onGpu
+                where = "gpu"
+            } else {
+                contributed = Native.build(w, h, pw, cols, Align.TILE, base.light, frameData, trusts, place, busy, green, greenWeights, colourWeights,
+                    colourAt, besideIsRed, black, scale, gain, sh?.cols ?: 0, sh?.rows ?: 0, sh?.gains, ccm, Develop.gammaTable, look.gain, a,
+                    FILL, BUSY_FILL, STEPS, outY, outU, outV)
+                where = "cpu" + (if (Native.gpuEnabled) " (gpu: ${Native.gpuStatus()})" else "")
+            }
+        }
         else Parallel.rows(h / 2) { cy ->
             val rgb = FloatArray(3)
             val sum = FloatArray(3)
@@ -336,7 +350,7 @@ object Stack {
         val used = Math.round(perPixel * 2).toInt().coerceIn(1, same.size)
         clock[5] = System.nanoTime()
         val ms = (1..5).joinToString("/") { ((clock[it] - clock[it - 1]) / 1_000_000).toString() }
-        val notes = StringBuilder("stack ${w}x$h (align/refine/trust/prepare/build ms $ms) ref $refIndex of ${same.size}; cost typical ${"%.1f".format(typical)} calm ${"%.1f".format(calm)} limit ${"%.1f".format(tileLimit)}; " +
+        val notes = StringBuilder("stack ${w}x$h (align/refine/trust/prepare/build ms $ms, build on $where) ref $refIndex of ${same.size}; cost typical ${"%.1f".format(typical)} calm ${"%.1f".format(calm)} limit ${"%.1f".format(tileLimit)}; " +
             "noise figures ${info.noiseS} ${info.noiseO} (sample noise mid ${"%.1f".format(sampleNoise[128])}); green per pixel ${"%.2f".format(perPixel)}; busy ${busy.count { it > 1 } * 100L / busy.size.coerceAtLeast(1)}%")
         for (n in fields.indices) {
             val xs = FloatArray(fields[n].dx.size) { exact[n][2 * it] }.also { it.sort() }
