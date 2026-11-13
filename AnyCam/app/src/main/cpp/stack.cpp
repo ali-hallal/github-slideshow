@@ -442,3 +442,76 @@ Java_com_anycam_app_core_Native_tiles(
     env->SetFloatArrayRegion(jSubX, 0, tiles, subX.data());
     env->SetFloatArrayRegion(jSubY, 0, tiles, subY.data());
 }
+
+// Stack.kt "prepare": how busy each filter group is, and the reference's green at every pixel.
+extern "C" JNIEXPORT void JNICALL
+Java_com_anycam_app_core_Native_prepare(
+    JNIEnv* env, jclass, jint w, jint h, jint pw, jint ph, jint levels,
+    jbyteArray jRefGroups, jbyteArray jRefSoft, jfloatArray jNoise, jfloatArray jLight,
+    jintArray jColourAt, jbooleanArray jBesideIsRed, jbyteArray jBusy, jshortArray jGreen) {
+    float noise[256];
+    env->GetFloatArrayRegion(jNoise, 0, 256, noise);
+    int colourAt[4];
+    env->GetIntArrayRegion(jColourAt, 0, 4, colourAt);
+    jboolean bir[4];
+    env->GetBooleanArrayRegion(jBesideIsRed, 0, 4, bir);
+    Pinned<uint8_t> groups(env, jRefGroups), soft(env, jRefSoft);
+    Pinned<int8_t> busy(env, jBusy);
+    Pinned<float> light(env, jLight);
+    Pinned<uint16_t> green(env, jGreen);
+    rows(ph, [&](int qy) {
+        if (qy < 1 || qy >= ph - 1) return;
+        for (int qx = 1; qx < pw - 1; qx++) {
+            const int i = qy * pw + qx;
+            const int r = soft.data[i];
+            int lo = 255, hi = 0;
+            for (int j = -1; j <= 1; j++) for (int k = -1; k <= 1; k++) {
+                const int v = groups.data[i + j * pw + k];
+                if (v < lo) lo = v;
+                if (v > hi) hi = v;
+            }
+            const float level = (hi - lo - 2.f * noise[r]) / (0.5f * noise[r] + 2.f);
+            busy.data[i] = (int8_t)std::clamp((int)level, 0, levels - 1);
+        }
+    });
+    const int s = w + 4;
+    rows(h, [&](int y) {
+        float rgb[3];
+        for (int x = 0; x < w; x++) {
+            const int pos = (y & 1) * 2 + (x & 1);
+            pixel(light.data, s, x, y, colourAt[pos], bir[pos], rgb);
+            green.data[y * w + x] = (uint16_t)(int)(clampf(rgb[1], 0.f, 1.f) * 65535.f);
+        }
+    });
+}
+
+// Stack.kt: a byte plane averaged over each 3x3 neighbourhood (edges copied).
+extern "C" JNIEXPORT void JNICALL
+Java_com_anycam_app_core_Native_blur3(JNIEnv* env, jclass, jint w, jint h, jbyteArray jIn, jbyteArray jOut) {
+    Pinned<uint8_t> in(env, jIn), out(env, jOut);
+    std::copy(in.data, in.data + w * h, out.data);
+    rows(h, [&](int y) {
+        if (y < 1 || y >= h - 1) return;
+        for (int x = 1; x < w - 1; x++) {
+            int sum = 0;
+            const int i = y * w + x;
+            for (int j = -1; j <= 1; j++) for (int k = -1; k <= 1; k++) sum += in.data[i + j * w + k];
+            out.data[i] = (uint8_t)((sum + 4) / 9);
+        }
+    });
+}
+
+// Stack.kt: each group's trust becomes the lower of itself and its neighbourhood's average.
+extern "C" JNIEXPORT void JNICALL
+Java_com_anycam_app_core_Native_calm(JNIEnv* env, jclass, jint pw, jint ph, jbyteArray jIn, jbyteArray jOut) {
+    Pinned<uint8_t> in(env, jIn), out(env, jOut);
+    rows(ph, [&](int qy) {
+        if (qy < 1 || qy >= ph - 1) return;
+        for (int qx = 1; qx < pw - 1; qx++) {
+            const int i = qy * pw + qx;
+            int sum = 0;
+            for (int j = -1; j <= 1; j++) for (int m = -1; m <= 1; m++) sum += in.data[i + j * pw + m];
+            out.data[i] = (uint8_t)std::min((int)in.data[i], sum / 9);
+        }
+    });
+}

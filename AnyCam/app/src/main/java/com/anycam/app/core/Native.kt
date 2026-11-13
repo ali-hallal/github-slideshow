@@ -44,6 +44,18 @@ object Native {
         outY: ByteArray, outU: ByteArray, outV: ByteArray,
     ): Double
 
+    /** [Stack]'s preparation: how busy each filter group is ([busy]), and the reference's green everywhere ([green]). */
+    @JvmStatic external fun prepare(
+        w: Int, h: Int, pw: Int, ph: Int, levels: Int, refGroups: ByteArray, refSoft: ByteArray, sampleNoise: FloatArray,
+        light: FloatArray, colourAt: IntArray, besideIsRed: BooleanArray, busy: ByteArray, green: ShortArray,
+    )
+
+    /** A byte plane averaged over each 3×3 neighbourhood (edges copied). */
+    @JvmStatic external fun blur3(w: Int, h: Int, input: ByteArray, out: ByteArray)
+
+    /** Each group's trust: the lower of itself and its neighbourhood's average (edges left at 0). */
+    @JvmStatic external fun calm(pw: Int, ph: Int, input: ByteArray, out: ByteArray)
+
     /** [Detail.finishSensor]'s three steps, compiled. */
     @JvmStatic external fun finish(
         w: Int, h: Int, y: ByteArray, u: ByteArray, v: ByteArray,

@@ -132,7 +132,8 @@ object Stack {
             // One group's verdict is noisy: each takes the lowest of itself and its neighbours'
             // average, so a patch that mostly disagrees is left out as a whole.
             val calmed = ByteArray(pw * ph)
-            Parallel.rows(ph) { qy ->
+            if (Native.use) Native.calm(pw, ph, out, calmed)
+            else Parallel.rows(ph) { qy ->
                 if (qy < 1 || qy >= ph - 1) return@rows
                 for (qx in 1 until pw - 1) {
                     val i = qy * pw + qx
@@ -150,7 +151,11 @@ object Stack {
         // where it is busy, only those that landed almost on the pixel (no blur).
         val busy = ByteArray(pw * ph)
         val refGroups = proxies[refIndex]
-        Parallel.rows(ph) { qy ->
+        val colourAt = IntArray(4) { info.colour(it) }
+        val besideIsRed = BooleanArray(4) { info.colour(it xor 1) == 0 }
+        val green = ShortArray(w * h)
+        if (Native.use) Native.prepare(w, h, pw, ph, LEVELS, refGroups.px, refSoft.px, sampleNoise, base.light, colourAt, besideIsRed, busy, green)
+        else Parallel.rows(ph) { qy ->
             if (qy < 1 || qy >= ph - 1) return@rows
             for (qx in 1 until pw - 1) {
                 val i = qy * pw + qx
@@ -175,11 +180,8 @@ object Stack {
         val greenWeights = Array(LEVELS) { level -> kernels(GREEN_SIGMAS[level]) }
         val colourWeights = kernels(COLOUR_SIGMA)
 
-        val colourAt = IntArray(4) { info.colour(it) }
-        val besideIsRed = BooleanArray(4) { info.colour(it xor 1) == 0 }
         // The reference's green everywhere (measured or worked out), for what follows.
-        val green = ShortArray(w * h)
-        Parallel.rows(h) { y ->
+        if (!Native.use) Parallel.rows(h) { y ->
             val rgb = FloatArray(3)
             for (x in 0 until w) {
                 val pos = (y and 1) * 2 + (x and 1)
@@ -450,6 +452,7 @@ object Stack {
 
     /** A plane averaged over each 3×3 neighbourhood (edges copied). */
     private fun blur(p: Align.Plane): Align.Plane {
+        if (Native.use) return Align.Plane(p.w, p.h, ByteArray(p.w * p.h).also { Native.blur3(p.w, p.h, p.px, it) })
         val out = p.px.copyOf()
         Parallel.rows(p.h) { y ->
             if (y < 1 || y >= p.h - 1) return@rows
