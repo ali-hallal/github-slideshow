@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <chrono>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -187,6 +188,10 @@ EGLSurface surface = EGL_NO_SURFACE;
 GLuint program = 0;
 bool broken = false;
 std::string why;
+std::string timings = "";
+double ms(std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b) {
+    return std::chrono::duration<double, std::milli>(b - a).count();
+}
 
 bool setUp() {
     if (program) return true;
@@ -239,7 +244,7 @@ void put(std::vector<uint32_t>& v, const void* data, size_t bytes) {
 
 }  // namespace
 
-std::string gpuStatus() { return program ? "ready" : (why.empty() ? "unused" : why); }
+std::string gpuStatus() { return program ? "ready" + timings : (why.empty() ? "unused" : why); }
 
 extern "C" JNIEXPORT jstring JNICALL Java_com_anycam_app_core_Native_gpuStatus(JNIEnv* env, jclass) {
     std::lock_guard<std::mutex> g(lock);
@@ -260,6 +265,8 @@ Java_com_anycam_app_core_Native_buildGpu(
     std::lock_guard<std::mutex> g(lock);
     const double FAILED = NAN;
     if (w % 8 != 0 || h % 2 != 0) return FAILED;
+    auto t0 = std::chrono::steady_clock::now();
+    const bool fresh = program == 0;
     if (!setUp()) { if (!broken) LOGI("graphics processor not used: %s", why.c_str()); broken = true; return FAILED; }
     if (!eglMakeCurrent(display, surface, surface, context)) return FAILED;
     const int n = env->GetArrayLength(jFrames);
@@ -304,6 +311,7 @@ Java_com_anycam_app_core_Native_buildGpu(
         LOGI("graphics processor not used: buffers too large for this phone (%lld)", (long long) maxBlock);
         return FAILED;
     }
+    auto t1 = std::chrono::steady_clock::now();
     GLuint buffers[4];
     glGenBuffers(4, buffers);
     void* p = env->GetPrimitiveArrayCritical(jLight, nullptr);
@@ -324,6 +332,8 @@ Java_com_anycam_app_core_Native_buildGpu(
     glBufferData(GL_SHADER_STORAGE_BUFFER, outWords * 4, nullptr, GL_DYNAMIC_READ);
     for (int i = 0; i < 4; i++) glBindBufferBase(GL_SHADER_STORAGE_BUFFER, i, buffers[i]);
 
+    glFinish();
+    auto t2 = std::chrono::steady_clock::now();
     glUseProgram(program);
     auto u = [&](const char* name) { return glGetUniformLocation(program, name); };
     glUniform1i(u("W"), w); glUniform1i(u("H"), h); glUniform1i(u("PW"), pw); glUniform1i(u("COLS"), cols);
@@ -362,6 +372,8 @@ Java_com_anycam_app_core_Native_buildGpu(
         glFlush();
     }
     glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+    glFinish();
+    auto t3 = std::chrono::steady_clock::now();
     double total = NAN;
     const uint32_t* out = (const uint32_t*) glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, outWords * 4, GL_MAP_READ_BIT);
     if (out && glGetError() == GL_NO_ERROR) {
@@ -376,6 +388,11 @@ Java_com_anycam_app_core_Native_buildGpu(
     }
     if (out) glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
     glDeleteBuffers(4, buffers);
+    auto t4 = std::chrono::steady_clock::now();
+    char text[200];
+    snprintf(text, sizeof(text), " (prepare %s%.0f, upload %.0f, compute %.0f, read back %.0f ms)",
+        fresh ? "incl. first-time compile " : "", ms(t0, t1), ms(t1, t2), ms(t2, t3), ms(t3, t4));
+    timings = text;
     eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     return total;
 }

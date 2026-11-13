@@ -228,7 +228,7 @@ object Stack {
                 look.gain, a, FILL, BUSY_FILL, STEPS, outY, outU, outV) else Double.NaN
             if (!onGpu.isNaN()) {
                 contributed = onGpu
-                where = "gpu"
+                where = "gpu" + Native.gpuStatus().removePrefix("ready")
             } else {
                 contributed = Native.build(w, h, pw, cols, Align.TILE, base.light, frameData, trusts, place, busy, green, greenWeights, colourWeights,
                     colourAt, besideIsRed, black, scale, gain, sh?.cols ?: 0, sh?.rows ?: 0, sh?.gains, ccm, Develop.gammaTable, look.gain, a,
