@@ -136,6 +136,13 @@ class AnyCamTest {
             assertTrue("compiled: same photo (largest difference ${worst(nativePhoto)})", worst(nativePhoto) <= 1)
             // On the graphics processor where the device has one that can, else the same compiled code: either way the same photo.
             assertTrue("graphics processor: same photo (largest difference ${worst(gpuPhoto)})", worst(gpuPhoto) <= 2)
+            // The finishing steps, compiled and in Kotlin: the same photo.
+            com.anycam.app.core.Native.enabled = false
+            val finishedKotlin = com.anycam.app.core.Detail.finishSensor(kotlinPhoto, 1.3f)
+            com.anycam.app.core.Native.enabled = true
+            val finishedNative = com.anycam.app.core.Detail.finishSensor(kotlinPhoto, 1.3f)
+            assertTrue("finishing: same photo", finishedKotlin.y.contentEquals(finishedNative.y) &&
+                finishedKotlin.u.contentEquals(finishedNative.u) && finishedKotlin.v.contentEquals(finishedNative.v))
         } finally {
             com.anycam.app.core.Native.enabled = true
             com.anycam.app.core.Native.gpuEnabled = true

@@ -75,7 +75,7 @@ void main() {
     int cy = int(gl_GlobalInvocationID.y) + ROW0;
     int cx0 = int(gl_GlobalInvocationID.x) * 4;
     if (cy >= H / 2 || cx0 >= W / 2) return;
-    uint ys[4] = uint[4](0u, 0u, 0u, 0u);
+    uint ys0 = 0u, ys1 = 0u, ys2 = 0u, ys3 = 0u;
     uint us = 0u, vs = 0u;
     float rowWeight = 0.0;
     bool hasShading = SHC >= 2 && SHR >= 2;
@@ -89,17 +89,22 @@ void main() {
     for (int g = 0; g < 4; g++) {
         int cx = cx0 + g;
         int tile = (cy / TILE) * COLS + cx / TILE;
-        vec3 lens = vec3(1.0);
+        float lensR = 1.0, lensG = 1.0, lensB = 1.0;
         if (hasShading) {
             float fx = (float(cx * 2) + 0.5) / (float(W) - 1.0) * float(SHC - 1);
             int x0 = clamp(int(fx), 0, SHC - 2);
             float ax = clamp(fx - float(x0), 0.0, 1.0);
             int o0 = oShading + (shRow * SHC + x0) * 3;
             int o1 = o0 + SHC * 3;
-            for (int c = 0; c < 3; c++)
-                lens[c] = (tableF(o0 + c) * (1.0 - ax) + tableF(o0 + 3 + c) * ax) * (1.0 - shAy) +
-                          (tableF(o1 + c) * (1.0 - ax) + tableF(o1 + 3 + c) * ax) * shAy;
+            lensR = (tableF(o0) * (1.0 - ax) + tableF(o0 + 3) * ax) * (1.0 - shAy) +
+                    (tableF(o1) * (1.0 - ax) + tableF(o1 + 3) * ax) * shAy;
+            lensG = (tableF(o0 + 1) * (1.0 - ax) + tableF(o0 + 4) * ax) * (1.0 - shAy) +
+                    (tableF(o1 + 1) * (1.0 - ax) + tableF(o1 + 4) * ax) * shAy;
+            lensB = (tableF(o0 + 2) * (1.0 - ax) + tableF(o0 + 5) * ax) * (1.0 - shAy) +
+                    (tableF(o1 + 2) * (1.0 - ax) + tableF(o1 + 5) * ax) * shAy;
         }
+        // The same products the per-sample code formed (lens times gain, per colour).
+        float lgR = lensR * gain.r, lgG = lensG * gain.g, lgB = lensB * gain.b;
         float su = 0.0, sv = 0.0;
         int level = int(byteAt(oBusy, cy * PW + cx));
         if (level > 127) level -= 256;
@@ -109,9 +114,12 @@ void main() {
             int y = cy * 2 + p / 2;
             int own = colourAt[p];
             vec3 rgb = pixel(x, y, own, besideIsRed[p] != 0);
-            vec3 sum = vec3(0.0), weight = vec3(0.0);
-            sum[own] = own == 1 ? rgb.g : rgb[own] - rgb.g;
-            weight[own] = 1.0;
+            // Separate running sums per colour (no indexing into vectors: on many phone graphics
+            // processors that is done through memory, which is slow).
+            float sr = 0.0, sg = 0.0, sb = 0.0, wr = 0.0, wg = 0.0, wb = 0.0;
+            if (own == 1) { sg = rgb.g; wg = 1.0; }
+            else if (own == 0) { sr = rgb.r - rgb.g; wr = 1.0; }
+            else { sb = rgb.b - rgb.g; wb = 1.0; }
             for (int k = 0; k < N; k++) {
                 uint t = byteAt(oTrust + k * trustStride, cy * PW + cx);
                 if (t == 0u) continue;
@@ -131,22 +139,26 @@ void main() {
                         if (wt < 0.01) continue;
                         float v = (float(frameShort(k, (iy + j) * W + ix + i)) - black[pos]) * scale;
                         if (v < 0.0) v = 0.0;
-                        v *= lens[c] * gain[c];
-                        if (v > 1.0) v = 1.0;
-                        if (c != 1) {
+                        if (c == 1) {
+                            v *= lgG;
+                            if (v > 1.0) v = 1.0;
+                            sg += v * wt;
+                            wg += wt;
+                        } else {
+                            v *= c == 0 ? lgR : lgB;
+                            if (v > 1.0) v = 1.0;
                             int gx = clamp(x + i, 0, W - 1);
                             int gy = clamp(y + j, 0, H - 1);
                             v -= float(shortOther(oGreen, gy * W + gx)) / 65535.0;
+                            if (c == 0) { sr += v * wt; wr += wt; } else { sb += v * wt; wb += wt; }
                         }
-                        sum[c] += v * wt;
-                        weight[c] += wt;
                     }
                 }
             }
-            rowWeight += weight.g;
-            float gg = (sum.g + fill * rgb.g) / (weight.g + fill);
-            float r = max(0.0, gg + (sum.r + fillBase * (rgb.r - rgb.g)) / (weight.r + fillBase));
-            float b = max(0.0, gg + (sum.b + fillBase * (rgb.b - rgb.g)) / (weight.b + fillBase));
+            rowWeight += wg;
+            float gg = (sg + fill * rgb.g) / (wg + fill);
+            float r = max(0.0, gg + (sr + fillBase * (rgb.r - rgb.g)) / (wr + fillBase));
+            float b = max(0.0, gg + (sb + fillBase * (rgb.b - rgb.g)) / (wb + fillBase));
             float lr = clamp(ccm[0] * r + ccm[1] * gg + ccm[2] * b, 0.0, 1.0);
             float lg = clamp(ccm[3] * r + ccm[4] * gg + ccm[5] * b, 0.0, 1.0);
             float lb = clamp(ccm[6] * r + ccm[7] * gg + ccm[8] * b, 0.0, 1.0);
@@ -162,7 +174,8 @@ void main() {
             // Pixels x..x+7 of rows 2cy and 2cy+1: two words per row.
             int col = g * 2 + p % 2;
             int word = (p / 2) * 2 + col / 4;
-            ys[word] |= yv << uint((col % 4) * 8);
+            uint bits = yv << uint((col % 4) * 8);
+            if (word == 0) ys0 |= bits; else if (word == 1) ys1 |= bits; else if (word == 2) ys2 |= bits; else ys3 |= bits;
             su += -0.168736 * fr2 - 0.331264 * fg2 + 0.5 * fb2;
             sv += 0.5 * fr2 - 0.418688 * fg2 - 0.081312 * fb2;
         }
@@ -171,10 +184,10 @@ void main() {
     }
     int y0 = cy * 2;
     int x0 = cx0 * 2;
-    outv[(y0 * W + x0) / 4] = ys[0];
-    outv[(y0 * W + x0) / 4 + 1] = ys[1];
-    outv[((y0 + 1) * W + x0) / 4] = ys[2];
-    outv[((y0 + 1) * W + x0) / 4 + 1] = ys[3];
+    outv[(y0 * W + x0) / 4] = ys0;
+    outv[(y0 * W + x0) / 4 + 1] = ys1;
+    outv[((y0 + 1) * W + x0) / 4] = ys2;
+    outv[((y0 + 1) * W + x0) / 4 + 1] = ys3;
     outv[oU + (cy * (W / 2) + cx0) / 4] = us;
     outv[oV + (cy * (W / 2) + cx0) / 4] = vs;
     outv[oWeights + cy * (W / 8) + cx0 / 4] = floatBitsToUint(rowWeight);

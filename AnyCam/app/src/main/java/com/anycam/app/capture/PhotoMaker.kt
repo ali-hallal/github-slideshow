@@ -102,7 +102,7 @@ class PhotoMaker(context: Context) {
                         "curve ${look.gain.filterIndexed { i, _ -> i % 51 == 0 }.joinToString { "%.2f".format(Locale.US, it) }}")
                     if (apart > Look.TRUSTED_WITHIN) throw SensorNotTrusted("developed photo is $apart from the phone's picture")
                 }
-                val finished = Detail.sharpen(Detail.clarity(Detail.calmColour(developed)), merged.noise / kotlin.math.sqrt(merged.used.toFloat()), Detail.SENSOR_AMOUNT)
+                val finished = Detail.finishSensor(developed, merged.noise / kotlin.math.sqrt(merged.used.toFloat()))
                 val jpeg = encode(finished)
                 val t3 = System.currentTimeMillis()
                 val notes = "AnyCam sensor photo; ISO ${shot.iso} ${shot.exposureNs?.let { "1/${Math.round(1e9 / it)}" }}; ${frames.size} frames; " +

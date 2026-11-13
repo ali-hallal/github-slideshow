@@ -135,6 +135,18 @@ object Detail {
 
     const val CLARITY = 0.45f
 
+    /** A sensor photo's finishing: calmer colour, local contrast, then sharpening (compiled where possible). */
+    fun finishSensor(photo: Yuv, noiseLeft: Float): Yuv {
+        if (Native.use && photo.w % 2 == 0 && photo.h % 2 == 0) {
+            val y = ByteArray(photo.w * photo.h)
+            val u = ByteArray(photo.cw * photo.ch)
+            val v = ByteArray(photo.cw * photo.ch)
+            Native.finish(photo.w, photo.h, photo.y, photo.u, photo.v, CLARITY, noiseLeft, SENSOR_AMOUNT, y, u, v)
+            return Yuv(photo.w, photo.h, y, u, v)
+        }
+        return sharpen(clarity(calmColour(photo)), noiseLeft, SENSOR_AMOUNT)
+    }
+
     /** For photos developed from the sensor: nothing has sharpened them yet, as a phone's own processing would have. */
     const val SENSOR_AMOUNT = 2.4f
 

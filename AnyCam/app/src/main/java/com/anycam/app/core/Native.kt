@@ -44,6 +44,13 @@ object Native {
         outY: ByteArray, outU: ByteArray, outV: ByteArray,
     ): Double
 
+    /** [Detail.finishSensor]'s three steps, compiled. */
+    @JvmStatic external fun finish(
+        w: Int, h: Int, y: ByteArray, u: ByteArray, v: ByteArray,
+        clarity: Float, noiseLeft: Float, sharpen: Float,
+        outY: ByteArray, outU: ByteArray, outV: ByteArray,
+    )
+
     /** Why the graphics processor is or isn't used ("ready", or the reason). */
     @JvmStatic external fun gpuStatus(): String
 
