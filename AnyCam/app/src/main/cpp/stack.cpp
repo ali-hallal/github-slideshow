@@ -68,7 +68,7 @@ extern "C" JNIEXPORT jdouble JNICALL
 Java_com_anycam_app_core_Native_build(
     JNIEnv* env, jclass,
     jint w, jint h, jint pw, jint cols, jint tileSize,
-    jfloatArray jLight, jobjectArray jFrames, jobjectArray jTrust, jobjectArray jExact,
+    jfloatArray jLight, jobjectArray jFrames, jobjectArray jTrust, jobjectArray jPlace,
     jbyteArray jBusy, jshortArray jGreen, jobjectArray jGreenWeights, jfloatArray jColourWeights,
     jintArray jColourAt, jbooleanArray jBesideIsRed, jfloatArray jBlack, jfloat scale, jfloatArray jGain,
     jint shCols, jint shRows, jfloatArray jShading,
@@ -79,9 +79,14 @@ Java_com_anycam_app_core_Native_build(
     const int levels = env->GetArrayLength(jGreenWeights);
     // Small tables: copied (they must be read while other arrays are pinned).
     auto copyF = [&](jfloatArray a) { std::vector<float> v(a ? env->GetArrayLength(a) : 0); if (a) env->GetFloatArrayRegion(a, 0, v.size(), v.data()); return v; };
-    std::vector<std::vector<float>> greenWeights(levels), exact(n);
+    std::vector<std::vector<float>> greenWeights(levels);
+    std::vector<std::vector<int>> place(n);
     for (int l = 0; l < levels; l++) greenWeights[l] = copyF((jfloatArray)env->GetObjectArrayElement(jGreenWeights, l));
-    for (int k = 0; k < n; k++) exact[k] = copyF((jfloatArray)env->GetObjectArrayElement(jExact, k));
+    for (int k = 0; k < n; k++) {
+        jintArray a = (jintArray)env->GetObjectArrayElement(jPlace, k);
+        place[k].resize(env->GetArrayLength(a));
+        env->GetIntArrayRegion(a, 0, place[k].size(), place[k].data());
+    }
     std::vector<float> colourWeights = copyF(jColourWeights), black = copyF(jBlack), gain = copyF(jGain), shading = copyF(jShading),
         ccm = copyF(jCcm), gamma = copyF(jGamma), lookGain = copyF(jLookGain), a = copyF(jLookColour);
     int colourAt[4];
@@ -109,7 +114,6 @@ Java_com_anycam_app_core_Native_build(
             frames.push_back(new Pinned<uint16_t>(env, frameArrays[k]));
             trust.push_back(new Pinned<uint8_t>(env, trustArrays[k]));
         }
-        const int kw = (steps + 1);
         rows(h / 2, [&](int cy) {
             float rgb[3], sum[3], weight[3], lens[3] = {1, 1, 1};
             double rowWeight = 0;
@@ -149,13 +153,11 @@ Java_com_anycam_app_core_Native_build(
                     for (int k = 0; k < n; k++) {
                         const int t = trust[k]->data[cy * pw + cx];
                         if (t == 0) continue;
-                        const float px = x + exact[k][2 * tile];
-                        const float py = y + exact[k][2 * tile + 1];
-                        const int ix = (int)std::floor(px + 0.5f);
-                        const int iy = (int)std::floor(py + 0.5f);
+                        const int* pl = place[k].data() + 3 * tile;
+                        const int ix = x + pl[0];
+                        const int iy = y + pl[1];
                         if (ix < 1 || iy < 1 || ix >= w - 1 || iy >= h - 1) continue;
-                        const int at = (std::clamp((int)((py - iy + 0.5f) * steps), 0, steps) * kw +
-                                        std::clamp((int)((px - ix + 0.5f) * steps), 0, steps)) * 9;
+                        const int at = pl[2];
                         const uint16_t* fr = frames[k]->data;
                         const float tw = t / 255.f;
                         for (int j = -1; j <= 1; j++) {
@@ -264,4 +266,138 @@ Java_com_anycam_app_core_Native_trust(
             out.data[i] = (uint8_t)(int)(255.f * coarse * fine);
         }
     });
+}
+
+// Stack.refine: each tile's shift to a fraction of a sensor pixel.
+extern "C" JNIEXPORT void JNICALL
+Java_com_anycam_app_core_Native_refine(
+    JNIEnv* env, jclass, jint w, jint h, jint cols, jint rowsN, jint size, jintArray jDx, jintArray jDy, jfloatArray jCost,
+    jshortArray jRef, jshortArray jFrame, jfloatArray jGreyOf, jfloat cap, jfloatArray jOut) {
+    std::vector<int> dx(env->GetArrayLength(jDx)), dy(env->GetArrayLength(jDy));
+    env->GetIntArrayRegion(jDx, 0, dx.size(), dx.data());
+    env->GetIntArrayRegion(jDy, 0, dy.size(), dy.data());
+    std::vector<float> cost(env->GetArrayLength(jCost)), greyOf(env->GetArrayLength(jGreyOf)), out(2 * dx.size());
+    env->GetFloatArrayRegion(jCost, 0, cost.size(), cost.data());
+    env->GetFloatArrayRegion(jGreyOf, 0, greyOf.size(), greyOf.data());
+    const int top = (int)greyOf.size() - 1;
+    {
+        Pinned<uint16_t> ref(env, jRef), frame(env, jFrame);
+        auto grey = [&](const uint16_t* f, int x, int y) {
+            int o = y * w + x;
+            int v = (f[o] + f[o + 1] + f[o + w] + f[o + w + 1]) >> 2;
+            return greyOf[v > top ? top : v];
+        };
+        const float MAXF = 3.4028235e38f;
+        rows(rowsN, [&](int r) {
+            float grid[25];
+            for (int c = 0; c < cols; c++) {
+                const int tile = r * cols + c;
+                const int bx = 2 * dx[tile], by = 2 * dy[tile];
+                out[2 * tile] = (float)bx;
+                out[2 * tile + 1] = (float)by;
+                if (cost[tile] == MAXF) continue;
+                const int x0 = c * size, y0 = r * size;
+                const int x1 = std::min(w - 1, x0 + size), y1 = std::min(h - 1, y0 + size);
+                float best = MAXF;
+                int bi = 0, bj = 0;
+                for (int j = -2; j <= 2; j++) for (int i = -2; i <= 2; i++) {
+                    double sum = 0;
+                    int n = 0;
+                    for (int y = y0; y < y1; y += 3) {
+                        const int fy = y + by + j;
+                        if (fy < 0 || fy >= h - 1) continue;
+                        for (int x = x0; x < x1; x += 3) {
+                            const int fx = x + bx + i;
+                            if (fx < 0 || fx >= w - 1) continue;
+                            const float d = grey(ref.data, x, y) - grey(frame.data, fx, fy);
+                            sum += (d > cap || d < -cap) ? cap * cap : d * d;
+                            n++;
+                        }
+                    }
+                    const float cst = n < 64 ? MAXF : (float)(sum / n);
+                    grid[(j + 2) * 5 + i + 2] = cst;
+                    if (cst < best) { best = cst; bi = i; bj = j; }
+                }
+                if (best == MAXF) continue;
+                auto between = [&](float lo, float hi) {
+                    if (lo == MAXF || hi == MAXF) return 0.f;
+                    const float curve = lo + hi - 2 * best;
+                    return curve <= 1e-4f ? 0.f : clampf((lo - hi) / (2 * curve), -0.5f, 0.5f);
+                };
+                const int at = (bj + 2) * 5 + bi + 2;
+                const float sx = std::abs(bi) < 2 ? between(grid[at - 1], grid[at + 1]) : 0.f;
+                const float sy = std::abs(bj) < 2 ? between(grid[at - 5], grid[at + 5]) : 0.f;
+                out[2 * tile] = bx + bi + sx;
+                out[2 * tile + 1] = by + bj + sy;
+            }
+        });
+    }
+    env->SetFloatArrayRegion(jOut, 0, out.size(), out.data());
+}
+
+// Align.tiles: the search for each tile's shift (to the pixel, and the fraction from the cost curve).
+extern "C" JNIEXPORT void JNICALL
+Java_com_anycam_app_core_Native_tiles(
+    JNIEnv* env, jclass, jint rw, jint rh, jbyteArray jRef, jint fw, jint fh, jbyteArray jFrame, jint gx, jint gy,
+    jint tileSize, jint reach, jint cap, jintArray jDx, jintArray jDy, jfloatArray jCost, jfloatArray jSubX, jfloatArray jSubY) {
+    const int cols = (rw + tileSize - 1) / tileSize, rowsN = (rh + tileSize - 1) / tileSize;
+    const int tiles = cols * rowsN, span = 2 * reach + 1;
+    std::vector<int> dx(tiles), dy(tiles);
+    std::vector<float> cost(tiles), subX(tiles, 0.f), subY(tiles, 0.f);
+    {
+        Pinned<uint8_t> ref(env, jRef), frame(env, jFrame);
+        const float MAXF = 3.4028235e38f;
+        rows(rowsN, [&](int r) {
+            std::vector<float> grid(span * span);
+            for (int c = 0; c < cols; c++) {
+                std::fill(grid.begin(), grid.end(), NAN);
+                int bestOx = 0, bestOy = 0;
+                const int x0 = c * tileSize, y0 = r * tileSize;
+                const int x1 = std::min(rw, x0 + tileSize), y1 = std::min(rh, y0 + tileSize);
+                int64_t best = INT64_MAX;
+                int bx = gx, by = gy, bestN = 1;
+                int64_t bestSad = 0;
+                for (int oy = -reach; oy <= reach; oy++) for (int ox = -reach; ox <= reach; ox++) {
+                    const int sx = gx + ox, sy = gy + oy;
+                    int64_t sad = 0;
+                    int n = 0;
+                    for (int y = y0; y < y1; y += 2) {
+                        const int fy = y + sy;
+                        if (fy < 0 || fy >= fh) continue;
+                        for (int x = x0; x < x1; x += 2) {
+                            const int fx = x + sx;
+                            if (fx < 0 || fx >= fw) continue;
+                            int d = std::abs((int)ref.data[y * rw + x] - (int)frame.data[fy * fw + fx]);
+                            sad += d > cap ? cap : d;
+                            n++;
+                        }
+                    }
+                    if (n < tileSize * tileSize / 16) continue;
+                    grid[(oy + reach) * span + ox + reach] = (float)sad / n;
+                    const int64_t score = sad * 4096 / n + (int64_t)(std::abs(ox) + std::abs(oy)) * 24;
+                    if (score < best) { best = score; bx = sx; by = sy; bestSad = sad; bestN = n; bestOx = ox; bestOy = oy; }
+                }
+                const int i = r * cols + c;
+                dx[i] = bx;
+                dy[i] = by;
+                if (best != INT64_MAX && std::abs(bestOx) < reach && std::abs(bestOy) < reach) {
+                    const int at = (bestOy + reach) * span + bestOx + reach;
+                    const float mid = grid[at];
+                    auto part = [&](float lo, float hi) {
+                        if (std::isnan(lo) || std::isnan(hi)) return 0.f;
+                        const float curve = lo + hi - 2 * mid;
+                        return curve <= 1e-4f ? 0.f : clampf((lo - hi) / (2 * curve), -0.5f, 0.5f);
+                    };
+                    subX[i] = part(grid[at - 1], grid[at + 1]);
+                    subY[i] = part(grid[at - span], grid[at + span]);
+                }
+                cost[i] = best == INT64_MAX ? MAXF : (float)bestSad / bestN;
+            }
+        });
+    }
+    env->SetIntArrayRegion(jDx, 0, tiles, dx.data());
+    env->SetIntArrayRegion(jDy, 0, tiles, dy.data());
+    env->SetFloatArrayRegion(jCost, 0, tiles, cost.data());
+    env->SetFloatArrayRegion(jSubX, 0, tiles, subX.data());
+    env->SetFloatArrayRegion(jSubY, 0, tiles, subY.data());
 }

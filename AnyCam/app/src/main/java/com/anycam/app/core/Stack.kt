@@ -188,6 +188,22 @@ object Stack {
             }
         }
 
+        // Where each tile of each frame lands: the same for every pixel of the tile (whole
+        // pixels, and which of the precomputed weight sets the fraction beyond them picks).
+        val place = Array(fields.size) { n ->
+            IntArray(cols * ((ph + Align.TILE - 1) / Align.TILE) * 3).also { out ->
+                for (tile in 0 until out.size / 3) {
+                    val ex = exact[n][2 * tile]
+                    val ey = exact[n][2 * tile + 1]
+                    val ox = floor(ex + 0.5f).toInt()
+                    val oy = floor(ey + 0.5f).toInt()
+                    out[3 * tile] = ox
+                    out[3 * tile + 1] = oy
+                    out[3 * tile + 2] = (((ey - oy + 0.5f) * STEPS).toInt().coerceIn(0, STEPS) * (STEPS + 1) + ((ex - ox + 0.5f) * STEPS).toInt().coerceIn(0, STEPS)) * 9
+                }
+            }
+        }
+
         clock[4] = System.nanoTime()
         val outY = ByteArray(w * h)
         val outU = ByteArray(w * h / 4)
@@ -203,7 +219,7 @@ object Stack {
         val lock = Any()
 
         if (Native.use) contributed = Native.build(w, h, pw, cols, Align.TILE, base.light, Array(fields.size) { same[others[it]].px },
-            Array(fields.size) { trust[it] }, Array(fields.size) { exact[it] }, busy, green, greenWeights, colourWeights,
+            Array(fields.size) { trust[it] }, place, busy, green, greenWeights, colourWeights,
             colourAt, besideIsRed, black, scale, gain, sh?.cols ?: 0, sh?.rows ?: 0, sh?.gains, ccm, Develop.gammaTable, look.gain, a,
             FILL, BUSY_FILL, STEPS, outY, outU, outV)
         else Parallel.rows(h / 2) { cy ->
@@ -254,14 +270,12 @@ object Stack {
                     for (n in fields.indices) {
                         val t = trust[n][cy * pw + cx].toInt() and 0xFF
                         if (t == 0) continue
-                        val f = fields[n]
                         // Where this pixel is in the other frame: whole pixels and the fraction beyond.
-                        val px = x + exact[n][2 * tile]
-                        val py = y + exact[n][2 * tile + 1]
-                        val ix = floor(px + 0.5f).toInt()
-                        val iy = floor(py + 0.5f).toInt()
+                        val pl = place[n]
+                        val ix = x + pl[3 * tile]
+                        val iy = y + pl[3 * tile + 1]
                         if (ix < 1 || iy < 1 || ix >= w - 1 || iy >= h - 1) continue
-                        val at = (((py - iy + 0.5f) * STEPS).toInt().coerceIn(0, STEPS) * (STEPS + 1) + ((px - ix + 0.5f) * STEPS).toInt().coerceIn(0, STEPS)) * 9
+                        val at = pl[3 * tile + 2]
                         val tight = greenWeights[level]
                         val wide = colourWeights
                         val fr = same[others[n]]
@@ -346,6 +360,10 @@ object Stack {
         val h = ref.h
         val size = Align.TILE * 2
         val out = FloatArray(field.dx.size * 2)
+        if (Native.use) {
+            Native.refine(w, h, field.cols, field.rows, size, field.dx, field.dy, field.cost, ref.px, frame.px, greyOf, CAP, out)
+            return out
+        }
         fun grey(f: RawFrame, x: Int, y: Int): Float {
             val o = y * w + x
             val v = ((f.px[o].toInt() and 0xFFFF) + (f.px[o + 1].toInt() and 0xFFFF) + (f.px[o + w].toInt() and 0xFFFF) + (f.px[o + w + 1].toInt() and 0xFFFF)) shr 2

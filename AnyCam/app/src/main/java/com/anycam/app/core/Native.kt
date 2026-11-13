@@ -20,7 +20,7 @@ object Native {
 
     @JvmStatic external fun build(
         w: Int, h: Int, pw: Int, cols: Int, tileSize: Int,
-        light: FloatArray, frames: Array<ShortArray>, trust: Array<ByteArray>, exact: Array<FloatArray>,
+        light: FloatArray, frames: Array<ShortArray>, trust: Array<ByteArray>, place: Array<IntArray>,
         busy: ByteArray, green: ShortArray, greenWeights: Array<FloatArray>, colourWeights: FloatArray,
         colourAt: IntArray, besideIsRed: BooleanArray, black: FloatArray, scale: Float, gain: FloatArray,
         shCols: Int, shRows: Int, shading: FloatArray?,
@@ -28,6 +28,18 @@ object Native {
         fill: Float, busyFill: Float, steps: Int,
         outY: ByteArray, outU: ByteArray, outV: ByteArray,
     ): Double
+
+    @JvmStatic external fun refine(
+        w: Int, h: Int, cols: Int, rows: Int, size: Int, dx: IntArray, dy: IntArray, cost: FloatArray,
+        ref: ShortArray, frame: ShortArray, greyOf: FloatArray, cap: Float, out: FloatArray,
+    )
+
+    /** The tile search of [Align.tiles] (before its neighbour check): fills dx, dy, cost, subX, subY. */
+    @JvmStatic external fun tiles(
+        refW: Int, refH: Int, ref: ByteArray, frameW: Int, frameH: Int, frame: ByteArray, gx: Int, gy: Int,
+        tile: Int, reach: Int, cap: Int,
+        dx: IntArray, dy: IntArray, cost: FloatArray, subX: FloatArray, subY: FloatArray,
+    )
 
     @JvmStatic external fun trust(
         w: Int, h: Int, pw: Int, ph: Int, cols: Int, tileSize: Int, frameOk: Boolean, tileLimit: Float,

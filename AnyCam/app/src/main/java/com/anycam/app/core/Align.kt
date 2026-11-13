@@ -114,7 +114,8 @@ object Align {
         val subX = FloatArray(cols * rows)
         val subY = FloatArray(cols * rows)
         val span = 2 * FINE_REACH + 1
-        Parallel.rows(rows) { r ->
+        if (Native.use) Native.tiles(ref.w, ref.h, ref.px, frame.w, frame.h, frame.px, g[0], g[1], TILE, FINE_REACH, CAP, dx, dy, cost, subX, subY)
+        else Parallel.rows(rows) { r ->
             val grid = FloatArray(span * span)
             for (c in 0 until cols) {
                 grid.fill(Float.NaN)
