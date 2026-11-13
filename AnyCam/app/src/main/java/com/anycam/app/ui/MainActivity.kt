@@ -322,6 +322,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
         making++
         thumbnail.alpha = 0.5f
         say(if (frames.size > 1) getString(R.string.merging, frames.size) else getString(R.string.saving), stay = true)
+        showShot(frames.firstOrNull(), shot.rotation)
         photos.make(frames, shot) { photo ->
             making--
             if (making == 0) thumbnail.alpha = 1f
@@ -343,6 +344,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
         making++
         thumbnail.alpha = 0.5f
         say(getString(R.string.merging_sensor, frames.size), stay = true)
+        showShot(guide, shot.rotation)
         photos.makeRaw(frames, guide, info, shot) { photo ->
             making--
             if (making == 0) thumbnail.alpha = 1f
@@ -412,6 +414,22 @@ class MainActivity : Activity(), CameraEngine.Listener {
     }
 
     override fun onFocused(sharp: Boolean) = marks.focused(sharp)
+
+    /**
+     * The shot on the thumbnail the moment it is taken, as the phone's own camera does; the
+     * finished photo replaces it when it is ready (seconds later, for a merged one).
+     */
+    private fun showShot(frame: Yuv?, rotation: Int) {
+        frame ?: return
+        Thread {
+            val bmp = try {
+                Thumb.of(frame, rotation, 160)
+            } catch (e: Throwable) {
+                null
+            }
+            runOnUiThread { if (bmp != null && making > 0) thumbnail.setImageBitmap(bmp) }
+        }.start()
+    }
 
     private fun showThumbnail(uri: Uri) {
         Thread {

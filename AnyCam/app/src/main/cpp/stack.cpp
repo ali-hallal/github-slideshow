@@ -114,7 +114,21 @@ Java_com_anycam_app_core_Native_build(
             frames.push_back(new Pinned<uint16_t>(env, frameArrays[k]));
             trust.push_back(new Pinned<uint8_t>(env, trustArrays[k]));
         }
+        // For each frame and each of the four pixel positions in a filter group: the taps that
+        // count (weight from the table, colour, filter position, offset), for the current tile.
+        // The same numbers the per-tap code would look up, so the result doesn't change.
+        // Kept per colour, in the original order within each colour, so each colour's running
+        // sum can live in a register and still adds up exactly as before.
+        struct Tap { float wt; float black; int off, i, j; };
+        // Divisions are slow on phone processors: the two that happen per sample come from
+        // tables instead (exactly the same values).
+        std::vector<float> greenOf(65536), trustOf(256);
+        for (int v = 0; v < 65536; v++) greenOf[v] = v / 65535.f;
+        for (int v = 0; v < 256; v++) trustOf[v] = v / 255.f;
         rows(h / 2, [&](int cy) {
+            std::vector<Tap> taps(n * 4 * 3 * 9);
+            std::vector<int> count(n * 4 * 3, 0);
+            int tapsTile = -1;
             float rgb[3], sum[3], weight[3], lens[3] = {1, 1, 1};
             double rowWeight = 0;
             int shRow = 0;
@@ -141,6 +155,28 @@ Java_com_anycam_app_core_Native_build(
                 const float fill = fillBase + level * busyFill;
                 const float* tight = greenWeights[level].data();
                 const float* wide = colourWeights.data();
+                // Taps depend on the tile (placement) and on the level of detail: rebuilt when either changes.
+                const int tapsKey = tile * 8 + level;
+                if (tapsKey != tapsTile) {
+                    tapsTile = tapsKey;
+                    for (int k = 0; k < n; k++) {
+                        const int* pl = place[k].data() + 3 * tile;
+                        const int at = pl[2];
+                        for (int p = 0; p < 4; p++) {
+                            for (int c = 0; c < 3; c++) count[(k * 4 + p) * 3 + c] = 0;
+                            for (int j = -1; j <= 1; j++) {
+                                const int rowPos = (((p / 2) + pl[1] + j) & 1) * 2;
+                                for (int i = -1; i <= 1; i++) {
+                                    const int pos = rowPos + (((p % 2) + pl[0] + i) & 1);
+                                    const int c = colourAt[pos];
+                                    const int kk = (j + 1) * 3 + i + 1;
+                                    const int slot = (k * 4 + p) * 3 + c;
+                                    taps[slot * 9 + count[slot]++] = {c == 1 ? tight[at + kk] : wide[at + kk], black[pos], j * w + i, i, j};
+                                }
+                            }
+                        }
+                    }
+                }
                 for (int p = 0; p < 4; p++) {
                     const int x = cx * 2 + p % 2;
                     const int y = cy * 2 + p / 2;
@@ -158,29 +194,34 @@ Java_com_anycam_app_core_Native_build(
                         const int iy = y + pl[1];
                         if (ix < 1 || iy < 1 || ix >= w - 1 || iy >= h - 1) continue;
                         const int at = pl[2];
+                        (void)at;
                         const uint16_t* fr = frames[k]->data;
-                        const float tw = t / 255.f;
-                        for (int j = -1; j <= 1; j++) {
-                            const int row = (iy + j) * w;
-                            const int rowPos = ((iy + j) & 1) * 2;
-                            for (int i = -1; i <= 1; i++) {
-                                const int pos = rowPos + ((ix + i) & 1);
-                                const int c = colourAt[pos];
-                                const int kk = (j + 1) * 3 + i + 1;
-                                const float wt = tw * (c == 1 ? tight[at + kk] : wide[at + kk]);
+                        const float tw = trustOf[t];
+                        const uint16_t* centre = fr + iy * w + ix;
+                        for (int c = 0; c < 3; c++) {
+                            const int slot = (k * 4 + p) * 3 + c;
+                            const Tap* list = &taps[slot * 9];
+                            const int m = count[slot];
+                            const float lg = lens[c] * gain[c];
+                            float sc = sum[c], wc = weight[c];
+                            for (int q = 0; q < m; q++) {
+                                const Tap& tp = list[q];
+                                const float wt = tw * tp.wt;
                                 if (wt < 0.01f) continue;
-                                float v = (fr[row + ix + i] - black[pos]) * scale;
+                                float v = (centre[tp.off] - tp.black) * scale;
                                 if (v < 0) v = 0;
-                                v *= lens[c] * gain[c];
+                                v *= lg;
                                 if (v > 1) v = 1;
                                 if (c != 1) {
-                                    const int gx = std::clamp(x + i, 0, w - 1);
-                                    const int gy = std::clamp(y + j, 0, h - 1);
-                                    v -= green.data[gy * w + gx] / 65535.f;
+                                    const int gx = std::clamp(x + tp.i, 0, w - 1);
+                                    const int gy = std::clamp(y + tp.j, 0, h - 1);
+                                    v -= greenOf[green.data[gy * w + gx]];
                                 }
-                                sum[c] += v * wt;
-                                weight[c] += wt;
+                                sc += v * wt;
+                                wc += wt;
                             }
+                            sum[c] = sc;
+                            weight[c] = wc;
                         }
                     }
                     rowWeight += weight[1];
