@@ -36,6 +36,10 @@ class CameraInfo(
     val extensions: List<Int> = emptyList(),
     /** The lens steadies itself against shake (optical stabilisation). */
     val stabilised: Boolean = false,
+    /** Focus made for video (smooth, no hunting), steadying of video by the phone, and the steadiest 30-frames-a-second range. */
+    val videoFocus: Boolean = false,
+    val videoStabilisation: Boolean = false,
+    val videoFps: Range<Int>? = null,
 ) {
     val minZoom get() = zoomRatio?.lower ?: 1f
     val maxZoom get() = zoomRatio?.upper ?: maxCropZoom
@@ -67,6 +71,12 @@ class CameraInfo(
                 extensions = extensions,
                 stabilised = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
                     ?.contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON) == true,
+                videoFocus = afModes.contains(CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO),
+                videoStabilisation = c.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
+                    ?.contains(CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON) == true,
+                // A fixed 30 where offered (smooth motion), else the range reaching 30 that goes least low.
+                videoFps = c.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+                    ?.filter { it.upper == 30 }?.maxByOrNull { it.lower },
             )
         }
     }

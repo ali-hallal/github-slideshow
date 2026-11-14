@@ -29,9 +29,12 @@ class ViewfinderView @JvmOverloads constructor(context: Context, attrs: Attribut
     }
 }
 
-/** Drawn over the viewfinder: the focus ring and the brightness mark. */
+/** Drawn over the viewfinder: the focus ring, and the grid of thirds when it is on. */
 class MarksView @JvmOverloads constructor(context: Context, attrs: AttributeSet? = null) : View(context, attrs) {
     private val density = resources.displayMetrics.density
+    var grid = false
+        set(value) { field = value; invalidate() }
+    private val lines = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 1 * density; color = Color.argb(110, 255, 255, 255) }
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 2 * density }
     private var fx = -1f
     private var fy = 0f
@@ -53,6 +56,10 @@ class MarksView @JvmOverloads constructor(context: Context, attrs: AttributeSet?
     }
 
     override fun onDraw(canvas: Canvas) {
+        if (grid) for (i in 1..2) {
+            canvas.drawLine(width * i / 3f, 0f, width * i / 3f, height.toFloat(), lines)
+            canvas.drawLine(0f, height * i / 3f, width.toFloat(), height * i / 3f, lines)
+        }
         if (fx < 0) return
         val age = SystemClock.uptimeMillis() - since
         if (age > SHOWN_MS) {
@@ -77,6 +84,12 @@ class MarksView @JvmOverloads constructor(context: Context, attrs: AttributeSet?
 class ShutterView @JvmOverloads constructor(context: Context, attrs: AttributeSet? = null) : View(context, attrs) {
     var busy = false
         set(value) { field = value; invalidate() }
+    /** Video mode: a red disc; while recording, a red square to stop. */
+    var video = false
+        set(value) { field = value; invalidate() }
+    var recording = false
+        set(value) { field = value; invalidate() }
+    private val red = Color.rgb(0xF0, 0x44, 0x3A)
 
     private val density = resources.displayMetrics.density
     private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 4 * density; color = Color.WHITE }
@@ -97,7 +110,14 @@ class ShutterView @JvmOverloads constructor(context: Context, attrs: AttributeSe
         val cy = height / 2f
         val outer = min(width, height) / 2f - ring.strokeWidth / 2
         canvas.drawCircle(cx, cy, outer, ring)
-        disc.color = if (busy) Color.GRAY else Color.WHITE
-        canvas.drawCircle(cx, cy, (outer - 7 * density) * if (isPressed) 0.86f else 1f, disc)
+        val press = if (isPressed) 0.86f else 1f
+        if (video && recording) {
+            disc.color = red
+            val half = outer * 0.42f * press
+            canvas.drawRoundRect(cx - half, cy - half, cx + half, cy + half, 6 * density, 6 * density, disc)
+            return
+        }
+        disc.color = if (busy) Color.GRAY else if (video) red else Color.WHITE
+        canvas.drawCircle(cx, cy, (outer - 7 * density) * press, disc)
     }
 }

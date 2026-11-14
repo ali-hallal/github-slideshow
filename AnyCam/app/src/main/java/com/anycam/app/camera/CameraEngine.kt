@@ -39,7 +39,7 @@ import kotlin.math.abs
  * YUV frames, auto exposure and focus), so it behaves the same on any phone. Everything runs on
  * one camera thread; the [Listener] is called on the main thread.
  */
-class CameraEngine(context: Context, private val listener: Listener) {
+class CameraEngine(private val context: Context, private val listener: Listener) {
 
     interface Listener {
         fun onOpened(info: CameraInfo, previewSize: Size, photoSize: Size)
@@ -60,10 +60,14 @@ class CameraEngine(context: Context, private val listener: Listener) {
         fun onRawBurst(frames: List<RawFrame>, guide: Yuv?, info: RawInfo, shot: Shot)
         /** A photo made by the phone maker's own processing (an extension), ready to save. */
         fun onJpeg(jpeg: ByteArray, shot: Shot)
+        /** Video recording has started (true) or stopped (false). */
+        fun onRecording(on: Boolean) {}
+        /** A video is saved ([uri]), or couldn't be (null). */
+        fun onVideo(uri: android.net.Uri?, seconds: Int) {}
     }
 
     /** How a burst was taken. */
-    class Shot(val rotation: Int, val iso: Int?, val exposureNs: Long?, val takenAt: Long)
+    class Shot(val rotation: Int, val iso: Int?, val exposureNs: Long?, val takenAt: Long, val zoom: Float = 1f)
 
     private val manager = context.getSystemService(CameraManager::class.java)
     private val main = Handler(Looper.getMainLooper())
@@ -85,8 +89,17 @@ class CameraEngine(context: Context, private val listener: Listener) {
         private set
     /** The size of sensor frames (0 if none). */
     @Volatile var rawPixels = 0L
+    @Volatile var rawWidth = 0
         private set
     private var previewSurface: Surface? = null
+    /** Video: the camera feeds this surface, which the encoder reads while recording. */
+    private var videoSurface: Surface? = null
+    private var video: Video? = null
+    @Volatile var recording = false
+        private set
+    /** The size videos are recorded at (null in photo mode). */
+    @Volatile var videoSize: Size? = null
+        private set
     private var info: CameraInfo? = null
     /** Bumped on every open/close: callbacks from an earlier camera are ignored. */
     private var generation = 0
@@ -109,6 +122,9 @@ class CameraEngine(context: Context, private val listener: Listener) {
     private var burstExposure: Long? = null
     private val burstFrames = ArrayList<Yuv>()
     private var burstRaw = false
+    /** The part of the sensor frames kept (the zoomed view), or null for all of it. */
+    private var burstCrop: com.anycam.app.core.Crop? = null
+    private var burstZoom = 1f
     private val burstRawFrames = ArrayList<RawFrame>()
     private var burstGuide: Yuv? = null
     private var burstResult: TotalCaptureResult? = null
@@ -154,9 +170,13 @@ class CameraEngine(context: Context, private val listener: Listener) {
 
     /** [extension]: one of the camera's [CameraInfo.extensions] to use the maker's processing, or null for AnyCam's own. */
     @SuppressLint("MissingPermission")
-    fun open(id: String, texture: SurfaceTexture, extension: Int? = null) = handler.post {
+    fun open(id: String, texture: SurfaceTexture, extension: Int? = null, forVideo: Boolean = false) = handler.post {
         closeNow()
         val mine = ++generation
+        if (forVideo) {
+            openVideo(id, texture, mine, Video.UHD)
+            return@post
+        }
         if (extension != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             openExtension(id, texture, extension, mine)
             return@post
@@ -243,6 +263,7 @@ class CameraEngine(context: Context, private val listener: Listener) {
                         session = s
                         rawWorks = withRaw && raw != null
                         rawPixels = if (rawWorks && raw != null) raw.width.toLong() * raw.height else 0L
+                        rawWidth = if (rawWorks && raw != null) raw.width else 0
                         startPreview()
                         main.post { listener.onOpened(cam, preview, photo) }
                     }
@@ -325,6 +346,128 @@ class CameraEngine(context: Context, private val listener: Listener) {
         }
     }
 
+    // ------------------------------------------------------------------ video
+
+    private fun addTargets(b: CaptureRequest.Builder, preview: Surface) {
+        b.addTarget(preview)
+        if (recording) videoSurface?.let { b.addTarget(it) }
+    }
+
+    /**
+     * The camera for video: viewfinder and the encoder's surface. [quality]: [Video.UHD] where
+     * the phone records it, else full HD; a phone that can't run the larger falls back by itself.
+     */
+    @SuppressLint("MissingPermission")
+    private fun openVideo(id: String, texture: SurfaceTexture, mine: Int, quality: Int) {
+        try {
+            val c = manager.getCameraCharacteristics(id)
+            val cam = CameraInfo.from(id, c, extensionsOf(id))
+            val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: throw IllegalStateException("no stream sizes")
+            val size = Video.pickSize(map.getOutputSizes(android.media.MediaRecorder::class.java) ?: emptyArray(), quality)
+                ?: throw IllegalStateException("no video sizes")
+            val preview = pickPreviewSize(map.getOutputSizes(SurfaceTexture::class.java) ?: emptyArray(), size)
+                ?: throw IllegalStateException("no viewfinder sizes")
+            texture.setDefaultBufferSize(preview.width, preview.height)
+            val surface = Surface(texture)
+            val v = Video(context, size)
+            val encoderSurface = v.prepareSurface()
+            characteristics = c
+            info = cam
+            previewSurface = surface
+            videoSurface = encoderSurface
+            video = v
+            videoSize = size
+            zoom = zoom.coerceIn(cam.minZoom, cam.maxZoom)
+            ev = 0
+            focusPoint = null
+            Log.i(TAG, "opening camera $id for video: $size, viewfinder $preview, steadying ${cam.videoStabilisation}, frame rates ${cam.videoFps}")
+            manager.openCamera(id, object : CameraDevice.StateCallback() {
+                override fun onOpened(d: CameraDevice) {
+                    if (mine != generation) { d.close(); return }
+                    device = d
+                    try {
+                        val outputs = listOf(OutputConfiguration(surface), OutputConfiguration(encoderSurface))
+                        d.createCaptureSession(SessionConfiguration(SessionConfiguration.SESSION_REGULAR, outputs, { handler.post(it) },
+                            object : CameraCaptureSession.StateCallback() {
+                                override fun onConfigured(s: CameraCaptureSession) {
+                                    if (mine != generation) return
+                                    session = s
+                                    startPreview()
+                                    main.post { listener.onOpened(cam, preview, size) }
+                                }
+
+                                override fun onConfigureFailed(s: CameraCaptureSession) {
+                                    if (mine != generation) return
+                                    smallerVideo(id, texture, quality, "not configurable")
+                                }
+                            }))
+                    } catch (e: Exception) {
+                        Log.e(TAG, "video session", e)
+                        smallerVideo(id, texture, quality, e.message ?: "error")
+                    }
+                }
+
+                override fun onDisconnected(d: CameraDevice) {
+                    d.close()
+                    if (mine == generation) device = null
+                }
+
+                override fun onError(d: CameraDevice, error: Int) {
+                    d.close()
+                    if (mine == generation) {
+                        device = null
+                        fail("The camera stopped (error $error)")
+                    }
+                }
+            }, handler)
+        } catch (e: Exception) {
+            Log.e(TAG, "open video", e)
+            if (quality == Video.UHD) {
+                closeNow()
+                openVideo(id, texture, ++generation, Video.FULL_HD)
+            } else fail("Couldn't start video: ${e.message}")
+        }
+    }
+
+    private fun smallerVideo(id: String, texture: SurfaceTexture, quality: Int, why: String) {
+        Log.w(TAG, "video at this size didn't start ($why)")
+        if (quality != Video.UHD) { fail("The camera couldn't start video"); return }
+        closeNow()
+        openVideo(id, texture, ++generation, Video.FULL_HD)
+    }
+
+    /** Starts recording; [rotation]: degrees to turn the video upright; [sound]: record the microphone too. */
+    fun startRecording(rotation: Int, sound: Boolean) = handler.post {
+        val v = video
+        val s = session
+        if (v == null || s == null || videoSurface == null || recording) {
+            main.post { listener.onRecording(false) }
+            return@post
+        }
+        try {
+            v.start(rotation, sound)
+            recording = true
+            startPreview()
+            main.post { listener.onRecording(true) }
+        } catch (e: Exception) {
+            Log.e(TAG, "record", e)
+            v.abandon()
+            recording = false
+            main.post { listener.onRecording(false); listener.onVideo(null, 0) }
+        }
+    }
+
+    fun stopRecording() = handler.post { if (recording) stopRecordingNow() }
+
+    private fun stopRecordingNow() {
+        recording = false
+        // The camera stops feeding the encoder first, then the file is closed.
+        if (session != null) try { startPreview() } catch (_: Exception) {}
+        val v = video ?: return
+        val (uri, seconds) = v.stop()
+        main.post { listener.onRecording(false); listener.onVideo(uri, seconds) }
+    }
+
     /** Whether zoom can be used right now (the maker's processing doesn't always allow it). */
     val zoomWorks get() = extensionSession == null || extensionZoom
 
@@ -340,6 +483,11 @@ class CameraEngine(context: Context, private val listener: Listener) {
 
     private fun closeNow() {
         generation++
+        if (recording) stopRecordingNow()
+        video = null
+        try { videoSurface?.release() } catch (_: Exception) {}
+        videoSurface = null
+        videoSize = null
         handler.removeCallbacks(backToAuto)
         handler.removeCallbacks(burstTimeout)
         rawWorks = false
@@ -407,8 +555,8 @@ class CameraEngine(context: Context, private val listener: Listener) {
         }
         val s = session ?: return
         try {
-            val b = d.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
-            b.addTarget(surface)
+            val b = d.createCaptureRequest(if (videoSurface != null) CameraDevice.TEMPLATE_RECORD else CameraDevice.TEMPLATE_PREVIEW)
+            addTargets(b, surface)
             applyControls(b)
             s.setRepeatingRequest(b.build(), previewCallback, handler)
         } catch (e: Exception) {
@@ -430,8 +578,15 @@ class CameraEngine(context: Context, private val listener: Listener) {
             val area = arrayOf(region(point.first, point.second, cam))
             if (cam.focusRegions) b.set(CaptureRequest.CONTROL_AF_REGIONS, area)
             if (cam.meterRegions) b.set(CaptureRequest.CONTROL_AE_REGIONS, area)
+        } else if (videoSurface != null && cam.videoFocus) {
+            b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
         } else if (cam.continuousFocus) {
             b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+        }
+        if (videoSurface != null) {
+            // Steady video where the phone offers it (it crops a little to do so), at a steady 30 frames a second.
+            if (cam.videoStabilisation) b.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON)
+            cam.videoFps?.let { b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && cam.zoomRatio != null) {
             b.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoom.coerceIn(cam.minZoom, cam.maxZoom))
@@ -494,7 +649,7 @@ class CameraEngine(context: Context, private val listener: Listener) {
         try {
             startPreview()
             val b = d.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
-            b.addTarget(surface)
+            addTargets(b, surface)
             applyControls(b)
             b.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START)
             s.capture(b.build(), previewCallback, handler)
@@ -515,7 +670,7 @@ class CameraEngine(context: Context, private val listener: Listener) {
         val surface = previewSurface ?: return@Runnable
         try {
             val b = d.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
-            b.addTarget(surface)
+            addTargets(b, surface)
             applyControls(b)
             b.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_CANCEL)
             s.capture(b.build(), null, handler)
@@ -533,6 +688,10 @@ class CameraEngine(context: Context, private val listener: Listener) {
      * cameras that take them. [raw]: take sensor frames (where [rawWorks]) instead of ordinary ones.
      */
     fun takeBurst(count: Int, rotation: Int, exposure: Pair<Int, Long>? = null, raw: Boolean = false) = handler.post {
+        // Sensor frames ignore zoom: the zoomed view is cut out of them here.
+        val rr = rawReader
+        burstZoom = zoom
+        burstCrop = if (raw && rr != null && zoom > 1.01f) com.anycam.app.core.Crop.forZoom(rr.width and 1.inv(), rr.height and 1.inv(), zoom) else null
         val cam = info
         val d = device
         val s = session
@@ -685,7 +844,7 @@ class CameraEngine(context: Context, private val listener: Listener) {
     private fun onRawImage(r: ImageReader) {
         val image = try { r.acquireNextImage() } catch (e: Exception) { null } ?: return
         try {
-            if (burstWanted > 0 && burstRaw) burstRawFrames += image.toRawFrame()
+            if (burstWanted > 0 && burstRaw) burstRawFrames += image.toRawFrame(burstCrop)
         } catch (e: Throwable) {
             Log.w(TAG, "sensor frame dropped", e)
             burstFailed++
@@ -712,7 +871,7 @@ class CameraEngine(context: Context, private val listener: Listener) {
         val frames = ArrayList(burstFrames)
         burstFrames.clear()
         burstWanted = 0
-        val shot = Shot(burstRotation, burstIso, burstExposure, System.currentTimeMillis())
+        val shot = Shot(burstRotation, burstIso, burstExposure, System.currentTimeMillis(), if (burstRaw) burstZoom else 1f)
         if (burstRaw) {
             val sensorFrames = ArrayList(burstRawFrames)
             val guide = burstGuide
@@ -722,7 +881,7 @@ class CameraEngine(context: Context, private val listener: Listener) {
             burstRaw = false
             when {
                 sensorFrames.isNotEmpty() && c != null -> {
-                    val about = rawInfo(c, burstResult)
+                    val about = rawInfo(c, burstResult).let { i -> burstCrop?.let { i.cropped(it) } ?: i }
                     main.post { listener.onRawBurst(sensorFrames, guide, about, shot) }
                 }
                 // No sensor frames after all: the ordinary frame is still a photo.

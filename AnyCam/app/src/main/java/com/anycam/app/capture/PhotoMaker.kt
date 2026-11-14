@@ -109,10 +109,13 @@ class PhotoMaker(context: Context) {
                         "curve ${look.gain.filterIndexed { i, _ -> i % 51 == 0 }.joinToString { "%.2f".format(Locale.US, it) }}")
                     if (apart > Look.TRUSTED_WITHIN) throw SensorNotTrusted("developed photo is $apart from the phone's picture")
                 }
-                val finished = Detail.finishSensor(developed, merged.noise / kotlin.math.sqrt(merged.used.toFloat()))
+                val sharpened = Detail.finishSensor(developed, merged.noise / kotlin.math.sqrt(merged.used.toFloat()))
+                // Zoomed: the part in view, enlarged (finished first, at the sensor's own scale).
+                val enlarge = if (shot.zoom > 1.01f) com.anycam.app.core.Geometry.zoomEnlargement(shot.zoom) else 1f
+                val finished = com.anycam.app.core.Upscale.by(sharpened, enlarge)
                 val jpeg = encode(finished)
                 val t3 = System.currentTimeMillis()
-                val notes = "AnyCam sensor photo; ISO ${shot.iso} ${shot.exposureNs?.let { "1/${Math.round(1e9 / it)}" }}; ${frames.size} frames; " +
+                val notes = "AnyCam sensor photo; zoom ${"%.2f".format(Locale.US, shot.zoom)}x from ${base.w}x${base.h} to ${finished.w}x${finished.h}; ISO ${shot.iso} ${shot.exposureNs?.let { "1/${Math.round(1e9 / it)}" }}; ${frames.size} frames; " +
                     "look ${if (look === Look.PLAIN) "plain" else "from phone"}; night lift ${"%.1f".format(Locale.US, lift)}x; reference ${t1 - t0} ms, stack ${t2 - t1} ms, finish ${t3 - t2} ms; " +
                     "compiled ${com.anycam.app.core.Native.use}; cores ${Runtime.getRuntime().availableProcessors()}; ${merged.notes}"
                 val uri = save(jpeg, shot, notes = notes)
@@ -121,7 +124,7 @@ class PhotoMaker(context: Context) {
                     "(noise ${"%.1f".format(Locale.US, merged.noise)}), look ${if (look === Look.PLAIN) "plain" else "from the phone"}, " +
                     "wb ${info.wb.joinToString { "%.2f".format(Locale.US, it) }}, lens map ${info.shading != null}, ISO ${shot.iso}; " +
                     "reference ${t1 - t0} ms, stack ${t2 - t1} ms, all ${System.currentTimeMillis() - t0} ms")
-                uri?.let { Photo(it, merged.used, frames.size, System.currentTimeMillis() - t0, fromSensor = true, megapixels = base.w.toLong() * base.h / 1_000_000f) }
+                uri?.let { Photo(it, merged.used, frames.size, System.currentTimeMillis() - t0, fromSensor = true, megapixels = finished.w.toLong() * finished.h / 1_000_000f) }
             } catch (e: Throwable) {
                 Log.e(TAG, "sensor photo failed, keeping the phone's own picture", e)
                 try {

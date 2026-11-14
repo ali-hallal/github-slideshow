@@ -14,8 +14,16 @@ features, no hidden settings, no libraries, no network.
   frames, the burst is merged before any of the phone's processing and developed by AnyCam.
   Many phones give other apps a larger RAW frame than an ordinary one, so this is also where
   extra megapixels come from. One ordinary frame is taken alongside, and the developed photo is
-  given its brightness curve and colours, so it looks like the phone's photos. At 1× only for
-  now; zoomed shots use ordinary frames.
+  given its brightness curve and colours, so it looks like the phone's photos.
+- **Zoom from the sensor.** Zoomed in on the same lens, the part in view is cut out of every
+  sensor frame and merged (more shots the further in), then enlarged up to twice. Cleaner and
+  more detailed than enlarging one processed frame. Beyond the point where under 640 pixels
+  across are left, or on another lens, ordinary frames are used.
+- **Night.** In the dark each shot exposes as long as a hand holds (1/5 s with a stabilised lens,
+  1/10 s without), and a very dark merged photo is brightened on the raw light, up to 3 stops.
+- **Video**, 4K where the phone's camera and encoder take it (full HD otherwise), 30 frames a
+  second, with the phone's own video steadying where it offers it, and sound. Saved to `Movies/AnyCam`.
+- **Self-timer** (3 or 10 s) and a **grid** of thirds, remembered between uses.
 - **Your phone's own processing, where it offers it.** Android lets a phone maker offer its own
   night, HDR and portrait processing to other apps ("camera extensions"). AnyCam asks the phone
   which of these it has and shows each as a mode next to its own **Photo**. Nothing is assumed
@@ -25,7 +33,8 @@ features, no hidden settings, no libraries, no network.
 - **Light** (torch), **switch camera**, and the **volume keys** as a shutter.
 - Photos go to `Pictures/AnyCam`; tap the thumbnail to open the last one.
 
-Not there yet: video, AnyCam's own night and portrait modes, saving RAW files, flash photos, settings.
+Not there yet: AnyCam's own portrait mode, true super-resolution (detail finer than the sensor's
+pixels), saving RAW files, flash photos, settings.
 
 ## How it is built
 

@@ -11,6 +11,7 @@ import androidx.test.espresso.Espresso.onView
 import androidx.test.espresso.action.ViewActions.click
 import androidx.test.espresso.matcher.ViewMatchers.withContentDescription
 import androidx.test.espresso.matcher.ViewMatchers.withId
+import androidx.test.espresso.matcher.ViewMatchers.withText
 import androidx.test.ext.junit.rules.ActivityScenarioRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -30,7 +31,7 @@ class AnyCamTest {
     private val activityRule = ActivityScenarioRule(MainActivity::class.java)
 
     @get:Rule
-    val rules: RuleChain = RuleChain.outerRule(GrantPermissionRule.grant(Manifest.permission.CAMERA)).around(activityRule)
+    val rules: RuleChain = RuleChain.outerRule(GrantPermissionRule.grant(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)).around(activityRule)
 
     private val context = InstrumentationRegistry.getInstrumentation().targetContext
 
@@ -71,6 +72,14 @@ class AnyCamTest {
                 label = (0 until row.childCount).map { i -> (row.getChildAt(i) as android.widget.TextView).text.toString() }.joinToString(" ")
             }
             assertTrue("the 2× button is lit: $label", label.contains("2×"))
+            // A zoomed photo (from the sensor frames where the camera gives them).
+            val taken = MainActivity.photoCount
+            onView(withId(R.id.shutter)).perform(click())
+            waitFor("zoomed photo saved", 40_000) { MainActivity.photoCount > taken }
+            val (w, h) = newestPhotoSize()
+            Log.i(TAG, "zoomed photo ${w}x$h, from the sensor ${MainActivity.lastFromSensor}")
+            assertTrue("a real zoomed photo ($w x $h)", w >= 600 && h >= 400)
+            keepNewestPhoto("06_zoomed_photo")
         }
         var switchShown = false
         activityRule.scenario.onActivity { switchShown = it.findViewById<android.view.View>(R.id.switchCamera).visibility == android.view.View.VISIBLE }
@@ -84,6 +93,30 @@ class AnyCamTest {
             onView(withId(R.id.shutter)).perform(click())
             waitFor("selfie saved", 40_000) { MainActivity.photoCount > taken }
         }
+    }
+
+    @Test
+    fun aVideoIsRecordedAndSaved() {
+        waitFor("camera ready") { MainActivity.ready }
+        onView(withText("Video")).perform(click())
+        SystemClock.sleep(300)
+        waitFor("video camera ready") { MainActivity.ready }
+        SystemClock.sleep(1000)
+        screen("07_video_mode")
+        val before = MainActivity.videoCount
+        onView(withId(R.id.shutter)).perform(click())
+        SystemClock.sleep(3500)
+        screen("08_recording")
+        onView(withId(R.id.shutter)).perform(click())
+        waitFor("video saved", 20_000) { MainActivity.videoCount > before }
+        // Back to photos, and a photo still works.
+        onView(withText("Photo")).perform(click())
+        SystemClock.sleep(300)
+        waitFor("photo camera ready") { MainActivity.ready }
+        SystemClock.sleep(800)
+        val taken = MainActivity.photoCount
+        onView(withId(R.id.shutter)).perform(click())
+        waitFor("photo after video", 40_000) { MainActivity.photoCount > taken }
     }
 
     /** The compiled merge is there on the phone and makes exactly the photo the Kotlin one does, faster. */

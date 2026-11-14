@@ -4,24 +4,27 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
 import android.media.Image
+import com.anycam.app.core.Crop
 import com.anycam.app.core.RawFrame
 import com.anycam.app.core.RawInfo
 import com.anycam.app.core.Shading
 import java.nio.ByteOrder
 
 /** Copies a sensor frame out of the camera's buffer (rows may be padded). */
-fun Image.toRawFrame(): RawFrame {
-    val w = width and 1.inv()
-    val h = height and 1.inv()
-    val out = ShortArray(w * h)
+fun Image.toRawFrame(crop: Crop? = null): RawFrame {
+    val fw = width and 1.inv()
+    val fh = height and 1.inv()
+    // Only the part in view is copied (zoomed shots keep a fraction of the frame).
+    val c = crop?.takeIf { it.fullW == fw && it.fullH == fh } ?: Crop(0, 0, fw, fh, fw, fh)
+    val out = ShortArray(c.w * c.h)
     val plane = planes[0]
     val shorts = plane.buffer.duplicate().order(ByteOrder.nativeOrder()).asShortBuffer()
     val rowShorts = plane.rowStride / 2
-    for (r in 0 until h) {
-        shorts.position(r * rowShorts)
-        shorts.get(out, r * w, w)
+    for (r in 0 until c.h) {
+        shorts.position((c.y + r) * rowShorts + c.x)
+        shorts.get(out, r * c.w, c.w)
     }
-    return RawFrame(w, h, out)
+    return RawFrame(c.w, c.h, out)
 }
 
 /**

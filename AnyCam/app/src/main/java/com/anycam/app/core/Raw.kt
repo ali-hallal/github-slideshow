@@ -8,6 +8,31 @@ class RawFrame(val w: Int, val h: Int, val px: ShortArray) {
     init {
         require(w % 2 == 0 && h % 2 == 0 && px.size == w * h) { "even size expected: $w x $h" }
     }
+
+    /** The part of the frame [c] covers (even offsets keep the filter pattern where it was). */
+    fun crop(c: Crop): RawFrame {
+        if (c.x == 0 && c.y == 0 && c.w == w && c.h == h) return this
+        val out = ShortArray(c.w * c.h)
+        for (r in 0 until c.h) System.arraycopy(px, (c.y + r) * w + c.x, out, r * c.w, c.w)
+        return RawFrame(c.w, c.h, out)
+    }
+}
+
+/** A rectangle of a sensor frame of [fullW] x [fullH], at even offsets and of even size. */
+class Crop(val x: Int, val y: Int, val w: Int, val h: Int, val fullW: Int, val fullH: Int) {
+    val isWhole get() = x == 0 && y == 0 && w == fullW && h == fullH
+
+    companion object {
+        /** The middle of a frame as it appears at [zoom] (Android zooms on the middle of the sensor). */
+        fun forZoom(fullW: Int, fullH: Int, zoom: Float): Crop {
+            val z = zoom.coerceAtLeast(1f)
+            val w = ((fullW / z).toInt() and 1.inv()).coerceIn(2, fullW)
+            val h = ((fullH / z).toInt() and 1.inv()).coerceIn(2, fullH)
+            val x = ((fullW - w) / 2) and 1.inv()
+            val y = ((fullH - h) / 2) and 1.inv()
+            return Crop(x, y, w, h, fullW, fullH)
+        }
+    }
 }
 
 /**
@@ -32,6 +57,10 @@ class RawInfo(
     val noiseS: Float? = null,
     val noiseO: Float? = null,
 ) {
+    /** The same for part of the frame ([c]): the lens map is taken for that part only. */
+    fun cropped(c: Crop) = if (c.isWhole || shading == null) this else
+        RawInfo(cfa, black, white, wb, ccm, shading.crop(c.x.toFloat() / c.fullW, c.y.toFloat() / c.fullH, (c.x + c.w).toFloat() / c.fullW, (c.y + c.h).toFloat() / c.fullH), noiseS, noiseO)
+
     /** The same, made [times] brighter (on the light itself, before anything else). */
     fun brighter(times: Float) = RawInfo(cfa, black, white, FloatArray(3) { wb[it] * times }, ccm, shading, noiseS, noiseO)
 
@@ -58,6 +87,16 @@ class Shading(val cols: Int, val rows: Int, val gains: FloatArray) {
         val ay = y - y0
         fun g(c: Int, r: Int) = gains[(r * cols + c) * 3 + colour]
         return (g(x0, y0) * (1 - ax) + g(x1, y0) * ax) * (1 - ay) + (g(x0, y1) * (1 - ax) + g(x1, y1) * ax) * ay
+    }
+
+    /** The map for the part of the frame from ([x0], [y0]) to ([x1], [y1]) (0..1 across and down), as finely as this one. */
+    fun crop(x0: Float, y0: Float, x1: Float, y1: Float): Shading {
+        val c = maxOf(cols, 2)
+        val r = maxOf(rows, 2)
+        val out = FloatArray(c * r * 3)
+        for (j in 0 until r) for (i in 0 until c) for (k in 0..2)
+            out[(j * c + i) * 3 + k] = at(k, x0 + (x1 - x0) * i / (c - 1), y0 + (y1 - y0) * j / (r - 1))
+        return Shading(c, r, out)
     }
 }
 

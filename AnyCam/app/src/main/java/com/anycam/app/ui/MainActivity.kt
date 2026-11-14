@@ -51,6 +51,8 @@ class MainActivity : Activity(), CameraEngine.Listener {
     private lateinit var zoomRow: LinearLayout
     private lateinit var modeRow: LinearLayout
     private lateinit var flash: View
+    private lateinit var timerButton: TextView
+    private lateinit var gridButton: TextView
 
     private lateinit var engine: CameraEngine
     private lateinit var photos: PhotoMaker
@@ -72,6 +74,13 @@ class MainActivity : Activity(), CameraEngine.Listener {
     private var sensorOff = false
     /** The phone maker's processing in use (one of the camera's extensions), or null for AnyCam's own merge. */
     private var extension: Int? = null
+    /** Video mode (instead of photos). */
+    private var videoMode = false
+    private var recordingSince = 0L
+    private var lastIsVideo = false
+    /** The self-timer: 0 (off), 3 or 10 seconds; and the count in progress, if any. */
+    private var timerSeconds = 0
+    private var countdown = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -88,6 +97,24 @@ class MainActivity : Activity(), CameraEngine.Listener {
         zoomRow = findViewById(R.id.zoomRow)
         modeRow = findViewById(R.id.modeRow)
         flash = findViewById(R.id.flash)
+        timerButton = findViewById(R.id.timer)
+        gridButton = findViewById(R.id.grid)
+        try {
+            val prefs = getPreferences(MODE_PRIVATE)
+            timerSeconds = prefs.getInt("timer", 0)
+            marks.grid = prefs.getBoolean("grid", false)
+        } catch (_: Exception) {}
+        showTimerAndGrid()
+        timerButton.setOnClickListener {
+            timerSeconds = when (timerSeconds) { 0 -> 3; 3 -> 10; else -> 0 }
+            getPreferences(MODE_PRIVATE).edit().putInt("timer", timerSeconds).apply()
+            showTimerAndGrid()
+        }
+        gridButton.setOnClickListener {
+            marks.grid = !marks.grid
+            getPreferences(MODE_PRIVATE).edit().putBoolean("grid", marks.grid).apply()
+            showTimerAndGrid()
+        }
 
         engine = CameraEngine(this, this)
         photos = PhotoMaker(this)
@@ -99,9 +126,9 @@ class MainActivity : Activity(), CameraEngine.Listener {
             override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
         }
         setUpTouch()
-        shutter.setOnClickListener { takePhoto() }
+        shutter.setOnClickListener { press() }
         switchButton.setOnClickListener {
-            if (cameras.size < 2 || taking) return@setOnClickListener
+            if (cameras.size < 2 || taking || engine.recording) return@setOnClickListener
             cameraIndex = (cameraIndex + 1) % cameras.size
             zoom = 1f
             torch = false
@@ -118,7 +145,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
         thumbnail.setOnClickListener {
             val uri = lastPhoto ?: return@setOnClickListener
             try {
-                startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "image/jpeg").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+                startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, if (lastIsVideo) "video/mp4" else "image/jpeg").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
             } catch (e: Exception) {
                 say("No app to show photos")
             }
@@ -151,12 +178,14 @@ class MainActivity : Activity(), CameraEngine.Listener {
     private var asked = false
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        if (requestCode == AUDIO_REQUEST) return // video records without sound if it wasn't allowed
         if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) openCamera()
         else say(getString(R.string.needs_camera), stay = true)
     }
 
     override fun onPause() {
         resumed = false
+        cancelCountdown()
         ready = false
         orientation.disable()
         engine.close()
@@ -182,7 +211,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
         }
         ready = false
         if (extension != null && extension !in camera.extensions) extension = null
-        engine.open(camera.id, viewfinder.surfaceTexture ?: return, extension)
+        engine.open(camera.id, viewfinder.surfaceTexture ?: return, if (videoMode) null else extension, forVideo = videoMode)
     }
 
     // ------------------------------------------------------------------ touch
@@ -255,13 +284,96 @@ class MainActivity : Activity(), CameraEngine.Listener {
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
-            if (event.repeatCount == 0) takePhoto()
+            if (event.repeatCount == 0) press()
             return true
         }
         return super.onKeyDown(keyCode, event)
     }
 
     // ------------------------------------------------------------------ photos
+
+    /** The shutter: record or stop in video mode; a photo otherwise (after the self-timer, if set). */
+    private fun press() {
+        if (info == null) return
+        if (videoMode) {
+            shutter.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            if (engine.recording) engine.stopRecording()
+            else {
+                val cam = info ?: return
+                val sound = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                if (!sound) say(getString(R.string.no_sound))
+                engine.startRecording(Geometry.photoRotation(cam.sensorOrientation, deviceDegrees, cam.front), sound)
+            }
+            return
+        }
+        if (countdown > 0) {
+            // A second press stops the count.
+            cancelCountdown()
+            say(getString(R.string.timer_off))
+            return
+        }
+        if (timerSeconds > 0 && !taking) {
+            countdown = timerSeconds
+            tick.run()
+            return
+        }
+        takePhoto()
+    }
+
+    private val tick: Runnable = object : Runnable {
+        override fun run() {
+            if (countdown <= 0) return
+            say(getString(R.string.counting, countdown), stay = true)
+            countdown--
+            if (countdown == 0) shutter.postDelayed({ if (resumed) { status.visibility = View.INVISIBLE; takePhoto() } }, 1000)
+            else shutter.postDelayed(this, 1000)
+        }
+    }
+
+    private fun cancelCountdown() {
+        countdown = 0
+        shutter.removeCallbacks(tick)
+    }
+
+    private fun showTimerAndGrid() {
+        timerButton.text = if (timerSeconds == 0) getString(R.string.timer_off) else getString(R.string.timer_on, timerSeconds)
+        timerButton.setTextColor(getColor(if (timerSeconds > 0) R.color.accent else R.color.white))
+        gridButton.setTextColor(getColor(if (marks.grid) R.color.accent else R.color.white))
+        val photo = !videoMode
+        timerButton.visibility = if (photo) View.VISIBLE else View.GONE
+    }
+
+    private val elapsed: Runnable = object : Runnable {
+        override fun run() {
+            if (!engine.recording) return
+            say(getString(R.string.recording, clock(((System.currentTimeMillis() - recordingSince) / 1000).toInt())), stay = true)
+            status.postDelayed(this, 500)
+        }
+    }
+
+    private fun clock(seconds: Int) = String.format(Locale.US, "%d:%02d", seconds / 60, seconds % 60)
+
+    override fun onRecording(on: Boolean) {
+        shutter.recording = on
+        switchButton.alpha = if (on) 0.35f else 1f
+        modeRow.alpha = if (on) 0.35f else 1f
+        if (on) {
+            recordingSince = System.currentTimeMillis()
+            elapsed.run()
+        } else status.removeCallbacks(elapsed)
+    }
+
+    override fun onVideo(uri: Uri?, seconds: Int) {
+        if (uri == null) {
+            say(getString(R.string.video_not_saved))
+            return
+        }
+        lastPhoto = uri
+        lastIsVideo = true
+        videoCount++
+        say(getString(R.string.video_saved, clock(seconds)))
+        showThumbnail(uri)
+    }
 
     private fun takePhoto() {
         val cam = info ?: return
@@ -285,10 +397,14 @@ class MainActivity : Activity(), CameraEngine.Listener {
             Exposure.night(iso, exposure, isoRange.lower, isoRange.upper, exposureRange.upper, cam.stabilised)
                 ?: Exposure.plan(iso, exposure, isoRange.lower, isoRange.upper, exposureRange.lower, exposureRange.upper, cam.stabilised)
         } else null
-        val wanted = plan?.frames ?: Geometry.burstFrames(iso)
-        // Sensor frames where the camera gives them — at 1×, since zoom doesn't reach them.
-        val raw = engine.rawWorks && !sensorOff && abs(zoom - 1f) < 0.01f
-        val count = if (raw) Geometry.framesThatFit(wanted, engine.rawPixels, Runtime.getRuntime().maxMemory(), bytesPerPixel = 2f, workBytesPerPixel = 7f)
+        // Sensor frames where the camera gives them, zoomed too (the view is cut out of them:
+        // a cleaner, more detailed zoom than the phone's from one processed frame).
+        val raw = engine.rawWorks && !sensorOff && Geometry.sensorZoomWorks(zoom, engine.rawWidth)
+        val zoomedIn = raw && zoom > 1.01f
+        val wanted = (plan?.frames ?: Geometry.burstFrames(iso)).let { if (zoomedIn) Geometry.zoomedFrames(it, zoom) else it }
+        // Kept frames are the zoomed part only; the merge's work is on that part too.
+        val kept = if (zoomedIn) (engine.rawPixels / (zoom * zoom)).toLong() else engine.rawPixels
+        val count = if (raw) Geometry.framesThatFit(wanted, kept, Runtime.getRuntime().maxMemory(), bytesPerPixel = 2f, workBytesPerPixel = 7f)
         else Geometry.framesThatFit(wanted, size.width.toLong() * size.height, Runtime.getRuntime().maxMemory())
         if (count > 3) say(getString(R.string.hold_still))
         engine.takeBurst(count, Geometry.photoRotation(cam.sensorOrientation, deviceDegrees, cam.front), plan?.let { it.iso to it.exposureNs }, raw)
@@ -305,9 +421,13 @@ class MainActivity : Activity(), CameraEngine.Listener {
         viewfinder.setShape(previewSize.height, previewSize.width)
         buildZoomRow(info)
         buildModeRow(info)
+        shutter.video = videoMode
+        shutter.recording = false
+        showTimerAndGrid()
+        if (videoMode) engine.videoSize?.let { say(getString(R.string.video_size, if (it.height >= 2160) "4K" else "${it.height}p")) }
         showTorch()
         switchButton.visibility = if (cameras.size > 1) View.VISIBLE else View.INVISIBLE
-        status.visibility = View.INVISIBLE
+        if (!videoMode) status.visibility = View.INVISIBLE
         ready = true
     }
 
@@ -332,6 +452,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
                 return@make
             }
             lastPhoto = photo.uri
+            lastIsVideo = false
             lastMerged = photo.merged
             photoCount++
             say(if (photo.merged > 1) getString(R.string.merged, photo.merged) else getString(R.string.saved))
@@ -354,6 +475,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
                 return@makeRaw
             }
             lastPhoto = photo.uri
+            lastIsVideo = false
             lastMerged = photo.merged
             lastFromSensor = photo.fromSensor
             // This phone's sensor frames didn't develop into a trustworthy photo: ordinary frames from now on.
@@ -381,6 +503,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
                 return@keep
             }
             lastPhoto = photo.uri
+            lastIsVideo = false
             lastMerged = 1
             photoCount++
             say(getString(R.string.phone_done))
@@ -471,11 +594,10 @@ class MainActivity : Activity(), CameraEngine.Listener {
     /** AnyCam's own way first, then each kind of processing the phone maker offers on this camera. */
     private fun buildModeRow(cam: CameraInfo) {
         modeRow.removeAllViews()
-        modeRow.visibility = if (cam.extensions.isEmpty()) View.GONE else View.VISIBLE
-        if (cam.extensions.isEmpty()) return
+        modeRow.visibility = View.VISIBLE
         val density = resources.displayMetrics.density
-        for (mode in listOf<Int?>(null) + cam.extensions.sortedBy { MODE_ORDER.indexOf(it).let { i -> if (i < 0) 99 else i } }) {
-            val on = mode == extension
+        for (mode in listOf<Int?>(null, VIDEO) + cam.extensions.sortedBy { MODE_ORDER.indexOf(it).let { i -> if (i < 0) 99 else i } }) {
+            val on = if (videoMode) mode == VIDEO else mode == extension
             val chip = TextView(this).apply {
                 text = modeName(mode)
                 textSize = 14f
@@ -485,10 +607,21 @@ class MainActivity : Activity(), CameraEngine.Listener {
                 if (on) setBackgroundResource(R.drawable.chip_bg)
                 setPadding((14 * density).toInt(), 0, (14 * density).toInt(), 0)
                 setOnClickListener {
-                    if (taking || mode == extension) return@setOnClickListener
+                    if (taking || engine.recording || on) return@setOnClickListener
                     it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-                    extension = mode
-                    say(if (mode == null) getString(R.string.by_anycam) else getString(R.string.by_phone, modeName(mode)))
+                    cancelCountdown()
+                    if (mode == VIDEO) {
+                        videoMode = true
+                        extension = null
+                        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED && !askedAudio) {
+                            askedAudio = true
+                            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), AUDIO_REQUEST)
+                        }
+                    } else {
+                        videoMode = false
+                        extension = mode
+                        say(if (mode == null) getString(R.string.by_anycam) else getString(R.string.by_phone, modeName(mode)))
+                    }
                     openCamera()
                 }
             }
@@ -496,8 +629,11 @@ class MainActivity : Activity(), CameraEngine.Listener {
         }
     }
 
+    private var askedAudio = false
+
     private fun modeName(mode: Int?): String = when (mode) {
         null -> getString(R.string.mode_photo)
+        VIDEO -> getString(R.string.mode_video)
         EXT_NIGHT -> getString(R.string.mode_night)
         EXT_HDR -> getString(R.string.mode_hdr)
         EXT_BOKEH -> getString(R.string.mode_portrait)
@@ -552,6 +688,10 @@ class MainActivity : Activity(), CameraEngine.Listener {
         @Volatile var photoCount = 0
         @Volatile var lastMerged = 0
         @Volatile var lastFromSensor = false
+        @Volatile var videoCount = 0
+        /** Video in the row of modes (not one of Android's extension numbers, which start at 0). */
+        private const val VIDEO = -1
+        private const val AUDIO_REQUEST = 2
 
         // Android's names for the kinds of processing a phone maker can offer other apps.
         private const val EXT_AUTO = 0

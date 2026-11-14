@@ -41,6 +41,23 @@ object Geometry {
     }
 
     /**
+     * Whether a zoomed shot can be made from the sensor frames: zoomed in (not out to another
+     * lens), with the part in view still at least [SENSOR_ZOOM_MIN_WIDTH] pixels across.
+     */
+    fun sensorZoomWorks(zoom: Float, sensorWidth: Int): Boolean =
+        zoom >= 0.99f && sensorWidth / zoom.coerceAtLeast(1f) >= SENSOR_ZOOM_MIN_WIDTH
+
+    const val SENSOR_ZOOM_MIN_WIDTH = 640
+
+    /** Zoomed in, more shots help most (they fill in detail one shot alone doesn't hold): up to 4 more. */
+    fun zoomedFrames(base: Int, zoom: Float): Int = base + ((zoom - 1f) * 2f).toInt().coerceIn(0, 4)
+
+    /** How much a zoomed sensor photo is enlarged: to the photo's size, but never more than twice (beyond, it only blurs). */
+    fun zoomEnlargement(zoom: Float): Float = zoom.coerceIn(1f, MAX_ENLARGEMENT)
+
+    const val MAX_ENLARGEMENT = 2f
+
+    /**
      * As many of [wanted] frames of [pixels] each as fit comfortably in [memoryBytes].
      * [bytesPerPixel]: what one frame takes (1.5 for ordinary frames, 2 for sensor frames);
      * [workBytesPerPixel]: what the merge needs on top, whatever the number of frames.

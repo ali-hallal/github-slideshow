@@ -178,3 +178,88 @@ object Detail {
         return out
     }
 }
+
+/** Enlarging a photo, for zoomed shots: smooth where the picture is smooth, without halos at edges. */
+object Upscale {
+    /** [photo] made [times] larger (to even sizes): brightness by Catmull-Rom (kept within its neighbours), colour by straight lines. */
+    fun by(photo: Yuv, times: Float): Yuv {
+        if (times <= 1.001f) return photo
+        val w = ((photo.w * times).toInt() and 1.inv()).coerceAtLeast(2)
+        val h = ((photo.h * times).toInt() and 1.inv()).coerceAtLeast(2)
+        val y = ByteArray(w * h)
+        val sx = photo.w.toFloat() / w
+        val sy = photo.h.toFloat() / h
+        // Where each output column falls in the source, and its four weights.
+        val ix = IntArray(w)
+        val wx = FloatArray(w * 4)
+        for (x in 0 until w) {
+            val f = (x + 0.5f) * sx - 0.5f
+            val i = kotlin.math.floor(f).toInt()
+            ix[x] = i
+            weights(f - i, wx, x * 4)
+        }
+        val src = photo.y
+        val sw = photo.w
+        val shh = photo.h
+        Parallel.rows(h) { yy ->
+            val f = (yy + 0.5f) * sy - 0.5f
+            val j = kotlin.math.floor(f).toInt()
+            val wy = FloatArray(4)
+            weights(f - j, wy, 0)
+            val rows = IntArray(4) { (j - 1 + it).coerceIn(0, shh - 1) * sw }
+            val o = yy * w
+            for (x in 0 until w) {
+                val i = ix[x]
+                var acc = 0f
+                var lo = 255
+                var hi = 0
+                for (b in 0..3) {
+                    val r = rows[b]
+                    var line = 0f
+                    for (a in 0..3) {
+                        val v = src[r + (i - 1 + a).coerceIn(0, sw - 1)].toInt() and 0xFF
+                        line += v * wx[x * 4 + a]
+                        if (a in 1..2 && b in 1..2) { if (v < lo) lo = v; if (v > hi) hi = v }
+                    }
+                    acc += line * wy[b]
+                }
+                // Within the four nearest: no bright or dark rings along edges.
+                y[o + x] = acc.coerceIn(lo.toFloat(), hi.toFloat()).let { (it + 0.5f).toInt() }.toByte()
+            }
+        }
+        val cw = w / 2
+        val ch = h / 2
+        return Yuv(w, h, y, linear(photo.u, photo.cw, photo.ch, cw, ch), linear(photo.v, photo.cw, photo.ch, cw, ch))
+    }
+
+    private fun weights(t: Float, out: FloatArray, at: Int) {
+        val t2 = t * t
+        val t3 = t2 * t
+        out[at] = (-t3 + 2 * t2 - t) / 2f
+        out[at + 1] = (3 * t3 - 5 * t2 + 2) / 2f
+        out[at + 2] = (-3 * t3 + 4 * t2 + t) / 2f
+        out[at + 3] = (t3 - t2) / 2f
+    }
+
+    private fun linear(src: ByteArray, sw: Int, sh: Int, w: Int, h: Int): ByteArray {
+        val out = ByteArray(w * h)
+        val sx = sw.toFloat() / w
+        val sy = sh.toFloat() / h
+        Parallel.rows(h) { y ->
+            val fy = ((y + 0.5f) * sy - 0.5f).coerceIn(0f, sh - 1f)
+            val y0 = fy.toInt().coerceAtMost(sh - 1)
+            val y1 = minOf(y0 + 1, sh - 1)
+            val ay = fy - y0
+            for (x in 0 until w) {
+                val fx = ((x + 0.5f) * sx - 0.5f).coerceIn(0f, sw - 1f)
+                val x0 = fx.toInt().coerceAtMost(sw - 1)
+                val x1 = minOf(x0 + 1, sw - 1)
+                val ax = fx - x0
+                fun p(xx: Int, yy: Int) = (src[yy * sw + xx].toInt() and 0xFF).toFloat()
+                val v = (p(x0, y0) * (1 - ax) + p(x1, y0) * ax) * (1 - ay) + (p(x0, y1) * (1 - ax) + p(x1, y1) * ax) * ay
+                out[y * w + x] = (v + 0.5f).toInt().toByte()
+            }
+        }
+        return out
+    }
+}

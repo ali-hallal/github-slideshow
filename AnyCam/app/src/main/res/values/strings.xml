@@ -21,6 +21,16 @@
     <string name="merged_sensor">%1$d sensor shots merged · %2$d MP</string>
     <string name="sensor_not_usable">Sensor frames didn\'t check out on this phone · saved the phone\'s own photo</string>
     <string name="mode_photo">Photo</string>
+    <string name="mode_video">Video</string>
+    <string name="timer_off">Timer off</string>
+    <string name="timer_on">Timer %1$d s</string>
+    <string name="grid">Grid</string>
+    <string name="counting">%1$d…</string>
+    <string name="recording">● %1$s</string>
+    <string name="video_saved">Video saved · %1$s</string>
+    <string name="video_not_saved">The video wasn\'t saved</string>
+    <string name="video_size">Video %1$s</string>
+    <string name="no_sound">Recording without sound (microphone not allowed)</string>
     <string name="mode_night">Night</string>
     <string name="mode_hdr">HDR</string>
     <string name="mode_portrait">Portrait</string>

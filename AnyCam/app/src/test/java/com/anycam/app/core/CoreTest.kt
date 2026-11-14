@@ -115,6 +115,39 @@ class CoreTest {
     }
 
     @Test
+    fun zoomedShotsAreCutFromTheSensorAndEnlarged() {
+        // The middle of the frame, at even offsets (the filter pattern stays where it was).
+        val c = Crop.forZoom(4000, 3000, 2.5f)
+        assertEquals(1600, c.w); assertEquals(1200, c.h); assertEquals(1200, c.x); assertEquals(900, c.y)
+        val odd = Crop.forZoom(4000, 3000, 3f)
+        assertTrue(odd.x % 2 == 0 && odd.y % 2 == 0 && odd.w % 2 == 0 && odd.h % 2 == 0)
+        assertTrue(Crop.forZoom(4000, 3000, 1f).isWhole)
+        val f = RawFrame(8, 6, ShortArray(48) { it.toShort() })
+        val part = f.crop(Crop(2, 2, 4, 2, 8, 6))
+        assertEquals(listOf(18, 19, 20, 21, 26, 27, 28, 29), part.px.map { it.toInt() })
+        // The lens map of the part: the middle of the full map's range.
+        val sh = Shading(3, 3, FloatArray(27) { i -> val cell = i / 3; 1f + (cell % 3) * 0.5f + (cell / 3) })
+        val mid = sh.crop(0.25f, 0.25f, 0.75f, 0.75f)
+        assertEquals(sh.at(1, 0.25f, 0.25f), mid.at(1, 0f, 0f), 1e-5f)
+        assertEquals(sh.at(1, 0.75f, 0.75f), mid.at(1, 1f, 1f), 1e-5f)
+        // Only zoomed in, and only while the part in view is big enough.
+        assertTrue(Geometry.sensorZoomWorks(1f, 4000))
+        assertTrue(Geometry.sensorZoomWorks(6f, 4000))
+        assertTrue(!Geometry.sensorZoomWorks(0.6f, 4000))
+        assertTrue(!Geometry.sensorZoomWorks(10f, 4000))
+        assertEquals(2f, Geometry.zoomEnlargement(5f), 0f)
+        // Enlarging: twice the size, flat stays flat, an edge gets no rings.
+        val w = 40; val h = 20
+        val y = ByteArray(w * h) { i -> if (i % w < w / 2) 30 else 220.toByte() }
+        val big = Upscale.by(Yuv(w, h, y, ByteArray(w * h / 4) { 128.toByte() }, ByteArray(w * h / 4) { 128.toByte() }), 2f)
+        assertEquals(80, big.w); assertEquals(40, big.h)
+        val values = big.y.map { it.toInt() and 0xFF }
+        assertTrue(values.all { it in 30..220 })
+        assertEquals(30, values[10 * 80 + 5]); assertEquals(220, values[10 * 80 + 75])
+        assertTrue(big.u.all { (it.toInt() and 0xFF) == 128 })
+    }
+
+    @Test
     fun theDarkGetsLongerShotsAndIsLifted() {
         // Auto exposure out of sensitivity at 1/14 s: a stabilised lens holds 1/5 s, brighter.
         val p = Exposure.night(12800, 71_000_000L, 100, 12800, 1_000_000_000L, stabilised = true)!!
