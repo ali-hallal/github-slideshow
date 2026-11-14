@@ -81,15 +81,22 @@ class PhotoMaker(context: Context) {
                 // The sharpest frame on its own first: the photo is built around it, and its
                 // colours (coarsely) are what the look is fitted from.
                 val reference = RawMerge.sharpest(frames, info)
-                val base = RawMerge.merge(listOf(frames[reference]), info)
+                var base = RawMerge.merge(listOf(frames[reference]), info)
+                // In the dark, brighter than the sensor caught: the merge has taken out enough noise
+                // to lift it, as phones' night modes do. Done on the light itself (before the
+                // display curve), so colours stay true.
+                val lift = com.anycam.app.core.Night.lift(base)
+                val used = if (lift > 1f) info.brighter(lift) else info
+                if (lift > 1f) com.anycam.app.core.Night.brighten(base, lift)
                 val t1 = System.currentTimeMillis()
                 // The two pictures must show the same view for the look to be taken from one to the other.
-                val sameShape = guide != null && kotlin.math.abs(guide.w.toFloat() / guide.h - base.w.toFloat() / base.h) < 0.03f
+                // (Not when lifted: the phone's own frame is as dark as the sensor's, and its look would undo the lift.)
+                val sameShape = lift <= 1f && guide != null && kotlin.math.abs(guide.w.toFloat() / guide.h - base.w.toFloat() / base.h) < 0.03f
                 val look = if (guide != null && sameShape) {
-                    Look.fit(Develop.coarse(base, info, Look.GRID_W, Look.GRID_H), Look.coarse(guide))
+                    Look.fit(Develop.coarse(base, used, Look.GRID_W, Look.GRID_H), Look.coarse(guide))
                 } else Look.PLAIN
                 // Then every frame's samples laid down where they really were.
-                val merged = Stack.develop(frames, info, base, reference, look)
+                val merged = Stack.develop(frames, used, base, reference, look)
                 val developed = merged.photo
                 val t2 = System.currentTimeMillis()
                 // Before trusting it: does it show what the phone's own picture shows? A phone that
@@ -106,7 +113,7 @@ class PhotoMaker(context: Context) {
                 val jpeg = encode(finished)
                 val t3 = System.currentTimeMillis()
                 val notes = "AnyCam sensor photo; ISO ${shot.iso} ${shot.exposureNs?.let { "1/${Math.round(1e9 / it)}" }}; ${frames.size} frames; " +
-                    "look ${if (look === Look.PLAIN) "plain" else "from phone"}; reference ${t1 - t0} ms, stack ${t2 - t1} ms, finish ${t3 - t2} ms; " +
+                    "look ${if (look === Look.PLAIN) "plain" else "from phone"}; night lift ${"%.1f".format(Locale.US, lift)}x; reference ${t1 - t0} ms, stack ${t2 - t1} ms, finish ${t3 - t2} ms; " +
                     "compiled ${com.anycam.app.core.Native.use}; cores ${Runtime.getRuntime().availableProcessors()}; ${merged.notes}"
                 val uri = save(jpeg, shot, notes = notes)
                 Log.i(TAG, notes)

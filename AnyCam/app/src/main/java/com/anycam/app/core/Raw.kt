@@ -32,6 +32,9 @@ class RawInfo(
     val noiseS: Float? = null,
     val noiseO: Float? = null,
 ) {
+    /** The same, made [times] brighter (on the light itself, before anything else). */
+    fun brighter(times: Float) = RawInfo(cfa, black, white, FloatArray(3) { wb[it] * times }, ccm, shading, noiseS, noiseO)
+
     /** 0 red, 1 green, 2 blue at pattern position [pos] (row%2 * 2 + column%2). */
     fun colour(pos: Int): Int = PATTERNS[cfa.coerceIn(0, 3)][pos]
 

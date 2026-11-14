@@ -282,7 +282,8 @@ class MainActivity : Activity(), CameraEngine.Listener {
         val isoRange = cam.isoRange
         val exposureRange = cam.exposureRange
         val plan = if (iso != null && exposure != null && isoRange != null && exposureRange != null && !torch) {
-            Exposure.plan(iso, exposure, isoRange.lower, isoRange.upper, exposureRange.lower, exposureRange.upper, cam.stabilised)
+            Exposure.night(iso, exposure, isoRange.lower, isoRange.upper, exposureRange.upper, cam.stabilised)
+                ?: Exposure.plan(iso, exposure, isoRange.lower, isoRange.upper, exposureRange.lower, exposureRange.upper, cam.stabilised)
         } else null
         val wanted = plan?.frames ?: Geometry.burstFrames(iso)
         // Sensor frames where the camera gives them — at 1×, since zoom doesn't reach them.

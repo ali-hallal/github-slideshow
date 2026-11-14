@@ -1,6 +1,7 @@
 package com.anycam.app.core
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -111,6 +112,33 @@ class CoreTest {
         assertEquals(180, Geometry.photoRotation(90, 90, false))
         assertEquals(270, Geometry.photoRotation(270, 0, true))
         assertEquals(180, Geometry.photoRotation(270, 90, true))
+    }
+
+    @Test
+    fun theDarkGetsLongerShotsAndIsLifted() {
+        // Auto exposure out of sensitivity at 1/14 s: a stabilised lens holds 1/5 s, brighter.
+        val p = Exposure.night(12800, 71_000_000L, 100, 12800, 1_000_000_000L, stabilised = true)!!
+        assertEquals(Exposure.NIGHT_STABILISED_NS, p.exposureNs)
+        assertTrue(p.iso * p.exposureNs > 12800.0 * 71_000_000L * 2)
+        assertTrue(p.frames >= 5)
+        // Dark but within reach: the same light, at a lower sensitivity (less noise).
+        val q = Exposure.night(3200, 66_000_000L, 100, 12800, 1_000_000_000L, stabilised = true)!!
+        assertEquals(Exposure.NIGHT_STABILISED_NS / 2, q.exposureNs)
+        assertTrue(q.iso < 3200)
+        assertEquals(3200.0 * 66_000_000L, q.iso.toDouble() * q.exposureNs, 3200.0 * 66_000_000L * 0.02)
+        // No steadying: no longer than 1/10 s.
+        assertEquals(Exposure.NIGHT_NS, Exposure.night(12800, 71_000_000L, 100, 12800, 1_000_000_000L, stabilised = false)!!.exposureNs)
+        // Not dark: nothing.
+        assertNull(Exposure.night(400, 33_000_000L, 100, 12800, 1_000_000_000L, stabilised = true))
+        assertNull(Exposure.night(3200, 20_000_000L, 100, 12800, 1_000_000_000L, stabilised = true))
+
+        // A dark picture is raised towards the target, a normal one is left alone, never past the most.
+        fun flat(v: Float) = RawMerge.Merged(40, 30, FloatArray(44 * 34) { v }, 0, 1, 0f)
+        assertEquals(1f, Night.lift(flat(0.2f)), 0f)
+        assertEquals(Night.TARGET / 0.01f, Night.lift(flat(0.01f)), 1e-3f)
+        assertEquals(Night.MOST, Night.lift(flat(0.0005f)), 0f)
+        val m = flat(0.3f); Night.brighten(m, 4f)
+        assertEquals(1f, m.light[44 * 5 + 5], 0f)
     }
 
     @Test
