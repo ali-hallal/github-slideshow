@@ -135,9 +135,13 @@ class Video(private val context: Context, val size: Size) {
 
         /** 16:9 at [quality] lines where the camera gives it and the phone's encoder takes it, else the largest 16:9 below. */
         fun pickSize(sizes: Array<Size>, quality: Int): Size? {
-            val wide = sizes.filter { it.width * 9 == it.height * 16 && it.height <= quality && encodes(it) }
-            return wide.maxByOrNull { it.width.toLong() * it.height }
-                ?: sizes.filter { it.height <= FULL_HD && encodes(it) }.maxByOrNull { it.width.toLong() * it.height }
+            Log.i("AnyCam", "video sizes offered: ${sizes.joinToString()}")
+            fun largest(l: List<Size>) = l.maxByOrNull { it.width.toLong() * it.height }
+            val wide = sizes.filter { it.width * 9 == it.height * 16 }
+            // The encoder's own answer where it gives one; full HD and below every phone records.
+            return largest(wide.filter { it.height <= quality && (it.height <= FULL_HD || encodes(it)) })
+                ?: largest(sizes.filter { it.height <= FULL_HD && it.width <= 1920 })
+                ?: largest(sizes.toList())
         }
 
         private fun encodes(size: Size): Boolean = try {
