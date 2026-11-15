@@ -334,7 +334,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
         stopAiming()
         measure.unfreeze()
         measure.aiming = false
-        measureBar.visibility = View.GONE
+        (measureBar.parent as View).visibility = View.GONE
         status.visibility = View.INVISIBLE
     }
 
@@ -423,7 +423,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
     /** The tools for what is being measured: by aiming (live), or on a frozen photo. */
     private fun showMeasureBar() {
         measureBar.removeAllViews()
-        measureBar.visibility = if (measureMode) View.VISIBLE else View.GONE
+        (measureBar.parent as View).visibility = if (measureMode) View.VISIBLE else View.GONE
         if (!measureMode) return
         if (measure.photo == null) {
             addToBar(barButton(getString(R.string.measure_height, com.anycam.app.core.Measure.label(cameraHeightCm * 10.0))) { askCameraHeight() })

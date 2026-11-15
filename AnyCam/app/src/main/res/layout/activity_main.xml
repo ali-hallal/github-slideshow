@@ -131,14 +131,24 @@
             android:orientation="horizontal" />
 
         <!-- Measuring tools (Measure mode only). -->
-        <LinearLayout
-            android:id="@+id/measureBar"
+        <HorizontalScrollView
+            android:id="@+id/measureScroll"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_gravity="center_horizontal"
             android:layout_marginTop="8dp"
-            android:orientation="horizontal"
-            android:visibility="gone" />
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:clipToPadding="false"
+            android:scrollbars="none"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:id="@+id/measureBar"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal" />
+        </HorizontalScrollView>
 
         <!-- Ways to make the photo: AnyCam's own merge, and whatever the phone maker offers other apps. -->
         <LinearLayout
