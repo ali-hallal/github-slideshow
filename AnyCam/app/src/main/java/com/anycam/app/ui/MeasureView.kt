@@ -30,6 +30,10 @@ class MeasureView @JvmOverloads constructor(context: Context, attrs: AttributeSe
     private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textSize = 15 * density; typeface = android.graphics.Typeface.DEFAULT_BOLD; textAlign = Paint.Align.CENTER }
     private val tag = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(170, 0, 0, 0) }
 
+    override fun onMeasure(widthSpec: Int, heightSpec: Int) {
+        if (!measureLikeViewfinder(widthSpec, heightSpec) { w, h -> setMeasuredDimension(w, h) }) super.onMeasure(widthSpec, heightSpec)
+    }
+
     /** Live aiming: the cross is shown. */
     var aiming = false
         set(value) { field = value; invalidate() }

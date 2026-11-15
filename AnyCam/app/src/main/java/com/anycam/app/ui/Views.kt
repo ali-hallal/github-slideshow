@@ -29,8 +29,23 @@ class ViewfinderView @JvmOverloads constructor(context: Context, attrs: Attribut
     }
 }
 
+/**
+ * Exactly the viewfinder's size (the first view of the same parent), whatever the screen
+ * height: drawings over the picture must line up with it.
+ */
+internal fun View.measureLikeViewfinder(widthSpec: Int, heightSpec: Int, set: (Int, Int) -> Unit): Boolean {
+    val vf = (parent as? android.view.ViewGroup)?.getChildAt(0) ?: return false
+    if (vf === this || vf.measuredHeight <= 0) return false
+    set(View.MeasureSpec.getSize(widthSpec), vf.measuredHeight)
+    return true
+}
+
 /** Drawn over the viewfinder: the focus ring, and the grid of thirds when it is on. */
 class MarksView @JvmOverloads constructor(context: Context, attrs: AttributeSet? = null) : View(context, attrs) {
+    override fun onMeasure(widthSpec: Int, heightSpec: Int) {
+        if (!measureLikeViewfinder(widthSpec, heightSpec) { w, h -> setMeasuredDimension(w, h) }) super.onMeasure(widthSpec, heightSpec)
+    }
+
     private val density = resources.displayMetrics.density
     var grid = false
         set(value) { field = value; invalidate() }
