@@ -48,30 +48,50 @@ class MeasureView @JvmOverloads constructor(context: Context, attrs: AttributeSe
 
     /** Called when what is measured changes. */
     var onChange: (() -> Unit)? = null
+    /** A tap on the photo away from any handle (to find the card there). */
+    var onTap: ((Float, Float) -> Unit)? = null
+    /** The known object has been found (or placed): its outline, handles and the lines are shown. */
+    var found = false
+        private set
 
+    /** The photo to measure on; nothing is marked until the card is tapped. */
     fun freeze(bmp: Bitmap) {
         photo = bmp
         aiming = false
-        val w = width.toFloat()
-        val h = height.toFloat()
-        // A card-shaped box in the middle to start from.
-        val cw = w * 0.36f
-        val ch = cw * (reference.hMm / reference.wMm).toFloat()
-        val cx = w / 2
-        val cy = h * 0.42f
-        floatArrayOf(cx - cw / 2, cy - ch / 2, cx + cw / 2, cy - ch / 2, cx + cw / 2, cy + ch / 2, cx - cw / 2, cy + ch / 2).copyInto(corners)
+        found = false
         lines.clear()
-        addLine()
         invalidate()
+    }
+
+    /** The card's corners as found; a first line to measure with, under it. */
+    fun setCorners(c: FloatArray) {
+        c.copyInto(corners)
+        found = true
+        if (lines.isEmpty()) {
+            val bottom = maxOf(c[1], c[3], c[5], c[7])
+            val y = (bottom + height * 0.12f).coerceAtMost(height * 0.92f)
+            lines += floatArrayOf(width * 0.25f, y, width * 0.75f, y)
+        }
+        invalidate()
+        onChange?.invoke()
+    }
+
+    /** Not found: a card-shaped box where the tap was, to drag onto the corners by hand. */
+    fun placeCardAt(x: Float, y: Float) {
+        val cw = width * 0.36f
+        val ch = cw * (reference.hMm / reference.wMm).toFloat()
+        setCorners(floatArrayOf(x - cw / 2, y - ch / 2, x + cw / 2, y - ch / 2, x + cw / 2, y + ch / 2, x - cw / 2, y + ch / 2))
     }
 
     fun unfreeze() {
         photo = null
+        found = false
         lines.clear()
         invalidate()
     }
 
     fun addLine() {
+        if (!found) return
         val w = width.toFloat()
         val h = height.toFloat()
         val y = h * (0.68f + 0.06f * (lines.size % 4))
@@ -80,7 +100,7 @@ class MeasureView @JvmOverloads constructor(context: Context, attrs: AttributeSe
         onChange?.invoke()
     }
 
-    fun plane(): Measure.Plane? = try {
+    fun plane(): Measure.Plane? = if (!found) null else try {
         Measure.Plane(DoubleArray(8) { corners[it].toDouble() }, reference)
     } catch (e: Exception) {
         null
@@ -128,6 +148,7 @@ class MeasureView @JvmOverloads constructor(context: Context, attrs: AttributeSe
     private fun drawPhoto(c: Canvas, handles: Boolean) {
         val bmp = photo ?: return
         c.drawBitmap(bmp, null, Rect(0, 0, width, height), null)
+        if (!found) return
         // The known object.
         val path = Path().apply {
             moveTo(corners[0], corners[1]); lineTo(corners[2], corners[3]); lineTo(corners[4], corners[5]); lineTo(corners[6], corners[7]); close()
@@ -209,6 +230,8 @@ class MeasureView @JvmOverloads constructor(context: Context, attrs: AttributeSe
         else lines[(i - 4) / 2].let { l -> if ((i - 4) % 2 == 0) { l[0] = cx; l[1] = cy } else { l[2] = cx; l[3] = cy } }
     }
 
+    private var tapX = 0f
+    private var tapY = 0f
     private var grabDx = 0f
     private var grabDy = 0f
 
@@ -216,7 +239,9 @@ class MeasureView @JvmOverloads constructor(context: Context, attrs: AttributeSe
         if (photo == null) return false
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                val count = 4 + 2 * lines.size
+                tapX = e.x
+                tapY = e.y
+                val count = if (found) 4 + 2 * lines.size else 0
                 var best = -1
                 var bestD = 36 * density
                 for (i in 0 until count) {
@@ -239,6 +264,8 @@ class MeasureView @JvmOverloads constructor(context: Context, attrs: AttributeSe
                 onChange?.invoke()
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                // A tap away from every handle: look for the card there.
+                if (dragging < 0 && e.actionMasked == MotionEvent.ACTION_UP && hypot(e.x - tapX, e.y - tapY) < 12 * density) onTap?.invoke(e.x, e.y)
                 dragging = -1
                 invalidate()
                 performClick()

@@ -23,7 +23,7 @@
     <string name="mode_photo">Photo</string>
     <string name="mode_video">Video</string>
     <string name="mode_measure">Measure</string>
-    <string name="measure_height">Phone %1$s up</string>
+    <string name="measure_height">Phone at %1$s</string>
     <string name="measure_base">Mark base</string>
     <string name="measure_start">Mark start</string>
     <string name="measure_clear">Clear</string>
@@ -31,12 +31,15 @@
     <string name="measure_add">+ Line</string>
     <string name="measure_save">Save</string>
     <string name="measure_back">Back</string>
+    <string name="measure_retake">Retake</string>
+    <string name="measure_tap">Tap the %1$s in the photo</string>
+    <string name="measure_not_found">Couldn\'t find its edges: drag the 4 corners onto it</string>
     <string name="measure_track">3D test</string>
     <string name="measure_track_stop">Stop test</string>
     <string name="measure_track_on">Recording the 3D test… %1$d frames</string>
     <string name="measure_track_saved">3D test saved in Download/AnyCam (%1$d frames, %2$d s)</string>
     <string name="measure_saved">Measurement saved</string>
-    <string name="measure_aim">Aim the cross at the floor</string>
+    <string name="measure_aim">Aim the cross at the floor, or press the shutter to measure on a photo</string>
     <string name="measure_floor">≈ %1$s to that point on the floor</string>
     <string name="measure_height_at">Height there ≈ %1$s (base %2$s away)</string>
     <string name="measure_from_start">From start ≈ %1$s along the floor</string>

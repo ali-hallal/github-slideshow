@@ -66,6 +66,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
     private var trackFrame: android.graphics.Bitmap? = null
     private var previewSize = Size(0, 0)
     private lateinit var gridButton: TextView
+    private lateinit var working: View
 
     private lateinit var engine: CameraEngine
     private lateinit var photos: PhotoMaker
@@ -113,10 +114,12 @@ class MainActivity : Activity(), CameraEngine.Listener {
         timerButton = findViewById(R.id.timer)
         gridButton = findViewById(R.id.grid)
         measure = findViewById(R.id.measure)
+        working = findViewById(R.id.working)
         measureBar = findViewById(R.id.measureBar)
         sensors = getSystemService(android.hardware.SensorManager::class.java)
         try { cameraHeightCm = getPreferences(MODE_PRIVATE).getInt("cameraHeight", 140) } catch (_: Exception) {}
         measure.onChange = { showPhotoMeasures() }
+        measure.onTap = { x, y -> findCard(x, y) }
         track = com.anycam.app.camera.TrackRecorder(this)
         try {
             val prefs = getPreferences(MODE_PRIVATE)
@@ -440,9 +443,9 @@ class MainActivity : Activity(), CameraEngine.Listener {
                 showMeasureBar()
                 showAim()
             })
-            addToBar(barButton(getString(R.string.measure_photo)) { freezeForMeasuring() })
-            addToBar(barButton(getString(if (track.running) R.string.measure_track_stop else R.string.measure_track), lit = track.running) {
-                if (track.running) stopTrack() else startTrack()
+            // The 3D test only while it records (it is started by holding the Measure button).
+            if (track.running) addToBar(barButton(getString(R.string.measure_track_stop), lit = true) {
+                stopTrack()
                 showMeasureBar()
             })
         } else {
@@ -454,7 +457,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
             })
             addToBar(barButton(getString(R.string.measure_add)) { measure.addLine() })
             addToBar(barButton(getString(R.string.measure_save)) { saveMeasurement() })
-            addToBar(barButton(getString(R.string.measure_back)) {
+            addToBar(barButton(getString(R.string.measure_retake)) {
                 measure.unfreeze()
                 measure.aiming = true
                 startAiming()
@@ -527,7 +530,37 @@ class MainActivity : Activity(), CameraEngine.Listener {
 
     private fun showPhotoMeasures() {
         if (measure.photo == null) return
-        say(getString(R.string.measure_corners, measure.reference.label.lowercase(Locale.getDefault())), stay = true)
+        val name = measure.reference.label.lowercase(Locale.getDefault())
+        if (!measure.found) say(getString(R.string.measure_tap, name), stay = true)
+        else status.visibility = View.INVISIBLE
+    }
+
+    /** A tap on the frozen photo: find the card (or sheet) there, by itself. */
+    private fun findCard(x: Float, y: Float) {
+        val bmp = measure.photo ?: return
+        Thread {
+            val corners = try {
+                val w = bmp.width
+                val h = bmp.height
+                val px = IntArray(w * h)
+                bmp.getPixels(px, 0, w, 0, 0, w, h)
+                val sx = w / measure.width.toFloat()
+                val sy = h / measure.height.toFloat()
+                com.anycam.app.core.CardFinder.find(px, w, h, x * sx, y * sy)?.let { c -> FloatArray(8) { c[it] / if (it % 2 == 0) sx else sy } }
+            } catch (e: Throwable) {
+                null
+            }
+            runOnUiThread {
+                if (measure.photo !== bmp) return@runOnUiThread
+                if (corners != null) {
+                    measure.setCorners(corners)
+                    status.visibility = View.INVISIBLE
+                } else {
+                    measure.placeCardAt(x, y)
+                    say(getString(R.string.measure_not_found))
+                }
+            }
+        }.start()
     }
 
     private fun saveMeasurement() {
@@ -603,9 +636,12 @@ class MainActivity : Activity(), CameraEngine.Listener {
     }
 
     private fun showTimerAndGrid() {
-        timerButton.text = if (timerSeconds == 0) getString(R.string.timer_off) else getString(R.string.timer_on, timerSeconds)
-        timerButton.setTextColor(getColor(if (timerSeconds > 0) R.color.accent else R.color.white))
-        gridButton.setTextColor(getColor(if (marks.grid) R.color.accent else R.color.white))
+        timerButton.text = if (timerSeconds == 0) "" else timerSeconds.toString()
+        timerButton.contentDescription = if (timerSeconds == 0) getString(R.string.timer_off) else getString(R.string.timer_on, timerSeconds)
+        val timerColor = getColor(if (timerSeconds > 0) R.color.accent else R.color.white)
+        timerButton.setTextColor(timerColor)
+        timerButton.compoundDrawableTintList = android.content.res.ColorStateList.valueOf(timerColor)
+        gridButton.compoundDrawableTintList = android.content.res.ColorStateList.valueOf(getColor(if (marks.grid) R.color.accent else R.color.white))
         val photo = !videoMode
         timerButton.visibility = if (photo) View.VISIBLE else View.GONE
     }
@@ -638,7 +674,8 @@ class MainActivity : Activity(), CameraEngine.Listener {
         lastPhoto = uri
         lastIsVideo = true
         videoCount++
-        say(getString(R.string.video_saved, clock(seconds)))
+        status.removeCallbacks(elapsed)
+        status.visibility = View.INVISIBLE
         showThumbnail(uri)
     }
 
@@ -693,7 +730,6 @@ class MainActivity : Activity(), CameraEngine.Listener {
         showMeasureBar()
         shutter.recording = false
         showTimerAndGrid()
-        if (videoMode) engine.videoSize?.let { say(getString(R.string.video_size, if (it.height >= 2160) "4K" else "${it.height}p")) }
         showTorch()
         switchButton.visibility = if (cameras.size > 1) View.VISIBLE else View.INVISIBLE
         if (!videoMode && !measureMode) status.visibility = View.INVISIBLE
@@ -711,11 +747,11 @@ class MainActivity : Activity(), CameraEngine.Listener {
         shutter.busy = false
         making++
         thumbnail.alpha = 0.5f
-        say(if (frames.size > 1) getString(R.string.merging, frames.size) else getString(R.string.saving), stay = true)
+        working.visibility = View.VISIBLE
         showShot(frames.firstOrNull(), shot.rotation)
         photos.make(frames, shot) { photo ->
             making--
-            if (making == 0) thumbnail.alpha = 1f
+            if (making == 0) { thumbnail.alpha = 1f; working.visibility = View.INVISIBLE }
             if (photo == null) {
                 say(getString(R.string.not_saved))
                 return@make
@@ -724,7 +760,6 @@ class MainActivity : Activity(), CameraEngine.Listener {
             lastIsVideo = false
             lastMerged = photo.merged
             photoCount++
-            say(if (photo.merged > 1) getString(R.string.merged, photo.merged) else getString(R.string.saved))
             showThumbnail(photo.uri)
         }
     }
@@ -734,11 +769,11 @@ class MainActivity : Activity(), CameraEngine.Listener {
         shutter.busy = false
         making++
         thumbnail.alpha = 0.5f
-        say(getString(R.string.merging_sensor, frames.size), stay = true)
+        working.visibility = View.VISIBLE
         showShot(guide, shot.rotation)
         photos.makeRaw(frames, guide, info, shot) { photo ->
             making--
-            if (making == 0) thumbnail.alpha = 1f
+            if (making == 0) { thumbnail.alpha = 1f; working.visibility = View.INVISIBLE }
             if (photo == null) {
                 say(getString(R.string.not_saved))
                 return@makeRaw
@@ -750,11 +785,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
             // This phone's sensor frames didn't develop into a trustworthy photo: ordinary frames from now on.
             if (photo.sensorFailed) sensorOff = true
             photoCount++
-            say(when {
-                photo.fromSensor -> getString(R.string.merged_sensor, photo.merged, photo.megapixels.roundToInt())
-                photo.sensorFailed -> getString(R.string.sensor_not_usable)
-                else -> getString(R.string.saved)
-            })
+
             showThumbnail(photo.uri)
         }
     }
@@ -764,9 +795,10 @@ class MainActivity : Activity(), CameraEngine.Listener {
         shutter.busy = false
         making++
         thumbnail.alpha = 0.5f
+        working.visibility = View.VISIBLE
         photos.keep(jpeg, shot) { photo ->
             making--
-            if (making == 0) thumbnail.alpha = 1f
+            if (making == 0) { thumbnail.alpha = 1f; working.visibility = View.INVISIBLE }
             if (photo == null) {
                 say(getString(R.string.not_saved))
                 return@keep
@@ -775,7 +807,6 @@ class MainActivity : Activity(), CameraEngine.Listener {
             lastIsVideo = false
             lastMerged = 1
             photoCount++
-            say(getString(R.string.phone_done))
             showThumbnail(photo.uri)
         }
     }
@@ -879,6 +910,14 @@ class MainActivity : Activity(), CameraEngine.Listener {
                 setTextColor(getColor(if (on) R.color.accent else R.color.white))
                 if (on) setBackgroundResource(R.drawable.chip_bg)
                 setPadding((14 * density).toInt(), 0, (14 * density).toInt(), 0)
+                // Holding Measure (in Measure mode) starts or stops the 3D test recording.
+                if (mode == MEASURE) setOnLongClickListener {
+                    if (!measureMode || measure.photo != null) return@setOnLongClickListener false
+                    it.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                    if (track.running) stopTrack() else startTrack()
+                    showMeasureBar()
+                    true
+                }
                 setOnClickListener {
                     if (taking || engine.recording || on) return@setOnClickListener
                     it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
@@ -898,7 +937,6 @@ class MainActivity : Activity(), CameraEngine.Listener {
                     } else {
                         videoMode = false
                         extension = mode
-                        say(if (mode == null) getString(R.string.by_anycam) else getString(R.string.by_phone, modeName(mode)))
                     }
                     openCamera()
                 }
@@ -946,7 +984,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
         val color = getColor(if (torch && has) R.color.accent else R.color.white)
         torchButton.setTextColor(color)
         torchButton.compoundDrawableTintList = android.content.res.ColorStateList.valueOf(color)
-        torchButton.text = getString(if (torch && has) R.string.light_on else R.string.light_off)
+        torchButton.contentDescription = getString(if (torch && has) R.string.light_on else R.string.light_off)
     }
 
     private val hideStatus = Runnable { status.animate().alpha(0f).setDuration(250).withEndAction { status.visibility = View.INVISIBLE }.start() }

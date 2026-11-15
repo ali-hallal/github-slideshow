@@ -115,6 +115,44 @@ class CoreTest {
     }
 
     @Test
+    fun aCardIsFoundFromATap() {
+        // A light, tilted card with dark print on it, on a textured brown table.
+        val w = 600; val h = 800
+        val corners = doubleArrayOf(180.0, 300.0, 430.0, 340.0, 405.0, 500.0, 155.0, 460.0)
+        fun inside(x: Double, y: Double): Boolean {
+            var neg = false; var pos = false
+            for (i in 0 until 4) {
+                val ax = corners[2 * i]; val ay = corners[2 * i + 1]
+                val bx = corners[(2 * i + 2) % 8]; val by = corners[(2 * i + 3) % 8]
+                val c = (bx - ax) * (y - ay) - (by - ay) * (x - ax)
+                if (c < 0) neg = true else if (c > 0) pos = true
+            }
+            return !(neg && pos)
+        }
+        val rnd = Random(4)
+        val px = IntArray(w * h) { i ->
+            val x = (i % w).toDouble(); val y = (i / w).toDouble()
+            if (inside(x, y)) {
+                // Print: a few thin dark strokes.
+                val printed = (y.toInt() % 37 in 0..1 && x.toInt() % 90 < 50)
+                val v = if (printed) 60 else 235 + rnd.nextInt(8)
+                (0xFF shl 24) or (v shl 16) or (v shl 8) or (v - 10)
+            } else {
+                val v = 110 + rnd.nextInt(30) + ((x / 7).toInt() % 3) * 6
+                (0xFF shl 24) or (v shl 16) or ((v * 0.7).toInt() shl 8) or (v / 2)
+            }
+        }
+        val found = CardFinder.find(px, w, h, 300f, 400f)!!
+        // Every true corner has a found corner within 6 pixels.
+        for (i in 0 until 4) {
+            val d = (0 until 4).minOf { j -> Math.hypot(found[2 * j] - corners[2 * i], found[2 * j + 1] - corners[2 * i + 1]) }
+            assertTrue("corner $i off by $d", d < 6.0)
+        }
+        // Tapping the table finds nothing card-like.
+        assertNull(CardFinder.find(px, w, h, 40f, 40f))
+    }
+
+    @Test
     fun measuringAgainstACardAndByAiming() {
         // A card seen at an angle: its corners in a picture made by a known perspective mapping.
         val truth = doubleArrayOf(1.6, 0.2, 40.0, 0.1, 1.4, 60.0, 0.0006, 0.0004) // surface mm -> picture

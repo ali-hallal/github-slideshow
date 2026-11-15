@@ -64,47 +64,45 @@
 
         <TextView
             android:id="@+id/torch"
-            android:layout_width="wrap_content"
+            android:layout_width="44dp"
             android:layout_height="match_parent"
             android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/light_off"
             android:drawableStart="@drawable/ic_torch"
-            android:drawablePadding="6dp"
-            android:fontFamily="sans-serif-medium"
-            android:gravity="center_vertical"
-            android:paddingStart="8dp"
-            android:paddingEnd="12dp"
-            android:text="@string/light_off"
-            android:textColor="@color/white"
-            android:textSize="13sp" />
+            android:gravity="center"
+            android:paddingStart="10dp"
+            android:textColor="@color/white" />
 
         <TextView
             android:id="@+id/timer"
             android:layout_width="wrap_content"
             android:layout_height="match_parent"
             android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/timer_off"
+            android:drawableStart="@drawable/ic_timer"
+            android:drawablePadding="2dp"
             android:fontFamily="sans-serif-medium"
             android:gravity="center_vertical"
-            android:paddingStart="8dp"
-            android:paddingEnd="8dp"
-            android:text="@string/timer_off"
+            android:minWidth="44dp"
+            android:paddingStart="10dp"
+            android:paddingEnd="4dp"
             android:textColor="@color/white"
-            android:textSize="13sp" />
+            android:textSize="12sp" />
 
         <TextView
             android:id="@+id/grid"
-            android:layout_width="wrap_content"
+            android:layout_width="44dp"
             android:layout_height="match_parent"
             android:background="?android:attr/selectableItemBackgroundBorderless"
-            android:fontFamily="sans-serif-medium"
-            android:gravity="center_vertical"
-            android:paddingStart="8dp"
-            android:paddingEnd="8dp"
-            android:text="@string/grid"
-            android:textColor="@color/white"
-            android:textSize="13sp" />
+            android:contentDescription="@string/grid"
+            android:drawableStart="@drawable/ic_grid"
+            android:gravity="center"
+            android:paddingStart="10dp"
+            android:textColor="@color/white" />
 
         <TextView
             android:id="@+id/readout"
+            android:visibility="invisible"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
@@ -175,6 +173,17 @@
                 android:clipToOutline="true"
                 android:contentDescription="@string/last_photo"
                 android:scaleType="centerCrop" />
+
+            <!-- While photos are being finished: a ring round the thumbnail instead of words. -->
+            <ProgressBar
+                android:id="@+id/working"
+                style="?android:attr/progressBarStyle"
+                android:layout_width="64dp"
+                android:layout_height="64dp"
+                android:layout_gravity="start|center_vertical"
+                android:layout_marginStart="30dp"
+                android:indeterminateTint="@color/accent"
+                android:visibility="invisible" />
 
             <com.anycam.app.ui.ShutterView
                 android:id="@+id/shutter"

@@ -25,8 +25,8 @@ features, no hidden settings, no libraries, no network.
   second, with the phone's own video steadying where it offers it, and sound. Saved to `Movies/AnyCam`.
 - **Measure.** Two ways that work on every phone, nothing to install:
   - *On a photo, against a known object:* lay a bank card (or an A4 or Letter sheet) on or
-    beside what you measure, put the four handles on its corners, and drag lines anywhere on
-    the same flat surface. Seen at an angle is fine: the card's corners fix the perspective.
+    beside what you measure, press the shutter, tap the card: AnyCam finds its corners (drag
+    them if needed), then drag the line anywhere on the same flat surface. Seen at an angle is fine: the card's corners fix the perspective.
     About 1–2 % when the corners are marked carefully (a magnifier helps). Saved with the
     lengths drawn on.
   - *Live, by aiming:* with the camera's height above the floor set once, aim the cross at a

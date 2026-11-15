@@ -9,6 +9,7 @@ import android.provider.MediaStore
 import android.util.Log
 import androidx.test.espresso.Espresso.onView
 import androidx.test.espresso.action.ViewActions.click
+import androidx.test.espresso.action.ViewActions.longClick
 import androidx.test.espresso.action.ViewActions.scrollTo
 import androidx.test.espresso.matcher.ViewMatchers.withContentDescription
 import androidx.test.espresso.matcher.ViewMatchers.withId
@@ -130,18 +131,21 @@ class AnyCamTest {
         screen("09_measure_aiming")
         // The 3D test recording: a few seconds of frames and motion sensors, saved as a zip.
         val tracks = MainActivity.trackCount
-        onView(withText("3D test")).perform(scrollTo(), click())
+        onView(withText("Measure")).perform(longClick())
         SystemClock.sleep(3000)
         onView(withText("Stop test")).perform(scrollTo(), click())
         waitFor("3D test saved", 20_000) { MainActivity.trackCount > tracks }
-        onView(withText("On a photo")).perform(scrollTo(), click())
+        // The shutter holds the picture still; a tap looks for the card (or puts corners there to drag).
+        onView(withId(R.id.shutter)).perform(click())
         SystemClock.sleep(500)
+        onView(withId(R.id.measure)).perform(click())
+        SystemClock.sleep(1500)
         onView(withText("+ Line")).perform(scrollTo(), click())
         screen("10_measure_photo")
         val before = MainActivity.measureCount
         onView(withText("Save")).perform(scrollTo(), click())
         waitFor("measurement saved", 15_000) { MainActivity.measureCount > before }
-        onView(withText("Back")).perform(scrollTo(), click())
+        onView(withText("Retake")).perform(scrollTo(), click())
         onView(withText("Photo")).perform(click())
         SystemClock.sleep(300)
         waitFor("photo camera ready") { MainActivity.ready }
