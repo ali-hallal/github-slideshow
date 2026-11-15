@@ -127,6 +127,12 @@ class AnyCamTest {
         waitFor("measure camera ready") { MainActivity.ready }
         SystemClock.sleep(1500)
         screen("09_measure_aiming")
+        // The 3D test recording: a few seconds of frames and motion sensors, saved as a zip.
+        val tracks = MainActivity.trackCount
+        onView(withText("3D test")).perform(click())
+        SystemClock.sleep(3000)
+        onView(withText("Stop test")).perform(click())
+        waitFor("3D test saved", 20_000) { MainActivity.trackCount > tracks }
         onView(withText("On a photo")).perform(click())
         SystemClock.sleep(500)
         onView(withText("+ Line")).perform(click())

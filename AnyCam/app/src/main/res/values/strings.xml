@@ -31,6 +31,10 @@
     <string name="measure_add">+ Line</string>
     <string name="measure_save">Save</string>
     <string name="measure_back">Back</string>
+    <string name="measure_track">3D test</string>
+    <string name="measure_track_stop">Stop test</string>
+    <string name="measure_track_on">Recording the 3D test… %1$d frames</string>
+    <string name="measure_track_saved">3D test saved in Download/AnyCam (%1$d frames, %2$d s)</string>
     <string name="measure_saved">Measurement saved</string>
     <string name="measure_aim">Aim the cross at the floor</string>
     <string name="measure_floor">≈ %1$s to that point on the floor</string>

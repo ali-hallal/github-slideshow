@@ -468,6 +468,20 @@ class CameraEngine(private val context: Context, private val listener: Listener)
         main.post { listener.onRecording(false); listener.onVideo(uri, seconds) }
     }
 
+    /** For the tracking test: what the camera reports for each viewfinder frame. */
+    @Volatile var frameLog: ((Long, Float?, Long?, Long?, Long?) -> Unit)? = null
+    private var lastFocus: Float? = null
+    /** Focus held where it is (a moving lens changes the camera's figures); where the phone allows it. */
+    private var focusHeld: Float? = null
+
+    fun holdFocus(on: Boolean) = handler.post {
+        val cam = info ?: return@post
+        focusHeld = if (on && cam.manualFocus) lastFocus else null
+        startPreview()
+    }
+
+    val cameraCharacteristics get() = characteristics
+
     /** Whether zoom can be used right now (the maker's processing doesn't always allow it). */
     val zoomWorks get() = extensionSession == null || extensionZoom
 
@@ -483,6 +497,7 @@ class CameraEngine(private val context: Context, private val listener: Listener)
 
     private fun closeNow() {
         generation++
+        focusHeld = null
         if (recording) stopRecordingNow()
         video = null
         try { videoSurface?.release() } catch (_: Exception) {}
@@ -517,6 +532,13 @@ class CameraEngine(private val context: Context, private val listener: Listener)
 
     private val previewCallback = object : CameraCaptureSession.CaptureCallback() {
         override fun onCaptureCompleted(s: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+            frameLog?.let { log ->
+                result.get(CaptureResult.SENSOR_TIMESTAMP)?.let { t ->
+                    log(t, result.get(CaptureResult.LENS_FOCUS_DISTANCE), result.get(CaptureResult.SENSOR_EXPOSURE_TIME),
+                        result.get(CaptureResult.SENSOR_ROLLING_SHUTTER_SKEW), result.get(CaptureResult.SENSOR_FRAME_DURATION))
+                }
+                lastFocus = result.get(CaptureResult.LENS_FOCUS_DISTANCE)
+            }
             val iso = result.get(CaptureResult.SENSOR_SENSITIVITY)
             val exposure = result.get(CaptureResult.SENSOR_EXPOSURE_TIME)
             if (iso != liveIso || exposure != liveExposure) {
@@ -573,7 +595,11 @@ class CameraEngine(private val context: Context, private val listener: Listener)
         if (cam.stabilised) b.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)
         b.set(CaptureRequest.FLASH_MODE, if (torch && cam.hasFlash) CameraMetadata.FLASH_MODE_TORCH else CameraMetadata.FLASH_MODE_OFF)
         val point = focusPoint
-        if (point != null && cam.touchFocus) {
+        val held = focusHeld
+        if (held != null) {
+            b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
+            b.set(CaptureRequest.LENS_FOCUS_DISTANCE, held)
+        } else if (point != null && cam.touchFocus) {
             b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_AUTO)
             val area = arrayOf(region(point.first, point.second, cam))
             if (cam.focusRegions) b.set(CaptureRequest.CONTROL_AF_REGIONS, area)

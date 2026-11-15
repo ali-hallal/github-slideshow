@@ -40,6 +40,8 @@ class CameraInfo(
     val videoFocus: Boolean = false,
     val videoStabilisation: Boolean = false,
     val videoFps: Range<Int>? = null,
+    /** The lens can be held at a set focus distance. */
+    val manualFocus: Boolean = false,
 ) {
     val minZoom get() = zoomRatio?.lower ?: 1f
     val maxZoom get() = zoomRatio?.upper ?: maxCropZoom
@@ -71,6 +73,8 @@ class CameraInfo(
                 extensions = extensions,
                 stabilised = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
                     ?.contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON) == true,
+                manualFocus = (c.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f) > 0f &&
+                    c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR) == true,
                 videoFocus = afModes.contains(CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO),
                 videoStabilisation = c.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
                     ?.contains(CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON) == true,

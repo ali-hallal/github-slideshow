@@ -62,6 +62,9 @@ class MainActivity : Activity(), CameraEngine.Listener {
     private var aimDown = Double.NaN
     private var aimHeading = 0.0
     private lateinit var sensors: android.hardware.SensorManager
+    private lateinit var track: com.anycam.app.camera.TrackRecorder
+    private var trackFrame: android.graphics.Bitmap? = null
+    private var previewSize = Size(0, 0)
     private lateinit var gridButton: TextView
 
     private lateinit var engine: CameraEngine
@@ -114,6 +117,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
         sensors = getSystemService(android.hardware.SensorManager::class.java)
         try { cameraHeightCm = getPreferences(MODE_PRIVATE).getInt("cameraHeight", 140) } catch (_: Exception) {}
         measure.onChange = { showPhotoMeasures() }
+        track = com.anycam.app.camera.TrackRecorder(this)
         try {
             val prefs = getPreferences(MODE_PRIVATE)
             timerSeconds = prefs.getInt("timer", 0)
@@ -138,7 +142,13 @@ class MainActivity : Activity(), CameraEngine.Listener {
             override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) = openCamera()
             override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) = Unit
             override fun onSurfaceTextureDestroyed(surface: SurfaceTexture) = true
-            override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
+            override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
+                if (!track.running) return
+                val bmp = trackFrame ?: return
+                viewfinder.getBitmap(bmp)
+                track.frame(bmp, surface.timestamp)
+                if (track.frameCount % 15 == 0) say(getString(R.string.measure_track_on, track.frameCount), stay = true)
+            }
         }
         setUpTouch()
         shutter.setOnClickListener { if (measureMode) freezeForMeasuring() else press() }
@@ -202,6 +212,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
         resumed = false
         cancelCountdown()
         stopAiming()
+        stopTrack()
         ready = false
         orientation.disable()
         engine.close()
@@ -212,6 +223,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
     }
 
     override fun onDestroy() {
+        track.release()
         engine.release()
         super.onDestroy()
     }
@@ -317,6 +329,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
 
     private fun leaveMeasuring() {
         if (!measureMode) return
+        stopTrack()
         measureMode = false
         stopAiming()
         measure.unfreeze()
@@ -428,6 +441,10 @@ class MainActivity : Activity(), CameraEngine.Listener {
                 showAim()
             })
             addToBar(barButton(getString(R.string.measure_photo)) { freezeForMeasuring() })
+            addToBar(barButton(getString(if (track.running) R.string.measure_track_stop else R.string.measure_track), lit = track.running) {
+                if (track.running) stopTrack() else startTrack()
+                showMeasureBar()
+            })
         } else {
             addToBar(barButton(measure.reference.label, lit = true) {
                 val all = com.anycam.app.core.Measure.Reference.values()
@@ -443,6 +460,33 @@ class MainActivity : Activity(), CameraEngine.Listener {
                 startAiming()
                 showMeasureBar()
             })
+        }
+    }
+
+    /** The 3D test: viewfinder frames and motion sensors recorded for checking motion tracking off the phone. */
+    private fun startTrack() {
+        if (track.running || viewfinder.width == 0) return
+        try {
+            trackFrame = android.graphics.Bitmap.createBitmap(480, 480 * viewfinder.height / viewfinder.width, android.graphics.Bitmap.Config.ARGB_8888)
+            track.start(engine.cameraCharacteristics, previewSize, viewfinder.width, viewfinder.height, 480, 480 * viewfinder.height / viewfinder.width)
+            engine.frameLog = { t, f, e, k, d -> track.frameInfo(t, f, e, k, d) }
+            engine.holdFocus(true)
+            stopAiming()
+        } catch (e: Exception) {
+            say(e.message ?: getString(R.string.not_saved))
+        }
+    }
+
+    private fun stopTrack() {
+        if (!track.running) return
+        engine.frameLog = null
+        engine.holdFocus(false)
+        track.stop { uri, seconds ->
+            runOnUiThread {
+                val frames = track.frameCount
+                if (uri == null) say(getString(R.string.not_saved)) else { trackCount++; say(getString(R.string.measure_track_saved, frames, seconds)) }
+                if (measureMode && measure.photo == null && resumed) startAiming()
+            }
         }
     }
 
@@ -638,6 +682,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
     override fun onOpened(info: CameraInfo, previewSize: Size, photoSize: Size) {
         this.info = info
         this.photoSize = photoSize
+        this.previewSize = previewSize
         ev = 0
         zoom = zoom.coerceIn(info.minZoom, info.maxZoom)
         // Shown upright: the sensor's long side runs down the screen.
@@ -924,6 +969,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
         @Volatile var lastFromSensor = false
         @Volatile var videoCount = 0
         @Volatile var measureCount = 0
+        @Volatile var trackCount = 0
         /** Video in the row of modes (not one of Android's extension numbers, which start at 0). */
         private const val VIDEO = -1
         private const val MEASURE = -2
