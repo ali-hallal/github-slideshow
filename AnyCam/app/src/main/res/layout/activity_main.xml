@@ -22,6 +22,11 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
 
+        <com.anycam.app.ui.MeasureView
+            android:id="@+id/measure"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
         <View
             android:id="@+id/flash"
             android:layout_width="match_parent"
@@ -124,6 +129,16 @@
             android:layout_height="wrap_content"
             android:layout_gravity="center_horizontal"
             android:orientation="horizontal" />
+
+        <!-- Measuring tools (Measure mode only). -->
+        <LinearLayout
+            android:id="@+id/measureBar"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginTop="8dp"
+            android:orientation="horizontal"
+            android:visibility="gone" />
 
         <!-- Ways to make the photo: AnyCam's own merge, and whatever the phone maker offers other apps. -->
         <LinearLayout

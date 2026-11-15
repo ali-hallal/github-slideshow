@@ -52,6 +52,16 @@ class MainActivity : Activity(), CameraEngine.Listener {
     private lateinit var modeRow: LinearLayout
     private lateinit var flash: View
     private lateinit var timerButton: TextView
+    private lateinit var measure: MeasureView
+    private lateinit var measureBar: LinearLayout
+    /** Measure mode, and what is being measured by aiming. */
+    private var measureMode = false
+    private var cameraHeightCm = 140
+    private var baseDistance: Double? = null
+    private var startPoint: DoubleArray? = null
+    private var aimDown = Double.NaN
+    private var aimHeading = 0.0
+    private lateinit var sensors: android.hardware.SensorManager
     private lateinit var gridButton: TextView
 
     private lateinit var engine: CameraEngine
@@ -99,6 +109,11 @@ class MainActivity : Activity(), CameraEngine.Listener {
         flash = findViewById(R.id.flash)
         timerButton = findViewById(R.id.timer)
         gridButton = findViewById(R.id.grid)
+        measure = findViewById(R.id.measure)
+        measureBar = findViewById(R.id.measureBar)
+        sensors = getSystemService(android.hardware.SensorManager::class.java)
+        try { cameraHeightCm = getPreferences(MODE_PRIVATE).getInt("cameraHeight", 140) } catch (_: Exception) {}
+        measure.onChange = { showPhotoMeasures() }
         try {
             val prefs = getPreferences(MODE_PRIVATE)
             timerSeconds = prefs.getInt("timer", 0)
@@ -126,7 +141,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
             override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
         }
         setUpTouch()
-        shutter.setOnClickListener { press() }
+        shutter.setOnClickListener { if (measureMode) freezeForMeasuring() else press() }
         switchButton.setOnClickListener {
             if (cameras.size < 2 || taking || engine.recording) return@setOnClickListener
             cameraIndex = (cameraIndex + 1) % cameras.size
@@ -186,6 +201,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
     override fun onPause() {
         resumed = false
         cancelCountdown()
+        stopAiming()
         ready = false
         orientation.disable()
         engine.close()
@@ -211,7 +227,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
         }
         ready = false
         if (extension != null && extension !in camera.extensions) extension = null
-        engine.open(camera.id, viewfinder.surfaceTexture ?: return, if (videoMode) null else extension, forVideo = videoMode)
+        engine.open(camera.id, viewfinder.surfaceTexture ?: return, if (videoMode || measureMode) null else extension, forVideo = videoMode)
     }
 
     // ------------------------------------------------------------------ touch
@@ -284,10 +300,217 @@ class MainActivity : Activity(), CameraEngine.Listener {
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
-            if (event.repeatCount == 0) press()
+            if (event.repeatCount == 0) { if (measureMode) freezeForMeasuring() else press() }
             return true
         }
         return super.onKeyDown(keyCode, event)
+    }
+
+    // ------------------------------------------------------------------ measuring
+
+    private fun enterMeasuring() {
+        measureMode = true
+        measure.unfreeze()
+        startAiming()
+        showMeasureBar()
+    }
+
+    private fun leaveMeasuring() {
+        if (!measureMode) return
+        measureMode = false
+        stopAiming()
+        measure.unfreeze()
+        measure.aiming = false
+        measureBar.visibility = View.GONE
+        status.visibility = View.INVISIBLE
+    }
+
+    private val tilt = object : android.hardware.SensorEventListener {
+        private val r = FloatArray(9)
+        private var lastShown = 0L
+        override fun onSensorChanged(e: android.hardware.SensorEvent) {
+            if (e.sensor.type == android.hardware.Sensor.TYPE_ACCELEROMETER) {
+                // Tilt only (no heading): from which way gravity pulls.
+                val (gx, gy, gz) = Triple(e.values[0].toDouble(), e.values[1].toDouble(), e.values[2].toDouble())
+                val g = kotlin.math.sqrt(gx * gx + gy * gy + gz * gz).coerceAtLeast(1e-6)
+                aimDown = kotlin.math.asin((gz / g).coerceIn(-1.0, 1.0))
+                aimHeading = 0.0
+            } else {
+                android.hardware.SensorManager.getRotationMatrixFromVector(r, e.values)
+                val a = com.anycam.app.core.Measure.Aim.angles(r)
+                aimDown = a[0]
+                aimHeading = a[1]
+            }
+            val now = System.currentTimeMillis()
+            if (now - lastShown > 150) {
+                lastShown = now
+                showAim()
+            }
+        }
+
+        override fun onAccuracyChanged(sensor: android.hardware.Sensor?, accuracy: Int) = Unit
+    }
+
+    private fun startAiming() {
+        val sensor = sensors.getDefaultSensor(android.hardware.Sensor.TYPE_GAME_ROTATION_VECTOR)
+            ?: sensors.getDefaultSensor(android.hardware.Sensor.TYPE_ROTATION_VECTOR)
+            ?: sensors.getDefaultSensor(android.hardware.Sensor.TYPE_ACCELEROMETER)
+        if (sensor == null) {
+            say(getString(R.string.measure_no_sensor), stay = true)
+            return
+        }
+        measure.aiming = true
+        sensors.registerListener(tilt, sensor, android.hardware.SensorManager.SENSOR_DELAY_GAME)
+    }
+
+    private fun stopAiming() {
+        sensors.unregisterListener(tilt)
+    }
+
+    private fun showAim() {
+        if (!measureMode || measure.photo != null || aimDown.isNaN()) return
+        val h = cameraHeightCm / 100.0
+        val base = baseDistance
+        val start = startPoint
+        val text = when {
+            base != null -> getString(R.string.measure_height_at, com.anycam.app.core.Measure.label(com.anycam.app.core.Measure.Aim.heightAt(h, base, aimDown) * 1000), com.anycam.app.core.Measure.label(base * 1000))
+            start != null -> com.anycam.app.core.Measure.Aim.floorPoint(h, aimDown, aimHeading)?.let {
+                getString(R.string.measure_from_start, com.anycam.app.core.Measure.label(com.anycam.app.core.Measure.Aim.length(start, it) * 1000))
+            } ?: getString(R.string.measure_aim)
+            else -> com.anycam.app.core.Measure.Aim.distance(h, aimDown)?.let { getString(R.string.measure_floor, com.anycam.app.core.Measure.label(it * 1000)) }
+                ?: getString(R.string.measure_aim)
+        }
+        say(text, stay = true)
+    }
+
+    private fun barButton(text: String, lit: Boolean = false, action: () -> Unit): TextView {
+        val density = resources.displayMetrics.density
+        return TextView(this).apply {
+            this.text = text
+            textSize = 13f
+            gravity = Gravity.CENTER
+            typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+            setTextColor(getColor(if (lit) R.color.accent else R.color.white))
+            setBackgroundResource(R.drawable.chip_bg)
+            setPadding((12 * density).toInt(), 0, (12 * density).toInt(), 0)
+            setOnClickListener {
+                it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                action()
+            }
+        }
+    }
+
+    private fun addToBar(v: View) {
+        val density = resources.displayMetrics.density
+        measureBar.addView(v, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, (34 * density).toInt()).apply {
+            setMargins((3 * density).toInt(), 0, (3 * density).toInt(), 0)
+        })
+    }
+
+    /** The tools for what is being measured: by aiming (live), or on a frozen photo. */
+    private fun showMeasureBar() {
+        measureBar.removeAllViews()
+        measureBar.visibility = if (measureMode) View.VISIBLE else View.GONE
+        if (!measureMode) return
+        if (measure.photo == null) {
+            addToBar(barButton(getString(R.string.measure_height, com.anycam.app.core.Measure.label(cameraHeightCm * 10.0))) { askCameraHeight() })
+            addToBar(barButton(getString(R.string.measure_base), lit = baseDistance != null) {
+                val d = com.anycam.app.core.Measure.Aim.distance(cameraHeightCm / 100.0, aimDown)
+                baseDistance = if (baseDistance == null) d else null
+                startPoint = null
+                showMeasureBar()
+                showAim()
+            })
+            addToBar(barButton(getString(R.string.measure_start), lit = startPoint != null) {
+                startPoint = if (startPoint == null) com.anycam.app.core.Measure.Aim.floorPoint(cameraHeightCm / 100.0, aimDown, aimHeading) else null
+                baseDistance = null
+                showMeasureBar()
+                showAim()
+            })
+            addToBar(barButton(getString(R.string.measure_photo)) { freezeForMeasuring() })
+        } else {
+            addToBar(barButton(measure.reference.label, lit = true) {
+                val all = com.anycam.app.core.Measure.Reference.values()
+                measure.reference = all[(measure.reference.ordinal + 1) % all.size]
+                showMeasureBar()
+                showPhotoMeasures()
+            })
+            addToBar(barButton(getString(R.string.measure_add)) { measure.addLine() })
+            addToBar(barButton(getString(R.string.measure_save)) { saveMeasurement() })
+            addToBar(barButton(getString(R.string.measure_back)) {
+                measure.unfreeze()
+                measure.aiming = true
+                startAiming()
+                showMeasureBar()
+            })
+        }
+    }
+
+    private fun askCameraHeight() {
+        val input = android.widget.EditText(this).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setText(cameraHeightCm.toString())
+            selectAll()
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle(R.string.measure_height_title)
+            .setMessage(R.string.measure_height_hint)
+            .setView(input)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                input.text.toString().toIntOrNull()?.takeIf { it in 20..300 }?.let {
+                    cameraHeightCm = it
+                    getPreferences(MODE_PRIVATE).edit().putInt("cameraHeight", it).apply()
+                    baseDistance = null
+                    startPoint = null
+                    showMeasureBar()
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /** The viewfinder's picture, held still to measure on. */
+    private fun freezeForMeasuring() {
+        if (!measureMode || measure.photo != null) return
+        val bmp = viewfinder.bitmap ?: return
+        shutter.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+        onShutter()
+        stopAiming()
+        measure.freeze(bmp)
+        showMeasureBar()
+        showPhotoMeasures()
+    }
+
+    private fun showPhotoMeasures() {
+        if (measure.photo == null) return
+        say(getString(R.string.measure_corners, measure.reference.label.lowercase(Locale.getDefault())), stay = true)
+    }
+
+    private fun saveMeasurement() {
+        val bmp = measure.render() ?: return
+        Thread {
+            val uri = try {
+                val values = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, "ANYCAM_MEASURE_" + java.text.SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(java.util.Date()) + ".jpg")
+                    put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                    put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/AnyCam")
+                }
+                contentResolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)?.also { u ->
+                    contentResolver.openOutputStream(u)?.use { bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 92, it) }
+                }
+            } catch (e: Exception) {
+                null
+            }
+            runOnUiThread {
+                if (uri == null) say(getString(R.string.not_saved)) else {
+                    lastPhoto = uri
+                    lastIsVideo = false
+                    measureCount++
+                    say(getString(R.string.measure_saved))
+                    showThumbnail(uri)
+                }
+            }
+        }.start()
     }
 
     // ------------------------------------------------------------------ photos
@@ -422,12 +645,13 @@ class MainActivity : Activity(), CameraEngine.Listener {
         buildZoomRow(info)
         buildModeRow(info)
         shutter.video = videoMode
+        showMeasureBar()
         shutter.recording = false
         showTimerAndGrid()
         if (videoMode) engine.videoSize?.let { say(getString(R.string.video_size, if (it.height >= 2160) "4K" else "${it.height}p")) }
         showTorch()
         switchButton.visibility = if (cameras.size > 1) View.VISIBLE else View.INVISIBLE
-        if (!videoMode) status.visibility = View.INVISIBLE
+        if (!videoMode && !measureMode) status.visibility = View.INVISIBLE
         ready = true
     }
 
@@ -596,8 +820,12 @@ class MainActivity : Activity(), CameraEngine.Listener {
         modeRow.removeAllViews()
         modeRow.visibility = View.VISIBLE
         val density = resources.displayMetrics.density
-        for (mode in listOf<Int?>(null, VIDEO) + cam.extensions.sortedBy { MODE_ORDER.indexOf(it).let { i -> if (i < 0) 99 else i } }) {
-            val on = if (videoMode) mode == VIDEO else mode == extension
+        for (mode in listOf<Int?>(null, VIDEO, MEASURE) + cam.extensions.sortedBy { MODE_ORDER.indexOf(it).let { i -> if (i < 0) 99 else i } }) {
+            val on = when {
+                videoMode -> mode == VIDEO
+                measureMode -> mode == MEASURE
+                else -> mode == extension
+            }
             val chip = TextView(this).apply {
                 text = modeName(mode)
                 textSize = 14f
@@ -610,7 +838,12 @@ class MainActivity : Activity(), CameraEngine.Listener {
                     if (taking || engine.recording || on) return@setOnClickListener
                     it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
                     cancelCountdown()
-                    if (mode == VIDEO) {
+                    leaveMeasuring()
+                    if (mode == MEASURE) {
+                        videoMode = false
+                        extension = null
+                        enterMeasuring()
+                    } else if (mode == VIDEO) {
                         videoMode = true
                         extension = null
                         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED && !askedAudio) {
@@ -634,6 +867,7 @@ class MainActivity : Activity(), CameraEngine.Listener {
     private fun modeName(mode: Int?): String = when (mode) {
         null -> getString(R.string.mode_photo)
         VIDEO -> getString(R.string.mode_video)
+        MEASURE -> getString(R.string.mode_measure)
         EXT_NIGHT -> getString(R.string.mode_night)
         EXT_HDR -> getString(R.string.mode_hdr)
         EXT_BOKEH -> getString(R.string.mode_portrait)
@@ -689,8 +923,10 @@ class MainActivity : Activity(), CameraEngine.Listener {
         @Volatile var lastMerged = 0
         @Volatile var lastFromSensor = false
         @Volatile var videoCount = 0
+        @Volatile var measureCount = 0
         /** Video in the row of modes (not one of Android's extension numbers, which start at 0). */
         private const val VIDEO = -1
+        private const val MEASURE = -2
         private const val AUDIO_REQUEST = 2
 
         // Android's names for the kinds of processing a phone maker can offer other apps.

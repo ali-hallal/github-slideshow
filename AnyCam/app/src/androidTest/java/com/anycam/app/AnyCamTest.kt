@@ -119,6 +119,27 @@ class AnyCamTest {
         waitFor("photo after video", 40_000) { MainActivity.photoCount > taken }
     }
 
+    @Test
+    fun measuringOnAPhotoIsSaved() {
+        waitFor("camera ready") { MainActivity.ready }
+        onView(withText("Measure")).perform(click())
+        SystemClock.sleep(300)
+        waitFor("measure camera ready") { MainActivity.ready }
+        SystemClock.sleep(1500)
+        screen("09_measure_aiming")
+        onView(withText("On a photo")).perform(click())
+        SystemClock.sleep(500)
+        onView(withText("+ Line")).perform(click())
+        screen("10_measure_photo")
+        val before = MainActivity.measureCount
+        onView(withText("Save")).perform(click())
+        waitFor("measurement saved", 15_000) { MainActivity.measureCount > before }
+        onView(withText("Back")).perform(click())
+        onView(withText("Photo")).perform(click())
+        SystemClock.sleep(300)
+        waitFor("photo camera ready") { MainActivity.ready }
+    }
+
     /** The compiled merge is there on the phone and makes exactly the photo the Kotlin one does, faster. */
     @Test
     fun theCompiledMergeMatchesTheReference() {

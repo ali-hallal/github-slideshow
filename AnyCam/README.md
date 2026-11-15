@@ -23,6 +23,15 @@ features, no hidden settings, no libraries, no network.
   1/10 s without), and a very dark merged photo is brightened on the raw light, up to 3 stops.
 - **Video**, 4K where the phone's camera and encoder take it (full HD otherwise), 30 frames a
   second, with the phone's own video steadying where it offers it, and sound. Saved to `Movies/AnyCam`.
+- **Measure.** Two ways that work on every phone, nothing to install:
+  - *On a photo, against a known object:* lay a bank card (or an A4 or Letter sheet) on or
+    beside what you measure, put the four handles on its corners, and drag lines anywhere on
+    the same flat surface. Seen at an angle is fine: the card's corners fix the perspective.
+    About 1–2 % when the corners are marked carefully (a magnifier helps). Saved with the
+    lengths drawn on.
+  - *Live, by aiming:* with the camera's height above the floor set once, aim the cross at a
+    point on the floor to get its distance; "Mark base" then gives the height of whatever the
+    cross is on; "Mark start" gives lengths along the floor. A few per cent, on level floors.
 - **Self-timer** (3 or 10 s) and a **grid** of thirds, remembered between uses.
 - **Your phone's own processing, where it offers it.** Android lets a phone maker offer its own
   night, HDR and portrait processing to other apps ("camera extensions"). AnyCam asks the phone

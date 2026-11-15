@@ -115,6 +115,44 @@ class CoreTest {
     }
 
     @Test
+    fun measuringAgainstACardAndByAiming() {
+        // A card seen at an angle: its corners in a picture made by a known perspective mapping.
+        val truth = doubleArrayOf(1.6, 0.2, 40.0, 0.1, 1.4, 60.0, 0.0006, 0.0004) // surface mm -> picture
+        fun project(u: Double, v: Double): DoubleArray {
+            val d = truth[6] * u + truth[7] * v + 1
+            return doubleArrayOf((truth[0] * u + truth[1] * v + truth[2]) / d, (truth[3] * u + truth[4] * v + truth[5]) / d)
+        }
+        val ref = Measure.Reference.CARD
+        val corners = listOf(0.0 to 0.0, ref.wMm to 0.0, ref.wMm to ref.hMm, 0.0 to ref.hMm).flatMap { (u, v) -> project(u, v).toList() }.toDoubleArray()
+        val plane = Measure.Plane(corners, ref)
+        // A 300 mm line elsewhere on the same surface, seen foreshortened, measures 300 mm.
+        val a = project(-50.0, 120.0)
+        val b = project(250.0, 120.0)
+        assertEquals(300.0, plane.distance(a[0], a[1], b[0], b[1]), 0.01)
+        // The same from corners marked starting on a short side, going the other way round.
+        val other = doubleArrayOf(corners[6], corners[7], corners[0], corners[1], corners[2], corners[3], corners[4], corners[5])
+        assertEquals(300.0, Measure.Plane(other, ref).distance(a[0], a[1], b[0], b[1]), 0.01)
+        assertEquals("30.0 cm", Measure.label(300.0))
+        assertEquals("1.25 m", Measure.label(1250.0))
+
+        // Aiming: 1.5 m up, 45° down: 1.5 m away; a point level with the camera is 1.5 m high.
+        assertEquals(1.5, Measure.Aim.distance(1.5, Math.PI / 4)!!, 1e-9)
+        assertNull(Measure.Aim.distance(1.5, -0.1))
+        assertEquals(1.5, Measure.Aim.heightAt(1.5, 2.0, 0.0), 1e-9)
+        assertEquals(0.0, Measure.Aim.heightAt(1.5, 1.5, Math.PI / 4), 1e-9)
+        // Two floor points 1.5 m away, 90° apart: 1.5·√2 between them.
+        val p1 = Measure.Aim.floorPoint(1.5, Math.PI / 4, 0.0)!!
+        val p2 = Measure.Aim.floorPoint(1.5, Math.PI / 4, Math.PI / 2)!!
+        assertEquals(1.5 * Math.sqrt(2.0), Measure.Aim.length(p1, p2), 1e-9)
+        // Orientation: phone upright facing north (identity-like): camera looks at the horizon.
+        val upright = floatArrayOf(1f, 0f, 0f, 0f, 0f, -1f, 0f, 1f, 0f) // device y up, device -z north
+        val ang = Measure.Aim.angles(upright)
+        assertEquals(0.0, ang[0], 1e-6)
+        // Lying flat, screen up: the camera looks straight down.
+        assertEquals(Math.PI / 2, Measure.Aim.angles(floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f))[0], 1e-6)
+    }
+
+    @Test
     fun zoomedShotsAreCutFromTheSensorAndEnlarged() {
         // The middle of the frame, at even offsets (the filter pattern stays where it was).
         val c = Crop.forZoom(4000, 3000, 2.5f)
