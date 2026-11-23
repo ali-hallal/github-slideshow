@@ -1,0 +1,100 @@
+name: StarSteps Android build
+
+on:
+  push:
+    paths:
+      - "StarSteps/**"
+      - ".github/workflows/starsteps-android.yml"
+  pull_request:
+    paths:
+      - "StarSteps/**"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: StarSteps
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # The rules are plain Kotlin: their tests run here in seconds, no phone needed.
+      - name: Test the rules
+        run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
+
+      - name: Build the APKs
+        run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace
+
+      # The one to install.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StarSteps-apk
+          path: StarSteps/app/build/outputs/apk/release/*.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StarSteps-debug-apk
+          path: StarSteps/app/build/outputs/apk/debug/*.apk
+
+  emulator-test:
+    # Runs the app on an Android emulator the way a parent uses it, with screenshots.
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: StarSteps
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Build app and test APKs
+        run: ./gradlew assembleDebug assembleDebugAndroidTest --no-daemon
+
+      - name: Run tests on emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          working-directory: StarSteps
+          script: |
+            adb shell settings put global hide_error_dialogs 1 || true
+            adb shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS || true
+            adb logcat -c
+            ./gradlew connectedDebugAndroidTest --no-daemon || touch tests-failed
+            adb logcat -d -v time StarStepsTest:V AndroidRuntime:E '*:S' | tail -200
+            adb pull /sdcard/Download/starsteps-screens screens || true
+            for f in screens/*.jpg; do echo "=== SCREEN $(basename $f)"; base64 -w 2000 "$f"; echo "=== END"; done
+            test ! -f tests-failed
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: StarSteps-emulator-test-report
+          path: |
+            StarSteps/app/build/reports/androidTests/
+            StarSteps/screens/

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- A star climbing three steps. -->
+    <path android:fillColor="#FFFFFFFF" android:pathData="M28,78h17v-9h17v-9h17v27H28z" />
+    <path android:fillColor="#FFF2A922" android:pathData="M54,24l4.7,9.6 10.6,1.5 -7.7,7.5 1.8,10.5L54,48.1l-9.4,5 1.8,-10.5 -7.7,-7.5 10.6,-1.5z" />
+</vector>
