@@ -75,6 +75,7 @@ class CoreTest {
         assertEquals(listOf(0, 0, 0, 1, 1, 1, 1).map { it * good.value }, Ledger.week(f, c.id, today))
         assertTrue(Ledger.mix(f, c.id, today).healthy)
         Ledger.challenge(f, bad, 0, today)
+        assertTrue(Ledger.mix(f, c.id, today).healthy) // one problem alone: no hint yet
         Ledger.challenge(f, bad, 0, today)
         assertFalse(Ledger.mix(f, c.id, today).healthy) // 4 good moments for 2 problems
         assertEquals(Day(2026, 3, 1), Day(2026, 2, 28).plus(1))

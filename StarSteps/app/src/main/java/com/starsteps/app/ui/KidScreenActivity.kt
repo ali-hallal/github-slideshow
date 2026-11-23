@@ -5,8 +5,6 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
-import android.view.WindowInsets
-import android.view.WindowInsetsController
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
@@ -30,15 +28,7 @@ class KidScreenActivity : BaseActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         child = family.child(intent.getLongExtra("child", -1)) ?: run { finish(); return }
-        hideBars()
         build()
-    }
-
-    private fun hideBars() {
-        window.insetsController?.let {
-            it.hide(WindowInsets.Type.systemBars())
-            it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        }
     }
 
     @Deprecated("Back is ignored: the child stays on their page")
@@ -124,8 +114,16 @@ class KidScreenActivity : BaseActivity() {
         }
         root.add(exit, w = LinearLayout.LayoutParams.WRAP_CONTENT, top = 28)
 
+        // The page fills the screen behind the status bar (hiding the bars makes Android cover the
+        // top of the page with a notice the first time).
         val frame = FrameLayout(this).apply { background = bg }
         frame.addView(scrolling(root))
+        frame.padForBars()
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.TRANSPARENT
+        window.insetsController?.setSystemBarsAppearance(
+            if (dark) 0 else android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS,
+            android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS)
         setContentView(frame)
     }
 

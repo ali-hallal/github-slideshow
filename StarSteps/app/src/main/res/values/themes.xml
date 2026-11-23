@@ -11,6 +11,5 @@
     </style>
 
     <style name="Theme.StarSteps.Kids" parent="Theme.StarSteps">
-        <item name="android:windowFullscreen">true</item>
     </style>
 </resources>

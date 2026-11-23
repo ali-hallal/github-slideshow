@@ -125,8 +125,10 @@ class StarStepsTest {
             val f = Store.get(context)
             f.settings.language = "fr"
             val t = today()
+            val conf = android.content.res.Configuration(context.resources.configuration).apply { setLocale(java.util.Locale("fr")) }
+            val fr = context.createConfigurationContext(conf)
             Presets.addChild(f, "Léa", t.year - 7, 3, "🦊", 0xFFF06292.toInt(), t) { key ->
-                context.resources.getIdentifier(key, "string", context.packageName).let { if (it != 0) context.getString(it) else key }
+                fr.resources.getIdentifier(key, "string", context.packageName).let { if (it != 0) fr.getString(it) else key }
             }
             Store.save(context)
         }

@@ -77,7 +77,8 @@ object Ledger {
 
     /** Good moments and problems over the last [days] days, and whether the balance between them is healthy. */
     class Mix(val good: Int, val problems: Int) {
-        val healthy get() = problems == 0 || good >= problems * HEALTHY_RATIO
+        /** One problem alone says nothing yet; from two on, praise should clearly outweigh them. */
+        val healthy get() = problems < 2 || good >= problems * HEALTHY_RATIO
     }
 
     fun mix(f: Family, child: Long, today: Day, days: Int = 7): Mix {
