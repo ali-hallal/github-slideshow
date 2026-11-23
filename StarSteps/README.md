@@ -24,6 +24,11 @@ adapts to each child's age. English and French. Nothing leaves the phone.
   child is saving for.
 - **Show to the child**: a full-screen page of their day, their stars and their goal. Leaving
   it needs a long press, and the parent code if one is set.
+- **The rocket** (ages 2–12, on the children's page): good moments give paint, and the child
+  taps the rocket's eight parts to colour them; the whole rocket at the day's target, and then
+  it blasts off. The colour is the day's score: green (no problems, or 3 good moments or more
+  for each), orange (a mixed day), red (more problems than good moments). A blank rocket every
+  morning.
 - **History** of everything, and backups to a file you keep.
 
 ## The fairness rules (the same for every child)

@@ -142,4 +142,11 @@
     <string name="prize_outing_friends">Sortie entre amis</string>
     <string name="prize_money_10">10 d\'argent de poche</string>
     <string name="prize_choose_weekend">Choisir l\'activité du week-end</string>
+    <string name="rocket_title">Ma fusée</string>
+    <string name="rocket_none">Fais quelque chose de bien pour avoir de la peinture !</string>
+    <string name="rocket_paint">Touche la fusée pour la colorier : encore %1$d</string>
+    <string name="rocket_more">Gagne plus de %1$s pour colorier le reste</string>
+    <string name="rocket_done">Décollage ! 🚀</string>
+    <string name="rocket_orange">Orange aujourd\'hui : encore quelques bons moments pour la rendre verte !</string>
+    <string name="rocket_red">Rouge aujourd\'hui : les bons moments peuvent la rendre verte !</string>
 </resources>

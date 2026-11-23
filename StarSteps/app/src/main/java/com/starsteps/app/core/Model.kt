@@ -44,6 +44,9 @@ data class Child(
     var colour: Int,
     /** The reward the child is saving towards (shown big on their screen), or null. */
     var goalRewardId: Long? = null,
+    /** The rocket the child colours in: the day it belongs to, and which parts are coloured (one bit each). */
+    var rocketDay: Day? = null,
+    var rocketParts: Int = 0,
 ) {
     fun age(today: Day): Int {
         var a = today.year - birthYear

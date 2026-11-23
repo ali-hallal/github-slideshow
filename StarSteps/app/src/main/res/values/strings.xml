@@ -143,4 +143,11 @@
     <string name="prize_outing_friends">Outing with friends</string>
     <string name="prize_money_10">10 of pocket money</string>
     <string name="prize_choose_weekend">Choose the weekend activity</string>
+    <string name="rocket_title">My rocket</string>
+    <string name="rocket_none">Do something good to get paint for your rocket!</string>
+    <string name="rocket_paint">Tap the rocket to colour it: %1$d to colour</string>
+    <string name="rocket_more">Earn more %1$s to colour the rest</string>
+    <string name="rocket_done">Blast off! 🚀</string>
+    <string name="rocket_orange">Orange today: a few more good moments make it green!</string>
+    <string name="rocket_red">Red today: good moments can make it green!</string>
 </resources>

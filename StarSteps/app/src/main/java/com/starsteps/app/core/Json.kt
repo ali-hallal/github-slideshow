@@ -143,7 +143,7 @@ object Storage {
         "version" to VERSION,
         "settings" to mapOf("pin" to f.settings.pin, "language" to f.settings.language),
         "children" to f.children.map { mapOf("id" to it.id, "name" to it.name, "birthYear" to it.birthYear, "birthMonth" to it.birthMonth,
-            "avatar" to it.avatar, "colour" to it.colour, "goal" to it.goalRewardId) },
+            "avatar" to it.avatar, "colour" to it.colour, "goal" to it.goalRewardId, "rocketDay" to it.rocketDay?.toString(), "rocketParts" to it.rocketParts) },
         "behaviours" to f.behaviours.map { mapOf("id" to it.id, "child" to it.childId, "name" to it.name, "emoji" to it.emoji,
             "kind" to it.kind.name, "value" to it.value, "consequence" to it.consequence) },
         "rewards" to f.rewards.map { mapOf("id" to it.id, "child" to it.childId, "name" to it.name, "emoji" to it.emoji, "cost" to it.cost) },
@@ -162,7 +162,8 @@ object Storage {
         val f = Family()
         (root["settings"] as? Map<String, Any?>)?.let { f.settings = Settings(it.str("pin"), it.str("language")) }
         for (m in list("children")) f.children += Child(m.long("id"), m.str("name"), m.int("birthYear"), m.int("birthMonth").coerceIn(1, 12),
-            m.str("avatar"), m.int("colour"), (m["goal"] as? Number)?.toLong())
+            m.str("avatar"), m.int("colour"), (m["goal"] as? Number)?.toLong(),
+            (m["rocketDay"] as? String)?.let { Day.parse(it) }, m.int("rocketParts"))
         for (m in list("behaviours")) f.behaviours += Behaviour(m.long("id"), m.long("child"), m.str("name"), m.str("emoji"),
             Kind.valueOf(m.str("kind")), m.int("value"), m.str("consequence"))
         for (m in list("rewards")) f.rewards += Reward(m.long("id"), m.long("child"), m.str("name"), m.str("emoji"), m.int("cost"))

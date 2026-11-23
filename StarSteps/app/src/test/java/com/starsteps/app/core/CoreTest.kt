@@ -114,4 +114,37 @@ class CoreTest {
         }
         assertEquals(emptySet<String>(), en - fr - setOf("app_name"))
     }
+
+    @Test
+    fun theRocketIsColouredWithTodaysScore() {
+        val (f, c) = family(7) // target 8 stars a day
+        val homework = f.behavioursOf(c.id, Kind.GOOD).first { it.name == "[good_homework]" } // 3 stars
+        val hitting = f.behavioursOf(c.id, Kind.CHALLENGE).first()
+        assertEquals(Rocket.Mood.NONE, Rocket.mood(f, c.id, today))
+        assertEquals(0, Rocket.allowed(f, c, today))
+        assertFalse(Rocket.paint(f, c, today, 0))
+        // 3 of 8 stars: 3 of 8 parts.
+        Ledger.earn(f, homework, 0, today)
+        assertEquals(Rocket.Mood.GREEN, Rocket.mood(f, c.id, today))
+        assertEquals(3, Rocket.allowed(f, c, today))
+        assertTrue(Rocket.paint(f, c, today, 0))
+        assertFalse(Rocket.paint(f, c, today, 0)) // already coloured
+        assertTrue(Rocket.paint(f, c, today, 1))
+        assertTrue(Rocket.paint(f, c, today, 2))
+        assertFalse(Rocket.paint(f, c, today, 3)) // no paint left
+        // A problem: one good moment for one problem is orange; more problems, red.
+        Ledger.challenge(f, hitting, 0, today)
+        assertEquals(Rocket.Mood.ORANGE, Rocket.mood(f, c.id, today))
+        Ledger.challenge(f, hitting, 0, today)
+        assertEquals(Rocket.Mood.RED, Rocket.mood(f, c.id, today))
+        // Enough good moments make it green again.
+        repeat(5) { Ledger.earn(f, homework, 0, today) }
+        assertEquals(Rocket.Mood.GREEN, Rocket.mood(f, c.id, today))
+        for (p in 0 until Rocket.PARTS) Rocket.paint(f, c, today, p)
+        assertTrue(Rocket.complete(c, today))
+        // Tomorrow: a blank rocket.
+        assertEquals(0, Rocket.coloured(c, today.plus(1)))
+        // Kept with the rest.
+        assertEquals(c.rocketParts, Storage.decode(Storage.encode(f)).children[0].rocketParts)
+    }
 }

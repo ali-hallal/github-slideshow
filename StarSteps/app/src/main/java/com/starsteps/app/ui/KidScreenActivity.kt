@@ -14,6 +14,7 @@ import com.starsteps.app.core.AgeGroup
 import com.starsteps.app.core.Child
 import com.starsteps.app.core.EntryType
 import com.starsteps.app.core.Ledger
+import com.starsteps.app.core.Rocket
 
 /**
  * What the child sees: the parent hands over the phone. Nothing can be changed here; going
@@ -65,6 +66,38 @@ class KidScreenActivity : BaseActivity() {
         } else {
             root.add(text("$todayEarned / ${g.dailyTarget} ${unitWord(g, 2)}", 22f, ink, bold = true).apply { gravity = Gravity.CENTER })
             root.add(bar(todayEarned.toFloat() / g.dailyTarget, if (dark) 0xFF4FC3F7.toInt() else 0xFFFFB300.toInt(), dark), top = 6)
+        }
+
+        // The rocket to colour in (teenagers get a calm page without it).
+        if (style != AgeGroup.Screen.CALM) {
+            root.add(text(getString(R.string.rocket_title), 15f, soft, bold = true).apply { gravity = Gravity.CENTER }, top = 22)
+            val caption = text("", 16f, ink, bold = true).apply { gravity = Gravity.CENTER }
+            val rocket = RocketView(this)
+            fun show() {
+                val mood = Rocket.mood(family, child.id, t)
+                val done = Rocket.coloured(child, t)
+                val allowed = Rocket.allowed(family, child, t)
+                rocket.show(mood, done, allowed)
+                val left = allowed - Rocket.count(done)
+                val lines = ArrayList<String>()
+                lines += when {
+                    Rocket.complete(child, t) -> getString(R.string.rocket_done)
+                    allowed == 0 -> getString(R.string.rocket_none)
+                    left > 0 -> getString(R.string.rocket_paint, left)
+                    else -> getString(R.string.rocket_more, unitWord(g, 2))
+                }
+                if (mood == Rocket.Mood.ORANGE) lines += getString(R.string.rocket_orange)
+                if (mood == Rocket.Mood.RED) lines += getString(R.string.rocket_red)
+                caption.text = lines.joinToString("\n")
+            }
+            rocket.onPaint = { part ->
+                val ok = Rocket.paint(family, child, t, part)
+                if (ok) { save(); show() }
+                ok
+            }
+            show()
+            root.add(rocket, top = 4)
+            root.add(caption, top = 4)
         }
 
         // What they did well today: the point of the page.

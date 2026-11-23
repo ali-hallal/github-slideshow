@@ -78,6 +78,12 @@ class StarStepsTest {
             onView(withContentDescription("Show Sam")).perform(scrollTo(), click())
             SystemClock.sleep(800)
             screen("08_kid_screen_child")
+            // Sam colours his rocket: 5 of 8 stars give 5 parts; orange, after one problem.
+            onView(withContentDescription("Rocket")).perform(scrollTo())
+            repeat(6) { InstrumentationRegistry.getInstrumentation().runOnMainSync { rocketOnScreen()?.paintNext() } }
+            SystemClock.sleep(400)
+            screen("09_rocket_coloured")
+            assertEquals(5, com.starsteps.app.core.Rocket.count(com.starsteps.app.core.Rocket.coloured(Store.get(context).children.single(), today())))
             onView(withContentDescription("Hold to go back")).perform(scrollTo(), longClick())
             SystemClock.sleep(500)
         }
@@ -98,6 +104,8 @@ class StarStepsTest {
                 ids += c.id
                 val good = f.behavioursOf(c.id, Kind.GOOD)
                 for (d in 0..5) for (b in good.take(1 + d % 3)) Ledger.earn(f, b, System.currentTimeMillis(), t.plus(-d))
+                // The little one had a very good day: enough stars for the whole rocket.
+                if (age == 4) repeat(4) { Ledger.earn(f, good[it + 1], System.currentTimeMillis(), t) }
             }
             Store.save(context)
         }
@@ -110,6 +118,13 @@ class StarStepsTest {
             ActivityScenario.launch<KidScreenActivity>(Intent(context, KidScreenActivity::class.java).putExtra("child", id)).use {
                 SystemClock.sleep(800)
                 screen("1${i}_kid_screen_age_${ages[i].first}")
+                // Every part the day's stars allow, coloured (the little one's good day: a rocket that blasts off).
+                repeat(8) { InstrumentationRegistry.getInstrumentation().runOnMainSync { rocketOnScreen()?.paintNext() } }
+                if (i < 2) {
+                    onView(withContentDescription("Rocket")).perform(scrollTo())
+                    SystemClock.sleep(900)
+                    screen("1${i}b_rocket_age_${ages[i].first}")
+                }
             }
         }
         ActivityScenario.launch(MainActivity::class.java).use {
@@ -140,6 +155,18 @@ class StarStepsTest {
             screen("21_child_french")
         }
         context.getSharedPreferences("starsteps", Context.MODE_PRIVATE).edit().putString("language", "en").commit()
+    }
+
+    /** The rocket on the children's page in front, if there is one. */
+    private fun rocketOnScreen(): com.starsteps.app.ui.RocketView? {
+        val activity = androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry.getInstance()
+            .getActivitiesInStage(androidx.test.runner.lifecycle.Stage.RESUMED).firstOrNull() ?: return null
+        fun find(v: android.view.View): com.starsteps.app.ui.RocketView? = when (v) {
+            is com.starsteps.app.ui.RocketView -> v
+            is android.view.ViewGroup -> (0 until v.childCount).firstNotNullOfOrNull { find(v.getChildAt(it)) }
+            else -> null
+        }
+        return find(activity.window.decorView)
     }
 
     private fun screen(name: String) {
