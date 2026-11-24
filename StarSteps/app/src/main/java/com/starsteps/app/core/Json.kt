@@ -141,7 +141,8 @@ object Storage {
     fun encode(f: Family): String = Json.write(mapOf(
         "app" to "StarSteps",
         "version" to VERSION,
-        "settings" to mapOf("pin" to f.settings.pin, "language" to f.settings.language),
+        "settings" to mapOf("pin" to f.settings.pin, "language" to f.settings.language,
+            "reminder" to f.settings.reminder, "reminderMinutes" to f.settings.reminderMinutes),
         "children" to f.children.map { mapOf("id" to it.id, "name" to it.name, "birthYear" to it.birthYear, "birthMonth" to it.birthMonth,
             "avatar" to it.avatar, "colour" to it.colour, "goal" to it.goalRewardId, "rocketDay" to it.rocketDay?.toString(), "rocketParts" to it.rocketParts) },
         "behaviours" to f.behaviours.map { mapOf("id" to it.id, "child" to it.childId, "name" to it.name, "emoji" to it.emoji,
@@ -160,7 +161,10 @@ object Storage {
         fun Map<String, Any?>.int(k: String) = (this[k] as? Number)?.toInt() ?: 0
         fun Map<String, Any?>.str(k: String) = this[k] as? String ?: ""
         val f = Family()
-        (root["settings"] as? Map<String, Any?>)?.let { f.settings = Settings(it.str("pin"), it.str("language")) }
+        (root["settings"] as? Map<String, Any?>)?.let {
+            f.settings = Settings(it.str("pin"), it.str("language"), it["reminder"] as? Boolean ?: true,
+                (it["reminderMinutes"] as? Number)?.toInt() ?: (19 * 60))
+        }
         for (m in list("children")) f.children += Child(m.long("id"), m.str("name"), m.int("birthYear"), m.int("birthMonth").coerceIn(1, 12),
             m.str("avatar"), m.int("colour"), (m["goal"] as? Number)?.toLong(),
             (m["rocketDay"] as? String)?.let { Day.parse(it) }, m.int("rocketParts"))

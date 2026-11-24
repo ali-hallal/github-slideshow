@@ -18,23 +18,29 @@ adapts to each child's age. English and French. Nothing leaves the phone.
   Everything suggested can be changed, removed or added to (hold an item).
 - **Well done**: one tap adds the stars (with Undo for a slip of the finger). 🎉 Bonus for a
   special effort.
+- **Not well done**: one tap takes points off (smaller amounts than the good ones, also with
+  Undo). The balance can go below zero; rewards are bought only from a positive balance.
 - **Problems** (Agreements for teens): one tap shows the consequence agreed in advance and
   applies it.
 - **Rewards** (Privileges for teens): bought with what was earned; one of them is the goal the
   child is saving for.
 - **Show to the child**: a full-screen page of their day, their stars and their goal. Leaving
   it needs a long press, and the parent code if one is set.
-- **The rocket** (ages 2–12, on the children's page): good moments give paint, and the child
+- **The rocket** (on the children's page): good moments give paint, and the child
   taps the rocket's eight parts to colour them; the whole rocket at the day's target, and then
   it blasts off. The colour is the day's score: green (no problems, or 3 good moments or more
-  for each), orange (a mixed day), red (more problems than good moments). A blank rocket every
+  for each), orange (a mixed day), red (more problems and "not well done" than good moments). A blank rocket every
   morning.
+- **This week** on each child's page: points, good moments and problems against the week
+  before, the best day, the behaviour noticed most.
+- **Evening reminder** (19:00 by default, or off, in Settings): a notification naming the
+  children with nothing noted yet that day.
 - **History** of everything, and backups to a file you keep.
 
 ## The fairness rules (the same for every child)
 
-- Stars earned are never taken away: a problem brings its agreed consequence, not a loss of
-  effort.
+- Points come off only through the "not well done" items you choose; a problem brings its
+  agreed consequence and takes nothing.
 - Consequences last the day; every day starts fresh.
 - When problems logged outnumber good moments noticed (fewer than 3 for 1 over a week), the app
   says so gently: noticing the good changes behaviour more than consequences do.

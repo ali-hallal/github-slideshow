@@ -42,7 +42,8 @@ class KidScreenActivity : BaseActivity() {
         val g = child.group(t)
         val style = g.screen
         val bal = Ledger.balance(family, child.id)
-        val todayEarned = Ledger.earnedOn(family, child.id, t)
+        // What today is worth: points won minus points lost.
+        val todayEarned = Ledger.netOn(family, child.id, t)
         val dark = style == AgeGroup.Screen.SPORTY
         val ink = if (dark) Color.WHITE else getColor(R.color.ink)
         val soft = if (dark) 0xCCFFFFFF.toInt() else getColor(R.color.ink_soft)
@@ -60,7 +61,7 @@ class KidScreenActivity : BaseActivity() {
         // Today: drawn stars to fill up for the little ones; a bar to the day's target for the others.
         root.add(text(getString(R.string.kid_today), 15f, soft, bold = true).apply { gravity = Gravity.CENTER }, top = 22)
         if (!g.numbers) {
-            val shown = todayEarned.coerceAtMost(g.dailyTarget)
+            val shown = todayEarned.coerceIn(0, g.dailyTarget)
             val stars = "★".repeat(shown) + "☆".repeat(g.dailyTarget - shown) + if (todayEarned > g.dailyTarget) "  +" + (todayEarned - g.dailyTarget) else ""
             root.add(text(stars, 44f, 0xFFFFB300.toInt()).apply { gravity = Gravity.CENTER; setShadowLayer(4f, 0f, 2f, 0x55000000) })
         } else {
@@ -68,8 +69,8 @@ class KidScreenActivity : BaseActivity() {
             root.add(bar(todayEarned.toFloat() / g.dailyTarget, if (dark) 0xFF4FC3F7.toInt() else 0xFFFFB300.toInt(), dark), top = 6)
         }
 
-        // The rocket to colour in (teenagers get a calm page without it).
-        if (style != AgeGroup.Screen.CALM) {
+        // The rocket to colour in.
+        run {
             root.add(text(getString(R.string.rocket_title), 15f, soft, bold = true).apply { gravity = Gravity.CENTER }, top = 22)
             val caption = text("", 16f, ink, bold = true).apply { gravity = Gravity.CENTER }
             val rocket = RocketView(this)
@@ -114,7 +115,7 @@ class KidScreenActivity : BaseActivity() {
         // Their stars or points, and the goal.
         val total = card(if (dark) 0x22FFFFFF else 0xCCFFFFFF.toInt()).apply { gravity = Gravity.CENTER_HORIZONTAL }
         total.add(text(getString(if (g.unit == AgeGroup.Unit.STARS) R.string.kid_stars else R.string.kid_points), 15f, soft, bold = true).apply { gravity = Gravity.CENTER })
-        total.add(text((if (g.unit == AgeGroup.Unit.STARS) "★ " else "") + bal, 52f, ink, bold = true).apply { gravity = Gravity.CENTER })
+        total.add(text((if (g.unit == AgeGroup.Unit.STARS) "★ " else "") + bal, 52f, if (bal < 0) 0xFFE53935.toInt() else ink, bold = true).apply { gravity = Gravity.CENTER })
         family.rewards.firstOrNull { it.id == child.goalRewardId }?.let { goal ->
             total.add(text("🎯  " + goal.emoji + " " + goal.name, 18f, ink, bold = true).apply { gravity = Gravity.CENTER }, top = 8)
             total.add(bar(bal.toFloat() / goal.cost, child.colour, dark), top = 6)
@@ -149,15 +150,18 @@ class KidScreenActivity : BaseActivity() {
 
         // The page fills the screen behind the status bar (hiding the bars makes Android cover the
         // top of the page with a notice the first time).
-        val frame = FrameLayout(this).apply { background = bg }
+        // The page's colour goes right to the screen's edges (behind the status and navigation
+        // bars), with light bar icons on the dark page and dark ones elsewhere.
+        val frame = FrameLayout(this)
         frame.addView(scrolling(root))
         frame.padForBars()
+        window.setBackgroundDrawable(bg)
+        window.decorView.background = bg
         window.statusBarColor = Color.TRANSPARENT
         window.navigationBarColor = Color.TRANSPARENT
-        window.insetsController?.setSystemBarsAppearance(
-            if (dark) 0 else android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS,
-            android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS)
         setContentView(frame)
+        val lightBars = android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+        window.insetsController?.setSystemBarsAppearance(if (dark) 0 else lightBars, lightBars)
     }
 
     private fun bar(p: Float, colour: Int, dark: Boolean) = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {

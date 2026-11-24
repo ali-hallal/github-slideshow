@@ -89,7 +89,9 @@ class ChildActivity : BaseActivity() {
         val who = column()
         who.add(text(child.name, 24f, getColor(R.color.ink), bold = true))
         who.add(text(getString(R.string.age_years, child.age(t)) + " · " + groupName(g), 13f, getColor(R.color.ink)))
-        who.add(text("★ " + getString(R.string.balance, bal, unitWord(g, bal)) + "   ·   " + getString(R.string.today_earned, Ledger.earnedOn(family, child.id, t)), 16f, getColor(R.color.ink), bold = true), top = 4)
+        val net = Ledger.netOn(family, child.id, t)
+        who.add(text("★ " + getString(R.string.balance, bal, unitWord(g, bal)) + "   ·   " + getString(R.string.today_earned, net),
+            16f, if (bal < 0) getColor(R.color.problem) else getColor(R.color.ink), bold = true), top = 4)
         val streak = Ledger.streak(family, child.id, t)
         if (streak >= 2) who.add(text("🔥 " + getString(R.string.streak, streak), 14f, getColor(R.color.ink)))
         top.addView(who, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
@@ -113,10 +115,11 @@ class ChildActivity : BaseActivity() {
             for (e in today) addView(text(e.emoji + "  " + e.label + " → " + e.note, 14f))
         }, top = 10)
         if (family.entriesOf(child.id).size < 3) notes.add(card(0xFFE8F1FB.toInt()).apply { addView(text("ℹ️ " + tip(g), 14f)) }, top = 10)
+        weekCard(g)?.let { notes.add(it, top = 10) }
 
         // Tabs.
         tabs.removeAllViews()
-        val names = listOf(getString(R.string.tab_good), problemsTab(g), rewardsTab(g), getString(R.string.tab_history))
+        val names = listOf(getString(R.string.tab_good), getString(R.string.tab_not_good), problemsTab(g), rewardsTab(g), getString(R.string.tab_history))
         names.forEachIndexed { i, n ->
             val on = i == tab
             tabs.addView(text(n, 15f, if (on) Color.WHITE else getColor(R.color.ink), bold = true).apply {
@@ -128,8 +131,9 @@ class ChildActivity : BaseActivity() {
         content.removeAllViews()
         when (tab) {
             0 -> goodTab(g)
-            1 -> problemTab()
-            2 -> rewardTab(g, bal)
+            1 -> notGoodTab(g)
+            2 -> problemTab()
+            3 -> rewardTab(g, bal)
             else -> historyTab(g)
         }
     }
@@ -176,6 +180,46 @@ class ChildActivity : BaseActivity() {
         content.add(gr)
     }
 
+    /** Not well done: each tap takes its points off (with Undo, as for the good ones). */
+    private fun notGoodTab(g: AgeGroup) {
+        val gr = grid()
+        for (b in family.behavioursOf(child.id, Kind.NOT_GOOD)) {
+            gr.put(tile(b.emoji, b.name, "−${b.value} ${unitWord(g, b.value)}", 0xFFFFF4F1.toInt(), getColor(R.color.problem), click = {
+                val e = Ledger.lose(family, b, System.currentTimeMillis(), today())
+                save()
+                showUndo(e, g)
+                refresh()
+            }, hold = { behaviourEditor(child, Kind.NOT_GOOD, b) { refresh() } }))
+        }
+        gr.put(tile("＋", getString(R.string.add), "", 0x14000000, click = { behaviourEditor(child, Kind.NOT_GOOD, null) { refresh() } }, hold = null))
+        content.add(gr)
+    }
+
+    /** The week for the parents: points, good moments and problems against the week before, the best day, the most noticed. */
+    private fun weekCard(g: AgeGroup): View? {
+        val t = today()
+        val w = Ledger.weekSummary(family, child.id, t)
+        if (w.good + w.problems + w.goodBefore + w.problemsBefore == 0) return null
+        fun signed(n: Int) = if (n > 0) "+$n" else n.toString()
+        fun arrow(now: Int, before: Int, upIsGood: Boolean) = when {
+            now == before -> "→"
+            (now > before) == upIsGood -> "📈"
+            else -> "📉"
+        }
+        val c = card()
+        c.addView(text(getString(R.string.week_title), 13f, getColor(R.color.ink_soft), bold = true))
+        c.addView(text(arrow(w.net, w.netBefore, true) + "  " + getString(R.string.week_points, signed(w.net), unitWord(g, 2), signed(w.netBefore)), 14f))
+        c.addView(text(arrow(w.good, w.goodBefore, true) + "  " + getString(R.string.week_good, w.good, w.goodBefore), 14f))
+        c.addView(text(arrow(w.problems, w.problemsBefore, false) + "  " + getString(R.string.week_problems, w.problems, w.problemsBefore), 14f))
+        w.bestDay?.let { d ->
+            val name = java.time.LocalDate.of(d.year, d.month, d.dayOfMonth).dayOfWeek
+                .getDisplayName(java.time.format.TextStyle.FULL, resources.configuration.locales[0])
+            c.addView(text("🏆  " + getString(R.string.week_best, name, signed(w.bestDayNet), unitWord(g, 2)), 14f))
+        }
+        if (w.top != null) c.addView(text("💛  " + getString(R.string.week_top, w.topEmoji ?: "", w.top, w.topCount), 14f))
+        return c
+    }
+
     private fun askBonus(g: AgeGroup) {
         val picker = android.widget.NumberPicker(this).apply { minValue = 1; maxValue = g.maxValue * 2; value = maxOf(1, g.maxValue / 2) }
         AlertDialog.Builder(this).setTitle(R.string.bonus_title).setMessage(getString(R.string.how_many, unitWord(g, 2))).setView(picker)
@@ -188,7 +232,7 @@ class ChildActivity : BaseActivity() {
 
     private fun showUndo(e: Entry, g: AgeGroup) {
         lastEntry = e
-        undoText.text = getString(R.string.earned, e.amount, unitWord(g, e.amount), e.label)
+        undoText.text = getString(if (e.type == EntryType.LOST) R.string.lost else R.string.earned, e.amount, unitWord(g, e.amount), e.label)
         undoBar.visibility = View.VISIBLE
         undoBar.removeCallbacks(hideUndo)
         undoBar.postDelayed(hideUndo, 5000)
@@ -249,6 +293,7 @@ class ChildActivity : BaseActivity() {
             val (amount, colour) = when (e.type) {
                 EntryType.EARNED, EntryType.BONUS -> "+${e.amount}" to getColor(R.color.good)
                 EntryType.SPENT -> "−${e.amount}" to getColor(R.color.ink_soft)
+                EntryType.LOST -> "−${e.amount}" to getColor(R.color.problem)
                 EntryType.CHALLENGE -> "!" to getColor(R.color.problem)
             }
             r.addView(text(amount, 17f, colour, bold = true))

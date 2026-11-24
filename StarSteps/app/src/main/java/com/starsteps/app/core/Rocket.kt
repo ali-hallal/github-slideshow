@@ -18,7 +18,7 @@ object Rocket {
     fun mood(f: Family, child: Long, day: Day): Mood {
         val today = f.entriesOf(child).filter { it.day == day }
         val good = today.count { it.type == EntryType.EARNED || it.type == EntryType.BONUS }
-        val problems = today.count { it.type == EntryType.CHALLENGE }
+        val problems = today.count { it.type == EntryType.CHALLENGE || it.type == EntryType.LOST }
         return when {
             good == 0 && problems == 0 -> Mood.NONE
             problems == 0 -> Mood.GREEN
@@ -31,7 +31,8 @@ object Rocket {
     /** How many parts may be coloured today: in proportion to what was earned towards the day's target. */
     fun allowed(f: Family, c: Child, day: Day): Int {
         val target = c.group(day).dailyTarget.coerceAtLeast(1)
-        val earned = Ledger.earnedOn(f, c.id, day)
+        // What the day is worth: points lost take paint away too.
+        val earned = Ledger.netOn(f, c.id, day)
         if (earned <= 0) return 0
         return ((earned * PARTS + target - 1) / target).coerceIn(1, PARTS)
     }

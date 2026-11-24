@@ -35,6 +35,26 @@ class SettingsActivity : BaseActivity() {
         root.add(text(getString(R.string.pin_hint), 13f, getColor(R.color.ink_soft)))
         root.add(pill(getString(if (family.settings.pin.isEmpty()) R.string.pin_none else R.string.pin_set) + "  ›", 0x14000000, getColor(R.color.ink)) { askPin() }, top = 8)
 
+        root.add(text(getString(R.string.reminder_title), 14f, getColor(R.color.ink_soft), bold = true), top = 22)
+        root.add(text(getString(R.string.reminder_hint), 13f, getColor(R.color.ink_soft)))
+        val s = family.settings
+        val at = String.format(java.util.Locale.US, "%02d:%02d", s.reminderMinutes / 60, s.reminderMinutes % 60)
+        val remRow = row()
+        for ((on, label) in listOf(false to getString(R.string.reminder_off), true to getString(R.string.reminder_at, at))) {
+            val lit = s.reminder == on
+            remRow.addView(text(label, 15f, if (lit) android.graphics.Color.WHITE else getColor(R.color.ink), bold = true).apply {
+                background = rounded(if (lit) getColor(R.color.icon_bg) else 0x14000000, 20f)
+                setPadding(dpi(14), dpi(9), dpi(14), dpi(9))
+                setOnClickListener {
+                    if (!on) { s.reminder = false; save(); Reminder.schedule(this@SettingsActivity); recreate() }
+                    else android.app.TimePickerDialog(this@SettingsActivity, { _, h, m ->
+                        s.reminder = true; s.reminderMinutes = h * 60 + m; save(); Reminder.schedule(this@SettingsActivity); recreate()
+                    }, s.reminderMinutes / 60, s.reminderMinutes % 60, android.text.format.DateFormat.is24HourFormat(this@SettingsActivity)).show()
+                }
+            }, android.widget.LinearLayout.LayoutParams(android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginEnd = dpi(8) })
+        }
+        root.add(remRow, top = 8)
+
         root.add(pill("💾  " + getString(R.string.backup)) {
             startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("application/json")
                 .putExtra(Intent.EXTRA_TITLE, "starsteps-backup-${today()}.json"), BACKUP)

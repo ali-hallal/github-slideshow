@@ -57,11 +57,12 @@ data class Child(
     fun group(today: Day) = AgeGroup.of(age(today))
 }
 
-enum class Kind { GOOD, CHALLENGE }
+enum class Kind { GOOD, NOT_GOOD, CHALLENGE }
 
 /**
- * Something the parents want to see more of ([Kind.GOOD], worth [value] stars or points), or
- * a problem behaviour ([Kind.CHALLENGE]) with the [consequence] agreed in advance.
+ * Something the parents want to see more of ([Kind.GOOD], worth [value] stars or points),
+ * something that costs points ([Kind.NOT_GOOD], [value] taken off), or a problem behaviour
+ * ([Kind.CHALLENGE]) with the [consequence] agreed in advance (and no points taken).
  */
 data class Behaviour(
     val id: Long,
@@ -75,7 +76,7 @@ data class Behaviour(
 
 data class Reward(val id: Long, val childId: Long, var name: String, var emoji: String, var cost: Int)
 
-enum class EntryType { EARNED, CHALLENGE, SPENT, BONUS }
+enum class EntryType { EARNED, LOST, CHALLENGE, SPENT, BONUS }
 
 /** Something that happened: stars earned, a reward bought, a problem with its consequence. */
 data class Entry(
@@ -89,7 +90,7 @@ data class Entry(
     val refId: Long?,
     val label: String,
     val emoji: String,
-    /** Stars or points: earned (+) or spent (+, taken off the balance). 0 for challenges. */
+    /** Stars or points: earned, lost or spent (always positive; the type says which way). 0 for challenges. */
     val amount: Int,
     val note: String = "",
 )
@@ -99,6 +100,9 @@ data class Settings(
     var pin: String = "",
     /** "en", "fr", or "" for the phone's language. */
     var language: String = "",
+    /** The evening reminder to note the day: on, and its time (minutes after midnight). */
+    var reminder: Boolean = true,
+    var reminderMinutes: Int = 19 * 60,
 )
 
 /** A calendar day, in the family's own time zone. */

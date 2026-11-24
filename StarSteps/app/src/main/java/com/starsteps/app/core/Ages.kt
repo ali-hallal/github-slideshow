@@ -42,6 +42,7 @@ enum class AgeGroup(
 object Presets {
     class Good(val key: String, val emoji: String, val value: Int)
     class Challenge(val key: String, val emoji: String, val consequenceKey: String)
+    class NotGood(val key: String, val emoji: String, val value: Int)
     class Prize(val key: String, val emoji: String, val cost: Int)
 
     fun good(g: AgeGroup): List<Good> = when (g) {
@@ -60,6 +61,25 @@ object Presets {
         AgeGroup.TEEN -> listOf(
             Good("homework", "📚", 8), Good("chores", "🧺", 6), Good("on_time", "⏰", 5),
             Good("sport", "⚽", 5), Good("helped", "🤝", 5), Good("screen_off", "📵", 6), Good("respect", "🗣️", 5),
+        )
+    }
+
+    /** Things that cost points: kept smaller than the good ones, so a good day always outweighs a slip. */
+    fun notGood(g: AgeGroup): List<NotGood> = when (g) {
+        AgeGroup.LITTLE -> listOf(
+            NotGood("whining", "😩", 1), NotGood("no_tidy", "🧸", 1), NotGood("shouting", "📢", 1),
+        )
+        AgeGroup.CHILD -> listOf(
+            NotGood("shouting", "📢", 1), NotGood("no_tidy", "🧹", 1), NotGood("not_listening", "👂", 1),
+            NotGood("rude", "😤", 2), NotGood("teasing", "😜", 2),
+        )
+        AgeGroup.PRETEEN -> listOf(
+            NotGood("no_homework", "📚", 3), NotGood("no_chores", "🧺", 2), NotGood("rude", "😤", 3),
+            NotGood("screen_over", "📱", 3), NotGood("teasing", "😜", 2),
+        )
+        AgeGroup.TEEN -> listOf(
+            NotGood("no_homework", "📚", 5), NotGood("no_chores", "🧺", 4), NotGood("rude", "😤", 5),
+            NotGood("late", "⏰", 5), NotGood("screen_over", "📱", 4),
         )
     }
 
@@ -105,6 +125,7 @@ object Presets {
         f.children += child
         val g = child.group(today)
         for (p in good(g)) f.behaviours += Behaviour(f.newId(), child.id, text("good_" + p.key), p.emoji, Kind.GOOD, value = p.value)
+        for (p in notGood(g)) f.behaviours += Behaviour(f.newId(), child.id, text("notgood_" + p.key), p.emoji, Kind.NOT_GOOD, value = p.value)
         for (p in challenges(g)) f.behaviours += Behaviour(f.newId(), child.id, text("challenge_" + p.key), p.emoji, Kind.CHALLENGE, consequence = text("consequence_" + p.consequenceKey))
         for (p in prizes(g)) f.rewards += Reward(f.newId(), child.id, text("prize_" + p.key), p.emoji, p.cost)
         // Saving towards the middle reward to begin with.
@@ -114,7 +135,7 @@ object Presets {
 
     /** All text keys the presets use (the app's translations must have every one). */
     fun allKeys(): Set<String> = AgeGroup.values().flatMap { g ->
-        good(g).map { "good_" + it.key } + challenges(g).flatMap { listOf("challenge_" + it.key, "consequence_" + it.consequenceKey) } +
+        good(g).map { "good_" + it.key } + notGood(g).map { "notgood_" + it.key } + challenges(g).flatMap { listOf("challenge_" + it.key, "consequence_" + it.consequenceKey) } +
             prizes(g).map { "prize_" + it.key }
     }.toSet()
 }

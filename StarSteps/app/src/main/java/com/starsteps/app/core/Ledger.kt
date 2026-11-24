@@ -3,12 +3,14 @@ package com.starsteps.app.core
 /**
  * The rules, kept the same for every child, so that the app is fair:
  *
- * - Stars earned are never taken away. A problem behaviour brings its agreed consequence, not a
- *   loss of what was earned: effort always counts.
+ * - Points come off only through the "not well done" items the parents chose (each worth a
+ *   set amount, smaller than the good ones); a problem behaviour brings its agreed consequence
+ *   and takes nothing.
  * - Consequences last the day they happen; every day starts fresh.
- * - The balance is what was earned minus what was spent on rewards, never below zero.
- * - Parents are told when the problems logged outnumber the praise: about four good moments
- *   noticed for each problem is what helps children change.
+ * - The balance is what was earned, minus what was lost and what was spent on rewards. It can
+ *   go below zero; rewards can only be bought from a positive balance.
+ * - Parents are told when problems and "not well done" outnumber the praise: about four good
+ *   moments noticed for each problem is what helps children change.
  */
 object Ledger {
     /** Good moments noticed per problem logged, below which parents get a gentle hint. */
@@ -18,11 +20,24 @@ object Ledger {
         var b = 0
         for (e in f.entriesOf(child)) when (e.type) {
             EntryType.EARNED, EntryType.BONUS -> b += e.amount
-            EntryType.SPENT -> b -= e.amount
+            EntryType.SPENT, EntryType.LOST -> b -= e.amount
             EntryType.CHALLENGE -> Unit
         }
-        return b.coerceAtLeast(0)
+        return b
     }
+
+    /** Points won minus points lost on [day] (what the day was worth; spending doesn't count). */
+    fun netOn(f: Family, child: Long, day: Day) = f.entriesOf(child).filter { it.day == day }.sumOf {
+        when (it.type) {
+            EntryType.EARNED, EntryType.BONUS -> it.amount
+            EntryType.LOST -> -it.amount
+            else -> 0
+        }
+    }
+
+    /** Points lost on [day]. */
+    fun lostOn(f: Family, child: Long, day: Day) =
+        f.entriesOf(child).filter { it.day == day && it.type == EntryType.LOST }.sumOf { it.amount }
 
     fun earnedOn(f: Family, child: Long, day: Day) =
         f.entriesOf(child).filter { it.day == day && (it.type == EntryType.EARNED || it.type == EntryType.BONUS) }.sumOf { it.amount }
@@ -39,6 +54,14 @@ object Ledger {
 
     fun bonus(f: Family, child: Long, amount: Int, label: String, time: Long, day: Day): Entry {
         val e = Entry(f.newId(), child, time, day, EntryType.BONUS, null, label, "🎉", amount.coerceAtLeast(1))
+        f.entries += e
+        return e
+    }
+
+    /** Something not well done: its points come off the balance. */
+    fun lose(f: Family, b: Behaviour, time: Long, day: Day, note: String = ""): Entry {
+        require(b.kind == Kind.NOT_GOOD)
+        val e = Entry(f.newId(), b.childId, time, day, EntryType.LOST, b.id, b.name, b.emoji, b.value.coerceAtLeast(1), note)
         f.entries += e
         return e
     }
@@ -84,11 +107,39 @@ object Ledger {
     fun mix(f: Family, child: Long, today: Day, days: Int = 7): Mix {
         val from = today.plus(-(days - 1))
         val recent = f.entriesOf(child).filter { it.day >= from && it.day <= today }
-        return Mix(recent.count { it.type == EntryType.EARNED || it.type == EntryType.BONUS }, recent.count { it.type == EntryType.CHALLENGE })
+        return Mix(recent.count { it.type == EntryType.EARNED || it.type == EntryType.BONUS },
+            recent.count { it.type == EntryType.CHALLENGE || it.type == EntryType.LOST })
     }
 
-    /** Stars earned on each of the last [days] days, oldest first (for the week chart). */
-    fun week(f: Family, child: Long, today: Day, days: Int = 7) = (days - 1 downTo 0).map { earnedOn(f, child, today.plus(-it)) }
+    /** What each of the last [days] days was worth (won minus lost), oldest first (for the week chart). */
+    fun week(f: Family, child: Long, today: Day, days: Int = 7) = (days - 1 downTo 0).map { netOn(f, child, today.plus(-it)) }
+
+    /** The last seven days against the seven before, for the parents. */
+    class WeekSummary(
+        val net: Int, val netBefore: Int,
+        val good: Int, val goodBefore: Int,
+        val problems: Int, val problemsBefore: Int,
+        /** The best day of the week and what it was worth (null if nothing was earned). */
+        val bestDay: Day?, val bestDayNet: Int,
+        /** The good behaviour noticed most often this week, and how often. */
+        val top: String?, val topEmoji: String?, val topCount: Int,
+    )
+
+    fun weekSummary(f: Family, child: Long, today: Day): WeekSummary {
+        val from = today.plus(-6)
+        val before = today.plus(-13)
+        val all = f.entriesOf(child)
+        val week = all.filter { it.day >= from && it.day <= today }
+        val prev = all.filter { it.day >= before && it.day < from }
+        fun net(l: List<Entry>) = l.sumOf { when (it.type) { EntryType.EARNED, EntryType.BONUS -> it.amount; EntryType.LOST -> -it.amount; else -> 0 } }
+        fun good(l: List<Entry>) = l.count { it.type == EntryType.EARNED || it.type == EntryType.BONUS }
+        fun problems(l: List<Entry>) = l.count { it.type == EntryType.CHALLENGE || it.type == EntryType.LOST }
+        val days = (0..6).map { today.plus(-it) }
+        val best = days.maxByOrNull { netOn(f, child, it) }?.takeIf { netOn(f, child, it) > 0 }
+        val top = week.filter { it.type == EntryType.EARNED }.groupBy { it.label }.maxByOrNull { it.value.size }
+        return WeekSummary(net(week), net(prev), good(week), good(prev), problems(week), problems(prev),
+            best, best?.let { netOn(f, child, it) } ?: 0, top?.key, top?.value?.first()?.emoji, top?.value?.size ?: 0)
+    }
 
     /** How far the child is towards their goal reward (0..1), or null without one. */
     fun goalProgress(f: Family, c: Child): Float? {

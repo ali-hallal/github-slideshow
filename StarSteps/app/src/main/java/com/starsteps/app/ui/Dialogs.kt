@@ -152,7 +152,7 @@ fun BaseActivity.behaviourEditor(child: Child, kind: Kind, existing: Behaviour?,
     val form = column(0)
     val name = EditText(this).apply { hint = getString(R.string.item_name); setText(existing?.name ?: ""); inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES }
     form.addView(name)
-    var emoji = existing?.emoji ?: if (kind == Kind.GOOD) "⭐" else "✋"
+    var emoji = existing?.emoji ?: when (kind) { Kind.GOOD -> "⭐"; Kind.NOT_GOOD -> "😤"; Kind.CHALLENGE -> "✋" }
     form.addView(label(getString(R.string.item_emoji)))
     form.addView(choices(EMOJIS, emoji, { e, v -> v.text = e }) { emoji = it })
     val value = numberField(existing?.value ?: 1)
@@ -160,12 +160,15 @@ fun BaseActivity.behaviourEditor(child: Child, kind: Kind, existing: Behaviour?,
     if (kind == Kind.GOOD) {
         form.addView(label(getString(R.string.item_value, unitWord(g, 2))))
         form.addView(value)
+    } else if (kind == Kind.NOT_GOOD) {
+        form.addView(label(getString(R.string.item_loses, unitWord(g, 2))))
+        form.addView(value)
     } else {
         form.addView(label(getString(R.string.item_consequence)))
         form.addView(consequence)
     }
     val b = AlertDialog.Builder(this)
-        .setTitle(existing?.name ?: getString(if (kind == Kind.GOOD) R.string.good_new else R.string.problem_new))
+        .setTitle(existing?.name ?: getString(when (kind) { Kind.GOOD -> R.string.good_new; Kind.NOT_GOOD -> R.string.not_good_new; Kind.CHALLENGE -> R.string.problem_new }))
         .setView(scrolling(padded(form)))
         .setPositiveButton(R.string.save) { _, _ ->
             val n = name.text.toString().trim().ifEmpty { return@setPositiveButton }

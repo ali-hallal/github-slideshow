@@ -37,6 +37,16 @@ class MainActivity : BaseActivity() {
     override fun onResume() {
         super.onResume()
         refresh()
+        Reminder.schedule(this)
+        // The evening reminder needs leave to notify (asked once, once there is a child to remind about).
+        if (family.settings.reminder && family.children.isNotEmpty() && android.os.Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            val prefs = getSharedPreferences("starsteps", MODE_PRIVATE)
+            if (!prefs.getBoolean("askedNotify", false)) {
+                prefs.edit().putBoolean("askedNotify", true).apply()
+                requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
+            }
+        }
     }
 
     private fun open(c: Child) = startActivity(Intent(this, ChildActivity::class.java).putExtra("child", c.id))
@@ -60,8 +70,9 @@ class MainActivity : BaseActivity() {
             val info = column().apply { setPadding(dpi(14), 0, 0, 0) }
             info.add(text(c.name, 20f, bold = true))
             info.add(text(groupName(g), 13f, getColor(R.color.ink_soft)))
-            val earned = Ledger.earnedOn(family, c.id, t)
-            info.add(text("★ " + getString(R.string.balance, bal, unitWord(g, bal)) + "   ·   " + getString(R.string.today_earned, earned), 15f, getColor(R.color.ink)), top = 4)
+            val net = Ledger.netOn(family, c.id, t)
+            info.add(text("★ " + getString(R.string.balance, bal, unitWord(g, bal)) + "   ·   " + getString(R.string.today_earned, net), 15f,
+                if (bal < 0) getColor(R.color.problem) else getColor(R.color.ink)), top = 4)
             Ledger.goalProgress(family, c)?.let { p ->
                 val bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
                     max = 100; progress = (p * 100).toInt()

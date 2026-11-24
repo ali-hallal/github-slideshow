@@ -39,7 +39,7 @@ class CoreTest {
     }
 
     @Test
-    fun earnedStarsAreNeverTakenAwayAndEveryDayStartsFresh() {
+    fun problemsBringTheirConsequenceAndEveryDayStartsFresh() {
         val (f, c) = family()
         val homework = f.behavioursOf(c.id, Kind.GOOD).first { it.name == "[good_homework]" }
         val hitting = f.behavioursOf(c.id, Kind.CHALLENGE).first()
@@ -146,5 +146,56 @@ class CoreTest {
         assertEquals(0, Rocket.coloured(c, today.plus(1)))
         // Kept with the rest.
         assertEquals(c.rocketParts, Storage.decode(Storage.encode(f)).children[0].rocketParts)
+    }
+
+    @Test
+    fun notWellDoneTakesPointsOffEvenBelowZero() {
+        val (f, c) = family(7)
+        val notGood = f.behavioursOf(c.id, Kind.NOT_GOOD)
+        assertEquals(Presets.notGood(AgeGroup.CHILD).size, notGood.size)
+        // Smaller than the good ones: a good day outweighs a slip.
+        assertTrue(Presets.notGood(AgeGroup.CHILD).maxOf { it.value } <= Presets.good(AgeGroup.CHILD).maxOf { it.value })
+        val rude = notGood.first { it.name == "[notgood_rude]" } // 2 points
+        val homework = f.behavioursOf(c.id, Kind.GOOD).first { it.name == "[good_homework]" } // 3
+        Ledger.lose(f, rude, 0, today)
+        assertEquals(-2, Ledger.balance(f, c.id))
+        assertEquals(-2, Ledger.netOn(f, c.id, today))
+        // Nothing can be bought below zero.
+        assertNull(Ledger.spend(f, f.rewardsOf(c.id).minBy { it.cost }, 0, today))
+        Ledger.earn(f, homework, 0, today)
+        assertEquals(1, Ledger.balance(f, c.id))
+        assertEquals(3, Ledger.earnedOn(f, c.id, today))
+        assertEquals(2, Ledger.lostOn(f, c.id, today))
+        // It counts as a problem for the day's colour and the praise hint.
+        assertEquals(Rocket.Mood.ORANGE, Rocket.mood(f, c.id, today))
+        assertEquals(1, Ledger.mix(f, c.id, today).problems)
+        // The rocket's paint follows what the day is worth: 1 of 8 stars, 1 part.
+        assertEquals(1, Rocket.allowed(f, c, today))
+        // Kept with the rest.
+        assertEquals(1, Ledger.balance(Storage.decode(Storage.encode(f)), c.id))
+    }
+
+    @Test
+    fun theWeekForTheParents() {
+        val (f, c) = family(10)
+        val good = f.behavioursOf(c.id, Kind.GOOD)
+        val bad = f.behavioursOf(c.id, Kind.NOT_GOOD).first()
+        // Last week: a little; this week: more, and the best day two days ago.
+        Ledger.earn(f, good[0], 0, today.plus(-9))
+        Ledger.lose(f, bad, 0, today.plus(-8))
+        Ledger.lose(f, bad, 0, today.plus(-8))
+        repeat(3) { Ledger.earn(f, good[0], 0, today.plus(-2)) }
+        Ledger.earn(f, good[1], 0, today)
+        val w = Ledger.weekSummary(f, c.id, today)
+        assertEquals(3 * good[0].value + good[1].value, w.net)
+        assertEquals(good[0].value - 2 * bad.value, w.netBefore)
+        assertEquals(4, w.good); assertEquals(1, w.goodBefore)
+        assertEquals(0, w.problems); assertEquals(2, w.problemsBefore)
+        assertEquals(today.plus(-2), w.bestDay)
+        assertEquals(good[0].name, w.top); assertEquals(3, w.topCount)
+        // The settings survive saving.
+        f.settings.reminder = false; f.settings.reminderMinutes = 20 * 60 + 30
+        val back = Storage.decode(Storage.encode(f)).settings
+        assertFalse(back.reminder); assertEquals(20 * 60 + 30, back.reminderMinutes)
     }
 }

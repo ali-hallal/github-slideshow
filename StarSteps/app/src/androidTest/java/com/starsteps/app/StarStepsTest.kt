@@ -41,7 +41,8 @@ class StarStepsTest {
 
     @Before
     fun startEmpty() {
-        context.getSharedPreferences("starsteps", Context.MODE_PRIVATE).edit().putString("language", "en").commit()
+        // The notification permission is not asked here (its system dialog would sit over the screens).
+        context.getSharedPreferences("starsteps", Context.MODE_PRIVATE).edit().putString("language", "en").putBoolean("askedNotify", true).commit()
         InstrumentationRegistry.getInstrumentation().runOnMainSync { Store.reset(context); Store.get(context).settings.language = "en"; Store.save(context) }
     }
 
@@ -59,6 +60,11 @@ class StarStepsTest {
             onView(withContentDescription("Homework done")).perform(scrollTo(), click())
             onView(withContentDescription("Tidied room")).perform(scrollTo(), click())
             screen("04_earned_with_undo")
+            // Not well done: its points come off.
+            onView(withText("Not well done")).perform(click())
+            SystemClock.sleep(300)
+            onView(withContentDescription("Shouting")).perform(scrollTo(), click())
+            screen("04b_not_well_done")
             onView(withText("Problems")).perform(click())
             onView(withContentDescription("Hitting")).perform(scrollTo(), click())
             screen("05_consequence")
@@ -72,18 +78,20 @@ class StarStepsTest {
 
             val f = Store.get(context)
             val sam = f.children.single()
-            assertEquals(5, Ledger.balance(f, sam.id)) // 3 + 2; the problem took nothing away
+            assertEquals(4, Ledger.balance(f, sam.id)) // 3 + 2 − 1; the problem itself took nothing away
+            // The evening reminder would name nobody: Sam has things noted today.
+            assertTrue(com.starsteps.app.ui.Reminder.quiet(context).isEmpty())
             assertEquals(1, Ledger.consequencesToday(f, sam.id, today()).size)
 
             onView(withContentDescription("Show Sam")).perform(scrollTo(), click())
             SystemClock.sleep(800)
             screen("08_kid_screen_child")
-            // Sam colours his rocket: 5 of 8 stars give 5 parts; orange, after one problem.
+            // Sam colours his rocket: the day is worth 4 of 8 stars, so 4 parts; orange after a problem and a slip.
             onView(withContentDescription("Rocket")).perform(scrollTo())
             repeat(6) { InstrumentationRegistry.getInstrumentation().runOnMainSync { rocketOnScreen()?.paintNext() } }
             SystemClock.sleep(400)
             screen("09_rocket_coloured")
-            assertEquals(5, com.starsteps.app.core.Rocket.count(com.starsteps.app.core.Rocket.coloured(Store.get(context).children.single(), today())))
+            assertEquals(4, com.starsteps.app.core.Rocket.count(com.starsteps.app.core.Rocket.coloured(Store.get(context).children.single(), today())))
             onView(withContentDescription("Hold to go back")).perform(scrollTo(), longClick())
             SystemClock.sleep(500)
         }
@@ -130,6 +138,9 @@ class StarStepsTest {
         ActivityScenario.launch(MainActivity::class.java).use {
             SystemClock.sleep(500)
             screen("13_home_three_children")
+            onView(withContentDescription("Settings")).perform(click())
+            SystemClock.sleep(600)
+            screen("14_settings")
         }
     }
 
