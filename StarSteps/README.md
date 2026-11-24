@@ -35,6 +35,12 @@ adapts to each child's age. English and French. Nothing leaves the phone.
   before, the best day, the behaviour noticed most.
 - **Evening reminder** (19:00 by default, or off, in Settings): a notification naming the
   children with nothing noted yet that day.
+- **Both parents' phones in step**, over the home Wi-Fi, with no server and no account:
+  link them once (Settings → Link another phone on one, Join on the other; both show the same
+  6-digit code, which the parents check). Afterwards, whenever StarSteps is open on both on the
+  same Wi-Fi, each phone's changes reach the other: everything added on either is kept, the
+  later of two edits wins, and what is deleted on one is deleted on both. The data travels
+  encrypted with the family's own key (made at linking, never leaving the two phones).
 - **History** of everything, and backups to a file you keep.
 
 ## The fairness rules (the same for every child)

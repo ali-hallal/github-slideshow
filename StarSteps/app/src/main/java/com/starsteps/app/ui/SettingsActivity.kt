@@ -55,6 +55,22 @@ class SettingsActivity : BaseActivity() {
         }
         root.add(remRow, top = 8)
 
+        // The other parent's phone.
+        root.add(text(getString(R.string.link_title), 14f, getColor(R.color.ink_soft), bold = true), top = 22)
+        root.add(text(getString(R.string.link_hint), 13f, getColor(R.color.ink_soft)))
+        if (PhoneLink.linked(this)) {
+            val last = PhoneLink.lastSync(this)
+            root.add(text("✔ " + getString(R.string.link_linked), 15f, getColor(R.color.good), bold = true), top = 8)
+            root.add(text(if (last == 0L) getString(R.string.link_never) else getString(R.string.link_last, whenText(last)), 13f, getColor(R.color.ink_soft)))
+            root.add(pill(getString(R.string.link_sync)) { syncNow() }, top = 8)
+            root.add(pill(getString(R.string.link_unlink), 0x14000000, getColor(R.color.ink)) {
+                confirm(getString(R.string.link_unlink), getString(R.string.link_unlink_confirm)) { PhoneLink.unlink(this); recreate() }
+            }, top = 8)
+        } else {
+            root.add(pill(getString(R.string.link_host)) { hostLink() }, top = 8)
+            root.add(pill(getString(R.string.link_join), 0x14000000, getColor(R.color.ink)) { joinLink() }, top = 8)
+        }
+
         root.add(pill("💾  " + getString(R.string.backup)) {
             startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("application/json")
                 .putExtra(Intent.EXTRA_TITLE, "starsteps-backup-${today()}.json"), BACKUP)
@@ -64,6 +80,71 @@ class SettingsActivity : BaseActivity() {
         }, top = 10)
         root.add(text(getString(R.string.about), 13f, getColor(R.color.ink_soft)), top = 26)
         setContentView(FrameLayout(this).apply { addView(scrolling(root)) }.padForBars())
+    }
+
+    private fun whenText(t: Long) = android.text.format.DateFormat.getMediumDateFormat(this).format(java.util.Date(t)) + " " +
+        android.text.format.DateFormat.getTimeFormat(this).format(java.util.Date(t))
+
+    private fun syncNow() {
+        Toast.makeText(this, R.string.link_syncing, Toast.LENGTH_SHORT).show()
+        PhoneLink.syncNow(this) { ok ->
+            Toast.makeText(this, if (ok) R.string.link_synced else R.string.link_not_found, Toast.LENGTH_LONG).show()
+            if (ok) recreate()
+        }
+    }
+
+    /** This phone has the family: it waits for the other to join, then both check the code. */
+    private fun hostLink() {
+        val wait = AlertDialog.Builder(this).setTitle(R.string.link_host).setMessage(R.string.link_waiting)
+            .setNegativeButton(R.string.cancel) { _, _ -> PhoneLink.stopHosting(this) }
+            .setOnCancelListener { PhoneLink.stopHosting(this) }
+            .show()
+        PhoneLink.host(this) { code, answer ->
+            wait.dismiss()
+            AlertDialog.Builder(this).setTitle(R.string.link_code_title).setMessage(bigCode(code)).setCancelable(false)
+                .setPositiveButton(R.string.link_match) { _, _ ->
+                    answer(true)
+                    Toast.makeText(this, R.string.link_done, Toast.LENGTH_LONG).show()
+                    main.postDelayed({ recreate() }, 800)
+                }
+                .setNegativeButton(R.string.link_no_match) { _, _ -> answer(false); PhoneLink.stopHosting(this) }
+                .show()
+        }
+    }
+
+    private val main = android.os.Handler(android.os.Looper.getMainLooper())
+
+    private fun bigCode(code: String) = android.text.SpannableString(code.substring(0, 3) + " " + code.substring(3)).apply {
+        setSpan(android.text.style.RelativeSizeSpan(2.4f), 0, length, 0)
+        setSpan(android.text.style.StyleSpan(android.graphics.Typeface.BOLD), 0, length, 0)
+    }
+
+    /** This phone joins: it finds the waiting phone, both show the code, and it takes the family. */
+    private fun joinLink() {
+        confirm(getString(R.string.link_join), getString(R.string.link_join_warning)) {
+            val looking = AlertDialog.Builder(this).setTitle(R.string.link_join).setMessage(R.string.link_looking)
+                .setNegativeButton(R.string.cancel, null).show()
+            var codeDialog: AlertDialog? = null
+            PhoneLink.join(this, onCode = { code ->
+                looking.dismiss()
+                codeDialog = AlertDialog.Builder(this).setTitle(R.string.link_code_wait).setMessage(bigCode(code)).setCancelable(false).show()
+            }, onJoined = { joined ->
+                codeDialog?.dismiss()
+                looking.dismiss()
+                if (joined == null) { Toast.makeText(this, R.string.link_failed, Toast.LENGTH_LONG).show(); return@join }
+                AlertDialog.Builder(this).setTitle(R.string.link_code_title).setMessage(getString(R.string.link_join_warning)).setCancelable(false)
+                    .setPositiveButton(R.string.link_match) { _, _ ->
+                        PhoneLink.accept(this, joined)
+                        Toast.makeText(this, R.string.link_done, Toast.LENGTH_LONG).show()
+                        recreate()
+                    }
+                    .setNegativeButton(R.string.link_no_match) { _, _ -> Toast.makeText(this, R.string.link_failed, Toast.LENGTH_LONG).show() }
+                    .show()
+            }, onNone = {
+                looking.dismiss()
+                Toast.makeText(this, R.string.link_none, Toast.LENGTH_LONG).show()
+            })
+        }
     }
 
     private fun setLanguage(code: String) {

@@ -13,6 +13,8 @@ import com.starsteps.app.core.Ledger
 /** Home: every child at a glance (stars, today, the goal); tap one to note what happened. */
 class MainActivity : BaseActivity() {
     private lateinit var list: LinearLayout
+    private lateinit var status: android.widget.TextView
+    private val synced: () -> Unit = { refresh() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -26,6 +28,8 @@ class MainActivity : BaseActivity() {
         }
         top.addView(gear)
         root.add(top)
+        status = text("", 12f, getColor(R.color.ink_soft))
+        root.add(status)
         list = column()
         root.add(list, top = 12)
         root.add(pill("＋  " + getString(R.string.add_child), getColor(R.color.accent), getColor(R.color.ink)) {
@@ -34,8 +38,14 @@ class MainActivity : BaseActivity() {
         setContentView(FrameLayout(this).apply { addView(scrolling(root)) }.padForBars())
     }
 
+    override fun onPause() {
+        PhoneLink.unlisten(synced)
+        super.onPause()
+    }
+
     override fun onResume() {
         super.onResume()
+        PhoneLink.listen(synced)
         refresh()
         Reminder.schedule(this)
         // The evening reminder needs leave to notify (asked once, once there is a child to remind about).
@@ -52,6 +62,9 @@ class MainActivity : BaseActivity() {
     private fun open(c: Child) = startActivity(Intent(this, ChildActivity::class.java).putExtra("child", c.id))
 
     private fun refresh() {
+        val last = PhoneLink.lastSync(this)
+        status.text = if (PhoneLink.linked(this) && last > 0) getString(R.string.home_synced, android.text.format.DateFormat.getTimeFormat(this).format(java.util.Date(last))) else ""
+        status.visibility = if (status.text.isEmpty()) android.view.View.GONE else android.view.View.VISIBLE
         list.removeAllViews()
         val t = today()
         if (family.children.isEmpty()) {

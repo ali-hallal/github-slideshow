@@ -141,6 +141,11 @@ class StarStepsTest {
             onView(withContentDescription("Settings")).perform(click())
             SystemClock.sleep(600)
             screen("14_settings")
+            // Linking the other parent's phone: this one waits for it (nothing else on the emulator's network).
+            onView(withText(org.hamcrest.Matchers.containsString("Link another phone"))).perform(scrollTo(), click())
+            SystemClock.sleep(800)
+            screen("15_link_waiting")
+            onView(withText("Cancel")).perform(click())
         }
     }
 

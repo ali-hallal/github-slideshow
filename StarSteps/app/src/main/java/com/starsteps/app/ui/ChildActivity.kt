@@ -73,13 +73,22 @@ class ChildActivity : BaseActivity() {
         setContentView(frame.padForBars())
     }
 
+    private val synced: () -> Unit = { refresh() }
+
     override fun onResume() {
         super.onResume()
-        if (family.child(child.id) == null) { finish(); return }
+        PhoneLink.listen(synced)
         refresh()
     }
 
+    override fun onPause() {
+        PhoneLink.unlisten(synced)
+        super.onPause()
+    }
+
     private fun refresh() {
+        // After the other phone's changes came in, the family is a new one: find the child again.
+        child = family.child(child.id) ?: run { finish(); return }
         val t = today()
         val g = group
         val bal = Ledger.balance(family, child.id)

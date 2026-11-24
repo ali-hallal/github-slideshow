@@ -11,13 +11,28 @@ class Family(
     val entries: MutableList<Entry> = mutableListOf(),
     var settings: Settings = Settings(),
 ) {
+    /**
+     * For keeping two phones in step: when each thing was last changed (id → milliseconds), and
+     * when things were deleted. Kept up to date by [Changes.stamp] at every save.
+     */
+    val stamps: MutableMap<Long, Long> = HashMap()
+    val tombstones: MutableMap<Long, Long> = HashMap()
     private var lastId = 0L
 
-    /** A new id, unique in this family (and increasing, so later things sort after earlier ones). */
+    /**
+     * A new id, unique in this family, and unique across the family's phones too: the time in
+     * the top bits (so later things have larger ids) and a random part in the bottom ones.
+     */
     fun newId(): Long {
-        val all = children.map { it.id } + behaviours.map { it.id } + rewards.map { it.id } + entries.map { it.id }
-        lastId = maxOf(lastId, all.maxOrNull() ?: 0L) + 1
-        return lastId
+        val taken = HashSet<Long>()
+        children.mapTo(taken) { it.id }; behaviours.mapTo(taken) { it.id }; rewards.mapTo(taken) { it.id }; entries.mapTo(taken) { it.id }
+        taken += tombstones.keys
+        var id: Long
+        do {
+            id = maxOf((System.currentTimeMillis() shl 20) or kotlin.random.Random.nextLong(1L shl 20), lastId + 1, (taken.maxOrNull() ?: 0L) + 1)
+        } while (id in taken)
+        lastId = id
+        return id
     }
 
     fun child(id: Long) = children.firstOrNull { it.id == id }

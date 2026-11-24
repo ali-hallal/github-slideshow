@@ -143,14 +143,21 @@ object Storage {
         "version" to VERSION,
         "settings" to mapOf("pin" to f.settings.pin, "language" to f.settings.language,
             "reminder" to f.settings.reminder, "reminderMinutes" to f.settings.reminderMinutes),
-        "children" to f.children.map { mapOf("id" to it.id, "name" to it.name, "birthYear" to it.birthYear, "birthMonth" to it.birthMonth,
-            "avatar" to it.avatar, "colour" to it.colour, "goal" to it.goalRewardId, "rocketDay" to it.rocketDay?.toString(), "rocketParts" to it.rocketParts) },
-        "behaviours" to f.behaviours.map { mapOf("id" to it.id, "child" to it.childId, "name" to it.name, "emoji" to it.emoji,
-            "kind" to it.kind.name, "value" to it.value, "consequence" to it.consequence) },
-        "rewards" to f.rewards.map { mapOf("id" to it.id, "child" to it.childId, "name" to it.name, "emoji" to it.emoji, "cost" to it.cost) },
-        "entries" to f.entries.map { mapOf("id" to it.id, "child" to it.childId, "time" to it.time, "day" to it.day.toString(),
-            "type" to it.type.name, "ref" to it.refId, "label" to it.label, "emoji" to it.emoji, "amount" to it.amount, "note" to it.note) },
+        "children" to f.children.map { child(it) },
+        "behaviours" to f.behaviours.map { behaviour(it) },
+        "rewards" to f.rewards.map { reward(it) },
+        "entries" to f.entries.map { entry(it) },
+        "stamps" to f.stamps.entries.sortedBy { it.key }.map { listOf(it.key, it.value) },
+        "tombstones" to f.tombstones.entries.sortedBy { it.key }.map { listOf(it.key, it.value) },
     ))
+
+    fun child(it: Child) = mapOf("id" to it.id, "name" to it.name, "birthYear" to it.birthYear, "birthMonth" to it.birthMonth,
+        "avatar" to it.avatar, "colour" to it.colour, "goal" to it.goalRewardId, "rocketDay" to it.rocketDay?.toString(), "rocketParts" to it.rocketParts)
+    fun behaviour(it: Behaviour) = mapOf("id" to it.id, "child" to it.childId, "name" to it.name, "emoji" to it.emoji,
+        "kind" to it.kind.name, "value" to it.value, "consequence" to it.consequence)
+    fun reward(it: Reward) = mapOf("id" to it.id, "child" to it.childId, "name" to it.name, "emoji" to it.emoji, "cost" to it.cost)
+    fun entry(it: Entry) = mapOf("id" to it.id, "child" to it.childId, "time" to it.time, "day" to it.day.toString(),
+        "type" to it.type.name, "ref" to it.refId, "label" to it.label, "emoji" to it.emoji, "amount" to it.amount, "note" to it.note)
 
     @Suppress("UNCHECKED_CAST")
     fun decode(text: String): Family {
@@ -173,6 +180,8 @@ object Storage {
         for (m in list("rewards")) f.rewards += Reward(m.long("id"), m.long("child"), m.str("name"), m.str("emoji"), m.int("cost"))
         for (m in list("entries")) f.entries += Entry(m.long("id"), m.long("child"), m.long("time"), Day.parse(m.str("day")),
             EntryType.valueOf(m.str("type")), (m["ref"] as? Number)?.toLong(), m.str("label"), m.str("emoji"), m.int("amount"), m.str("note"))
+        for (p in (root["stamps"] as? List<List<Number>>).orEmpty()) f.stamps[p[0].toLong()] = p[1].toLong()
+        for (p in (root["tombstones"] as? List<List<Number>>).orEmpty()) f.tombstones[p[0].toLong()] = p[1].toLong()
         return f
     }
 }

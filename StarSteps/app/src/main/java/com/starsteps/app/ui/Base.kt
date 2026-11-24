@@ -27,6 +27,8 @@ import java.util.Locale
 object Store {
     private var family: Family? = null
     private var file: File? = null
+    /** The family as last saved, to see what changed (for keeping the parents' phones in step). */
+    private var snapshot: Map<Long, String> = emptyMap()
 
     fun get(c: Context): Family {
         family?.let { return it }
@@ -40,10 +42,26 @@ object Store {
             Family()
         }
         family = loaded
+        snapshot = com.starsteps.app.core.Changes.snapshot(loaded)
         return loaded
     }
 
     fun save(c: Context) {
+        val fam = family ?: return
+        snapshot = com.starsteps.app.core.Changes.stamp(fam, snapshot, System.currentTimeMillis())
+        write(c)
+        PhoneLink.changed(c)
+    }
+
+    /** The family merged with the other phone's: taken as it is (it carries its own change times). */
+    fun adopt(c: Context, merged: Family) {
+        get(c)
+        family = merged
+        snapshot = com.starsteps.app.core.Changes.snapshot(merged)
+        write(c)
+    }
+
+    private fun write(c: Context) {
         val fam = family ?: return
         val f = file ?: File(c.applicationContext.filesDir, "family.json")
         val tmp = File(f.parentFile, "family.json.tmp")
@@ -54,14 +72,17 @@ object Store {
 
     /** Replaces everything (a restored backup). */
     fun replace(c: Context, fam: Family) {
+        get(c)
         family = fam
         save(c)
     }
 
     /** For tests: start from nothing. */
     fun reset(c: Context) {
+        get(c)
         family = Family()
-        save(c)
+        snapshot = emptyMap()
+        write(c)
     }
 }
 
