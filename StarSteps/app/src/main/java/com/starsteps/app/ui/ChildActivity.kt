@@ -43,8 +43,9 @@ class ChildActivity : BaseActivity() {
         root.add(header)
         notes = column()
         root.add(notes)
-        tabs = row()
-        root.add(android.widget.HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(tabs) }, top = 14)
+        // Five tabs: in two rows, so all are always in view.
+        tabs = column()
+        root.add(tabs, top = 14)
         content = column()
         root.add(content, top = 10)
         root.add(text(getString(R.string.hold_hint), 12f, getColor(R.color.ink_soft)), top = 14)
@@ -120,14 +121,19 @@ class ChildActivity : BaseActivity() {
         // Tabs.
         tabs.removeAllViews()
         val names = listOf(getString(R.string.tab_good), getString(R.string.tab_not_good), problemsTab(g), rewardsTab(g), getString(R.string.tab_history))
+        val rows = listOf(row(), row())
         names.forEachIndexed { i, n ->
             val on = i == tab
-            tabs.addView(text(n, 15f, if (on) Color.WHITE else getColor(R.color.ink), bold = true).apply {
+            rows[if (i < 3) 0 else 1].addView(text(n, 14f, if (on) Color.WHITE else getColor(R.color.ink), bold = true).apply {
+                gravity = android.view.Gravity.CENTER
+                maxLines = 1
                 background = rounded(if (on) getColor(R.color.icon_bg) else 0x14000000, 20f)
-                setPadding(dpi(16), dpi(9), dpi(16), dpi(9))
+                setPadding(dpi(8), dpi(9), dpi(8), dpi(9))
                 setOnClickListener { tab = i; refresh() }
-            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginEnd = dpi(8) })
+            }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dpi(6) })
         }
+        tabs.add(rows[0])
+        tabs.add(rows[1], top = 6)
         content.removeAllViews()
         when (tab) {
             0 -> goodTab(g)
